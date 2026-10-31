@@ -25,7 +25,8 @@ export const TOOL_PROMPT = `You are connected to an external agent that executes
 Return ONLY one valid JSON object, without markdown fences and without any text outside JSON, with this exact shape:
 {"content":"text for the user, or an empty string","tool_calls":[{"name":"exact tool name","arguments":{}}]}
 Use an empty tool_calls array when answering without tools. To request a tool, put its name and arguments in tool_calls and STOP; the agent executes it and sends a tool result in the next user message. Never invent tool results. If a task needs the filesystem, call a tool instead of guessing. Never send an empty "content" unless you are calling a tool.
-"arguments" is always a JSON object: write file content into it as a properly escaped string (escape line breaks as \\n, escape quotes as \\").`
+"arguments" is always a JSON object: write file content into it as a properly escaped string (escape line breaks as \\n, escape quotes as \\").
+Never end a turn by describing what you are about to do: if you say "now I will check X", call that tool in the same turn. Use "tool_calls":[] only when the whole request is answered.`
 
 /** Appended as the last user message; see docs/PROTOCOL.md ("format reminder"). */
 export const REMINDER_FIRST_TURN =
@@ -45,9 +46,88 @@ export const RETRY_REMINDER =
 export const EMPTY_RETRY_REMINDER =
   'your last reply was an empty JSON object with no content. Put the actual answer text in "content" now (or call a tool in tool_calls if you still need one). Never send an empty content unless you are calling a tool.'
 
+/**
+ * Sent when the model described the next step but did not call a tool, which is
+ * how a session "stops by itself" halfway through a task.
+ */
+/** Sent when the last tool output looks like a failure and the model just answered. */
+export const FAILURE_RETRY_REMINDER =
+  'a previous tool output looks like it failed (missing file, error or non-zero exit). Finish the job: fix it and call the tool for it now in tool_calls. Repeat your answer only if the failure is already handled.'
+
+export const PLAN_RETRY_REMINDER =
+  'your last reply only described the next step. ACT NOW: put the tool call(s) for that step in tool_calls and stop. Send "tool_calls":[] only when the whole request is finished.'
+
+/**
+ * A tool output that looks like a failure ("No such file", a traceback, a
+ * non-zero command). After such a result an answer is often premature: the model
+ * assumed the file existed, or skipped the fix it was about to make.
+ */
+const ERROR_SIGNALS = [
+  /no such file/i,
+  /not found/i,
+  /command not found/i,
+  /traceback \(most recent call last\)/i,
+  /assertionerror/i,
+  /syntaxerror/i,
+  /\berror:/i,
+  /"error"\s*:/,
+  /permission denied/i,
+  /is not a function/i,
+  /no tool named/i,
+  /exited with (code )?[1-9]/i,
+  /failed\b/i,
+]
+
+export function lastToolResult(messages) {
+  const last = [...(messages ?? [])].reverse().find((message) => message.role === 'tool')
+  if (!last) return ''
+  const content = last.content
+  if (typeof content === 'string') return content
+  if (Array.isArray(content)) return content.map((part) => (typeof part === 'string' ? part : part?.text ?? '')).join('\n')
+  return ''
+}
+
+export function looksLikeFailure(text) {
+  const value = (text ?? '').trim()
+  if (!value) return false
+  return ERROR_SIGNALS.some((pattern) => pattern.test(value))
+}
+
 /** Empty reply: no tool calls and nothing but whitespace in content. */
 export function isEmptyAnswer(message) {
   return !message?.tool_calls && !(message?.content ?? '').trim()
+}
+
+/**
+ * A reply that announces the next step instead of doing it ("now I will scan the
+ * symbols", "next step: ..."). The model then stops with `tool_calls: []` and the
+ * session looks finished while half the task is still open.
+ */
+const PLAN_MARKERS = [
+  // "now I will ..." / "next up ..." - substring form, because Turkish letters
+  // (ı, ş, ğ, ü) are not \w in JavaScript regexes and \b boundaries misfire.
+  /(şimdi|simdi|şu an|su an|şu anda)/,
+  /(sonra|ardından|sırada|sıradaki|sonraki|plan|planım|(^| )adım)/,
+  /(acağım|eceğim|acağız|eceğiz|ayım\b|eyim\b)/,
+  /(ıyorum|iyorum|uyorum|üyorum)/,
+  /(will|let me|going to|about to|next step|now let|then)/,
+]
+const DONE_MARKERS = /\b(tamamland[ıi]|tamamdır|bitti|tamam|haz[ıi]r|tamamen|done|complete[d]?|finished|özet|özetle|sonuç|sonuc)\b/
+
+export function looksLikePlan(content) {
+  const text = (content ?? '').trim()
+  if (!text) return false
+  // A plan announces itself in the closing sentences ("... now I will resign it"),
+  // so both signals are checked on the tail only: a "tamam" in the middle of a
+  // long status report must not hide the plan at the end.
+  if (/[:…]\s*$/.test(text)) return true
+  // The closing part decides. 240 chars was too narrow for long status reports
+  // that end with a numbered "next steps" list, so the window is wider; a
+  // "tamam" earlier in the reply must not veto a plan announced at the end.
+  const tail = text.toLowerCase().slice(-600)
+  if (PLAN_MARKERS.some((pattern) => pattern.test(tail))) return true
+  // a trailing enumeration of upcoming work counts as a plan too
+  return /\(1\)[\s\S]{0,600}\(2\)/.test(text.slice(-700))
 }
 
 /** Shown when every attempt came back blank, so the turn is never invisible. */
@@ -58,11 +138,20 @@ export const EMPTY_MARKER = '(empty reply)'
  * @param {{ message: {tool_calls: unknown[], content: string, sawEnvelope: boolean}, lastRole?: string }} input
  * @returns {{ retry: boolean, reason?: string, reminder?: string }}
  */
-export function shouldRetry({ message, lastRole }) {
+export function shouldRetry({ message, lastRole, lastToolOutput }) {
   if (isEmptyAnswer(message)) return { retry: true, reason: 'empty reply', reminder: EMPTY_RETRY_REMINDER }
   if (!message.sawEnvelope) return { retry: true, reason: 'plain prose reply', reminder: RETRY_REMINDER }
   if (!message.tool_calls && lastRole === 'user') {
     return { retry: true, reason: 'envelope without tool calls', reminder: RETRY_REMINDER }
+  }
+  if (!message.tool_calls && looksLikeFailure(lastToolOutput)) {
+    return { retry: true, reason: 'last tool output looks failed', reminder: FAILURE_RETRY_REMINDER }
+  }
+  // After a tool result an answer is expected, but "let me now do X" is not an
+  // answer: it is the model stopping mid-task. This is the case that made a real
+  // session look frozen.
+  if (!message.tool_calls && lastRole !== 'user' && looksLikePlan(message.content)) {
+    return { retry: true, reason: 'reply describes the next step', reminder: PLAN_RETRY_REMINDER }
   }
   return { retry: false }
 }
@@ -237,11 +326,26 @@ export function toVeniceRequest(body) {
   }
 }
 
-/** Same request, with an extra system reminder used for the retry. */
+/**
+ * Same request, with the retry reminder appended as a **user** message.
+ *
+ * The channel matters: a trailing user message is obeyed far more reliably than
+ * the same text appended to the system prompt (measured 4/4 vs 1/4 when the
+ * format reminder was tuned the same way).
+ */
 export function withRetryReminder(request, reminder = RETRY_REMINDER) {
   return {
     ...request,
-    systemPrompt: { instructions: `${request.systemPrompt.instructions}\n\nREMINDER: ${reminder}` },
+    messages: [
+      ...request.messages,
+      {
+        id: randomUUID(),
+        type: 'message',
+        status: 'completed',
+        role: 'user',
+        content: [{ type: 'output_text', text: `(act reminder) ${reminder}`, annotations: [] }],
+      },
+    ],
   }
 }
 

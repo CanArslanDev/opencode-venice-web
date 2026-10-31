@@ -108,6 +108,8 @@ A small model asked for a custom format is *usually* compliant, but not always. 
 | **Assistant history re-serialised as envelopes** | the model imitates its own previous turns; a plain-text assistant turn makes it drop the format |
 | **Retry when the reply is unhelpful**: prose, an envelope without tool calls on a first turn, or an *empty* reply | turns the remaining flakes into successes; free on the web plan |
 | **Broken JSON is repaired, not dropped**: repair ladder (control chars, trailing commas, raw `arguments` blobs) + `salvageCalls()` + `cleanLeakedEnvelope()` | a raw file dump after `"arguments":` used to cost both tool calls and leak the envelope into the answer |
+| **A plan is not an answer**: `looksLikePlan()` spots "now I will X" / a trailing numbered list and retries with an ACT NOW reminder sent as a user message | real session stopped halfway at every plan; after the fix 27/28 retries became tool calls and the task finished |
+| **A failed tool output blocks a final answer**: missing file / traceback / non-zero exit triggers one retry | the model assumed a file existed, never wrote it, and reported success |
 | **A blank reply never wins**: `preferAnswer()` guards the retry, and `applyFallback()` uses the raw text then an `(empty reply)` marker | an empty assistant message has no parts at all, so the client shows nothing and the session looks frozen |
 
 Additional hardening in `extractEnvelopes()`:

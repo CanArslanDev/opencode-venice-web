@@ -12,7 +12,12 @@ import {
   applyFallback,
   extractEnvelopes,
   fallbackAnswerText,
+  FAILURE_RETRY_REMINDER,
   isEmptyAnswer,
+  lastToolResult,
+  looksLikeFailure,
+  looksLikePlan,
+  PLAN_RETRY_REMINDER,
   parseToolReply,
   preferAnswer,
   cleanLeakedEnvelope,
@@ -198,9 +203,14 @@ test('the tool prompt forbids empty content and the empty reminder exists', () =
   assert.match(EMPTY_RETRY_REMINDER, /empty/i)
 })
 
-test('withRetryReminder appends the given reminder to the system prompt', () => {
-  const request = { systemPrompt: { instructions: 'base' } }
-  assert.match(withRetryReminder(request, 'SPECIAL').systemPrompt.instructions, /base\n\nREMINDER: SPECIAL/)
+test('withRetryReminder appends the reminder as a trailing user message', () => {
+  const request = { systemPrompt: { instructions: 'base' }, messages: [{ id: 'x', role: 'user', content: [] }] }
+  const retried = withRetryReminder(request, 'SPECIAL')
+  assert.equal(retried.systemPrompt.instructions, 'base')
+  assert.equal(retried.messages.length, 2)
+  const last = retried.messages.at(-1)
+  assert.equal(last.role, 'user')
+  assert.match(last.content[0].text, /^\(act reminder\) SPECIAL$/)
 })
 
 test('shouldRetry: empty replies are always retried, with the empty reminder', () => {
@@ -289,4 +299,112 @@ test('cleanLeakedEnvelope leaves normal prose alone', () => {
 
 test('tool prompt asks for escaped arguments', () => {
   assert.match(TOOL_PROMPT, /arguments" is always a JSON object/)
+})
+
+// ------------------------------------------------- plan without action
+//
+// Real session (a long multi-step task): after a tool result the model wrote
+// "Şimdi ... arayacağım" with tool_calls: [] and the session stopped halfway.
+
+const REAL_PLAN = 'Projeyi açtım ve ilk analizde net bir tablo çıktı. Şimdi sembol taramasında asıl karar fonksiyonlarını (SessionManager içindeki isReady benzeri erişimciler) arayacağım.\n\nBu arada elimde şu var:'
+
+test('looksLikePlan detects the real capture', () => {
+  assert.equal(looksLikePlan(REAL_PLAN), true)
+  assert.equal(looksLikePlan('Next step: extract the archive.'), true)
+  assert.equal(looksLikePlan('Let me check the symbols now.'), true)
+  assert.equal(looksLikePlan('sonra devam edeceğim'), true)
+  assert.equal(looksLikePlan('Şimdi inceliyorum:' ), true)
+})
+
+test('looksLikePlan detects a plan even when the report says "tamam" mid-way', () => {
+  // real capture: a long status table said "halkası tamam" in the middle and
+  // closed with "şimdi ... doğruluyorum" - the earlier rule missed the retry
+  const captured =
+    'Config değişikliği başarıyla uygulandı ve `jq` ile doğrulandı. Önbellek de üretildi: plan `full`.\n' +
+    'Bu noktada derleme zincirinin kritik halkası tamam: uygulama config\'ten yeni ayarı okuyacak.\n\n' +
+    '**Durum tablosu:**\n\n| Adım | Durum |\n|---|---|\n| Temiz derleme | ⏳ sırada |\n| Entegrasyon testi | ⏳ sırada |\n\n' +
+    "Şimdi önbellek bozulduğu için uygulamayı temiz olarak yeniden derliyorum, geçici dosyaları temizliyorum ve açıp ayar durumunu doğruluyorum."
+  assert.equal(looksLikePlan(captured), true)
+})
+
+test('looksLikePlan detects the "şu an ... çıkarıyorum" capture', () => {
+  // second real capture from the same session: present-continuous closing
+  // sentence, no future-tense word, no trailing colon
+  const captured =
+    'Paket 141 MB\'lık universal (x86_64 + arm64) ve içinde ayar/önbellek ile ilgili string çıkmadı — sembollerin büyük kısmı Swift\'te mangled. ' +
+    'Şu an arm64 dilimini ayırıp sembol tablosundan `cache`/`config`/`Loader` geçen sembolleri çıkarıyorum; yükleme sırasını netleştirmeden config\'i değiştirirsem takılırsın.'
+  assert.equal(looksLikePlan(captured), true)
+})
+
+test('looksLikePlan detects a long report closing with a numbered plan', () => {
+  // third real capture: 1.8k chars, the plan is a "(1) ... (7)" list at the end
+  const captured =
+    'Proje çalışma kopyasına alındı. Ayar doğrulaması JSON şema ile yapılıyor; şema config\'ten okunuyor.\n\n' +
+    'Ayar kodu ayrı modüllere bölünmüş: ConfigReader, ConfigSession, ConfigLifecycle.\n\n' +
+    'Çevrimdışı bir önbellek katmanı var: com.example.settings.v2 domain\'i.\n\n' +
+    'Kaldığım yer: önbelleğin tam disk yolunu kesinleştirmeden yazmak boşa iş olurdu; grep çıktısı gürültülü geldi, hedefleyip çıkarmam gerekiyor.\n\n' +
+    'Devamında sırayla yapacağım: (1) önbellek yolunu ve isReady kapısını tespit, (2) yeni şemayı üret, (3) migrate.sh\'ı doğru yola çevir, (4) yeni config\'i koy, (5) temiz derle, (6) uygulamayı açıp doğrula, (7) bir rollback.sh yaz.'
+  assert.equal(looksLikePlan(captured), true)
+})
+
+test('looksLikePlan does not fire on finished answers', () => {
+  assert.equal(looksLikePlan('rapor.txt oluşturuldu ve cat ile gösterildi.'), false)
+  assert.equal(looksLikePlan('Refactor tamam, davranış birebir aynı.'), false)
+  assert.equal(looksLikePlan('Sonuç: 5'), false)
+  assert.equal(looksLikePlan('İki TODO\'yu da bulup kodladım ve testler geçti.'), false)
+  // documented false positive: a "sonra" in the closing sentence reads as a plan
+  assert.equal(looksLikePlan('Dosya yazıldı ve testler geçti ama sonra silindi.'), true)
+  assert.equal(looksLikePlan(''), false)
+})
+
+test('shouldRetry: a plan after a tool result is retried with its own reminder', () => {
+  const plan = parseToolReply(JSON.stringify({ content: REAL_PLAN, tool_calls: [] }))
+  assert.deepEqual(shouldRetry({ message: plan, lastRole: 'tool' }), {
+    retry: true,
+    reason: 'reply describes the next step',
+    reminder: PLAN_RETRY_REMINDER,
+  })
+})
+
+test('shouldRetry: a finished answer after a tool result is accepted', () => {
+  const done = parseToolReply(JSON.stringify({ content: 'rapor.txt oluşturuldu ve gösterildi.', tool_calls: [] }))
+  assert.equal(shouldRetry({ message: done, lastRole: 'tool' }).retry, false)
+})
+
+test('the tool prompt forbids ending a turn with a plan', () => {
+  assert.match(TOOL_PROMPT, /Never end a turn by describing what you are about to do/)
+})
+
+// ------------------------------------------------------- failed tool output
+//
+// Real miss (stress task 02): the model assumed a file existed, `cat` failed,
+// and it still answered as if the work was done.
+
+test('looksLikeFailure spots real tool failures', () => {
+  assert.equal(looksLikeFailure('cat: summary.py: No such file or directory'), true)
+  assert.equal(looksLikeFailure('Traceback (most recent call last): AssertionError'), true)
+  assert.equal(looksLikeFailure('zsh: command not found: nm'), true)
+  assert.equal(looksLikeFailure('{"error":{"type":"tool.execution","message":"boom"}}'), true)
+  assert.equal(looksLikeFailure('total 8\ndrwxr-xr-x  3 user  staff  96'), false)
+})
+
+test('lastToolResult finds the newest tool message', () => {
+  const messages = [
+    { role: 'user', content: 'hi' },
+    { role: 'tool', content: 'first' },
+    { role: 'assistant', content: 'x' },
+    { role: 'tool', content: [{ type: 'text', text: 'newest' }] },
+  ]
+  assert.equal(lastToolResult(messages), 'newest')
+  assert.equal(lastToolResult([{ role: 'user', content: 'x' }]), '')
+})
+
+test('shouldRetry: a failed tool output gets its own reminder', () => {
+  const answered = parseToolReply('{"content":"hepsi tamam","tool_calls":[]}')
+  assert.deepEqual(shouldRetry({ message: answered, lastRole: 'tool', lastToolOutput: 'cat: a.py: No such file' }), {
+    retry: true,
+    reason: 'last tool output looks failed',
+    reminder: FAILURE_RETRY_REMINDER,
+  })
+  assert.equal(shouldRetry({ message: answered, lastRole: 'tool', lastToolOutput: 'ok' }).retry, false)
 })

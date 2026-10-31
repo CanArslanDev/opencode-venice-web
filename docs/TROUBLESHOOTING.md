@@ -113,6 +113,28 @@ The proxy handles it (0 blank turns over a 24-turn reproduction):
 If you still see it, check the log for the reason and open an issue with the raw
 reply (`VENICE_WEB_DEBUG=1`, then `debug.log`).
 
+## The session stops mid-task with a plan
+
+Symptom: the assistant writes "Şimdi ... bakacağım / Sıradaki adım: ..." (or a
+numbered next-steps list) and the turn ends with `tool_calls: []`, so the session
+looks finished while half the work is open.
+
+The proxy retries such a reply once with an ACT NOW reminder, sent as a *user*
+message (the channel the model actually obeys), and prefers the retry when it
+contains tool calls. The same applies when the last tool output looks like a
+failure. Watch it in the log:
+
+```
+  ~ reply describes the next step, retrying...
+  ~ retry improved the reply
+  <- tools: write(...)
+```
+
+If it still stops, the model is out of step with the task: ask for the next step
+explicitly ("devam et") or switch to a more obedient model
+(`venice-web/qwen-3-8-27b`). `VENICE_WEB_DEBUG=1` writes the raw replies to
+`debug.log`.
+
 ## `400 String must not contain null bytes`
 
 A NUL byte (`\x00`) reached the request. It usually comes from reading a binary file: `grep -a`, `cat` or `tail` on a `.db`, `.pyc`, binary or app bundle puts NUL bytes into a tool result, they land in the stored session, and every later request of that session carries them.
