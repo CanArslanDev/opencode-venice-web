@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * venice-web doctor — one command to answer "why doesn't it work?".
+ * venice-web doctor - one command to answer "why doesn't it work?".
  *
  *   node src/doctor.mjs          # checks
  *   node src/doctor.mjs --fix    # also (re)generate the OpenCode provider entry
@@ -16,7 +16,7 @@ const args = process.argv.slice(2)
 const results = []
 const check = (ok, label, detail = '') => {
   results.push({ ok, label, detail })
-  log(`${ok ? ' ok ' : 'FAIL'}  ${label}${detail ? ` — ${detail}` : ''}`)
+  log(`${ok ? ' ok ' : 'FAIL'}  ${label}${detail ? ` - ${detail}` : ''}`)
 }
 
 async function main() {

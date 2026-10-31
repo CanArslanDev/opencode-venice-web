@@ -2,7 +2,7 @@
  * Models that venice.ai serves over the web on every plan, i.e. the models the
  * web catalogue flags as `usesCredits: false`. A Pro/Max subscription is
  * unlimited for these in the web chat, and the web inference endpoint does not
- * bill them to the API balance — which is the whole point of this proxy.
+ * bill them to the API balance - which is the whole point of this proxy.
  *
  * Models that DO cost credits are deliberately left out: on the agent endpoint
  * Venice may silently route them to a free model anyway, so advertising them

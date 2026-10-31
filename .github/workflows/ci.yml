@@ -9,13 +9,37 @@ jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         node: ['22', '24']
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - run: npm test
-      - run: sh -n install.sh
-      - run: node --check src/proxy.mjs
+
+      # Unit tests. `test/smoke.mjs` is picked up here too and skips itself when
+      # no proxy is running (see the header of that file).
+      - name: unit tests
+        run: npm test
+
+      - name: syntax check
+        run: |
+          sh -n install.sh
+          for file in src/*.mjs src/lib/*.mjs test/*.mjs; do node --check "$file"; done
+
+      # Boots the proxy without a session file and exercises the HTTP surface.
+      - name: boot and smoke test
+        run: |
+          node src/proxy.mjs &
+          proxy=$!
+          for _ in $(seq 1 30); do
+            curl -sf http://127.0.0.1:3456/health >/dev/null && break
+            sleep 0.5
+          done
+          SMOKE_REQUIRE=0 node test/smoke.mjs
+          kill "$proxy"
+
+      - name: doctor runs
+        run: node src/doctor.mjs || true

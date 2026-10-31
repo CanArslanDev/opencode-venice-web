@@ -168,7 +168,7 @@ fi
 
 if [ "$DO_LOGIN" = "1" ] || [ ! -f "$CONFIG_DIR/session.json" ]; then
   say ""
-  say "signing in — reads the venice.ai cookie out of your browser"
+  say "signing in - reads the venice.ai cookie out of your browser"
   node "$INSTALL_DIR/src/login.mjs" || die "sign-in failed: open venice.ai in your browser, then run node $INSTALL_DIR/src/login.mjs"
 fi
 

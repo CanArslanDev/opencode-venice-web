@@ -1,6 +1,6 @@
 # opencode-venice-web
 
-**Use your venice.ai *web* subscription — the unlimited one — from OpenCode (or any OpenAI-compatible agent), without spending a cent of API credits.**
+**Use your venice.ai *web* subscription - the unlimited one - from OpenCode (or any OpenAI-compatible agent), without spending a cent of API credits.**
 
 Venice's API is metered: a Pro account includes only **$1/month** of API spend and the docs are explicit that "a paid subscription does not include free or unlimited API usage". The venice.ai **web app** is the opposite: text chat on the web models is unlimited on Pro and above.
 
@@ -83,7 +83,7 @@ Full details, including the exact request/response shapes and the tool-emulation
 
 ## Models
 
-Only models the web catalogue marks as free (`usesCredits: false`) are exposed — picking a credit-billed model through this proxy would silently spend your API balance, so they are left out on purpose.
+Only models the web catalogue marks as free (`usesCredits: false`) are exposed - picking a credit-billed model through this proxy would silently spend your API balance, so they are left out on purpose.
 
 | Family | Model ids |
 | --- | --- |
@@ -140,7 +140,7 @@ All environment variables are optional; the defaults are what the installer uses
 
 ## Security and privacy
 
-- The session file (`~/.config/opencode/venice-web/session.json`, mode `600`) holds your Clerk cookie — treat it like a login token, keep it out of git.
+- The session file (`~/.config/opencode/venice-web/session.json`, mode `600`) holds your Clerk cookie - treat it like a login token, keep it out of git.
 - Only `clerk.venice.ai` and `outerface.venice.ai` are contacted; the proxy is bound to loopback by default. Anything that can reach it can use your Venice account, so do not expose the port publicly without thinking about it.
 - No password is stored (unlike password-based proxies). Logging out of venice.ai in the browser invalidates the cookie; `/out` from the browser plus a fresh login fixes it.
 - Requests leave your machine exactly as the web app would send them: same user agent, same headers, no extra telemetry.
@@ -153,13 +153,13 @@ All environment variables are optional; the defaults are what the installer uses
 - **Tool calls are emulated.** The web endpoint ignores OpenAI `tools`, so the model answers with a JSON envelope that the proxy turns into `tool_calls`. This is reliable in practice (see [docs/PROTOCOL.md](docs/PROTOCOL.md) for the measured technique) but it is a prompt contract, not a native feature: `tool_choice: required` is advisory, and streaming answers arrive buffered rather than token-by-token.
 - **No sampling controls.** `temperature`, `top_p` and `max_tokens` are not applied by this endpoint.
 - **Unlimited, not infinite.** Venice's fair-use and Cloudflare bot checks apply. A Cloudflare challenge surfaces as HTTP 401 with a "refresh the cookies" message.
-- **Web session, not API route.** Anything that needs the official API surface (embeddings, images, video, `/responses`) still has to use `api.venice.ai` with an API key. Both can coexist in OpenCode — the installer only *adds* a provider.
+- **Web session, not API route.** Anything that needs the official API surface (embeddings, images, video, `/responses`) still has to use `api.venice.ai` with an API key. Both can coexist in OpenCode - the installer only *adds* a provider.
 
 ---
 
 ## Troubleshooting
 
-Start with `node src/doctor.mjs`. The full list — Cloudflare challenges, expired sessions, "tools do not work", port conflicts, service logs — is in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+Start with `node src/doctor.mjs`. The full list - Cloudflare challenges, expired sessions, "tools do not work", port conflicts, service logs - is in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 Common ones:
 
@@ -175,9 +175,9 @@ systemctl --user restart ai.opencode.venice-web               # Linux
 
 ## Related work
 
-- [`despin/venice-ai-chat-proxy`](https://github.com/despin/venice-ai-chat-proxy) — password login, requires `wreq-js` for Chrome TLS fingerprints.
-- [`weizsw/magpie-venice-web`](https://github.com/weizsw/magpie-venice-web) — the same idea as a Magpie plugin. Note that OpenCode v2 no longer loads the v1 plugin hook shape, so it does not drop into OpenCode unchanged.
-- [`Parsa-Nasiri/venice-free-ai-chat`](https://github.com/Parsa-Nasiri/venice-free-ai-chat) — anonymous access with per-IP daily caps instead of an account session.
+- [`despin/venice-ai-chat-proxy`](https://github.com/despin/venice-ai-chat-proxy) - password login, requires `wreq-js` for Chrome TLS fingerprints.
+- [`weizsw/magpie-venice-web`](https://github.com/weizsw/magpie-venice-web) - the same idea as a Magpie plugin. Note that OpenCode v2 no longer loads the v1 plugin hook shape, so it does not drop into OpenCode unchanged.
+- [`Parsa-Nasiri/venice-free-ai-chat`](https://github.com/Parsa-Nasiri/venice-free-ai-chat) - anonymous access with per-IP daily caps instead of an account session.
 
 This project differs by: no runtime dependencies, cookie-only auth, an explicit tool-emulation protocol with reliability safeguards, and an OpenCode installer.
 

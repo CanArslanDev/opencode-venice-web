@@ -9,7 +9,7 @@ node src/doctor.mjs
 tail -40 ~/.config/opencode/venice-web/proxy.log
 ```
 
-`doctor` checks node, the session file, the running proxy and the OpenCode provider. The log line for every request looks like this — if you see `->` but no `<-`, the upstream call is failing:
+`doctor` checks node, the session file, the running proxy and the OpenCode provider. The log line for every request looks like this - if you see `->` but no `<-`, the upstream call is failing:
 
 ```
 2026-01-01T00:00:00.000Z -> deepseek-v4-1-flash-free • 4 msgs • 11 tools [edit,glob,…] • stream=true
@@ -23,7 +23,7 @@ tail -40 ~/.config/opencode/venice-web/proxy.log
 Symptom: the model says things like *"the tools are not available / Tool not found"* although OpenCode listed them.
 
 1. Look at the log: `<- no tools • text: …` means the model ignored the envelope.
-2. `VENICE_WEB_DEBUG=1` + restart, then read `~/.config/opencode/venice-web/debug.log` — it contains every raw model reply and whether it parsed.
+2. `VENICE_WEB_DEBUG=1` + restart, then read `~/.config/opencode/venice-web/debug.log` - it contains every raw model reply and whether it parsed.
 3. If the raw text *is* an envelope and still does not parse, you found a parser bug: the envelope scanner lives in `src/lib/emulate.mjs` (`extractEnvelopes`), with tests in `test/emulate.test.mjs`.
 4. If the raw text is prose, the model is not following the contract: switch models (`venice-web/qwen-3-8-27b` and `venice-web/zai-org-glm-5.2` are the most obedient in testing) or tighten `TOOL_PROMPT`.
 
@@ -36,7 +36,7 @@ node src/login.mjs           # re-read the cookie from the browser
 curl -s 127.0.0.1:3456/reload
 ```
 
-Logging out of venice.ai in the browser invalidates `__client` — sign in again, then rerun the login command.
+Logging out of venice.ai in the browser invalidates `__client` - sign in again, then rerun the login command.
 
 ## `no usable session yet` right after install
 
@@ -70,7 +70,7 @@ Remember to rerun `sync` after changing the port, or set `VENICE_WEB_PORT` for b
 
 ## Streaming feels "chunky"
 
-Expected: with tool emulation the whole message is buffered, parsed, and then replayed. Non-tool requests could stream live — a small change in `openaiChunks` — but then a half-written envelope would flash in the UI first.
+Expected: with tool emulation the whole message is buffered, parsed, and then replayed. Non-tool requests could stream live - a small change in `openaiChunks` - but then a half-written envelope would flash in the UI first.
 
 ## Service problems
 
@@ -104,7 +104,7 @@ The error body names the offending field/path; compare it with `docs/PROTOCOL.md
 
 ## `temperature`/`top_p`/`max_tokens` are ignored
 
-By design — the web endpoint does not support them. Map what matters through model choice and `reasoning_effort` variants instead.
+By design - the web endpoint does not support them. Map what matters through model choice and `reasoning_effort` variants instead.
 
 ## Uninstall
 
@@ -115,4 +115,4 @@ By design — the web endpoint does not support them. Map what matters through m
 
 ## Reporting a bug
 
-Include: platform, node version, `doctor` output, the log lines around the failing request, and (with secrets redacted) `VENICE_WEB_DUMP=/tmp/req.json` output. Do not paste `session.json` publicly — it contains a live cookie.
+Include: platform, node version, `doctor` output, the log lines around the failing request, and (with secrets redacted) `VENICE_WEB_DUMP=/tmp/req.json` output. Do not paste `session.json` publicly - it contains a live cookie.

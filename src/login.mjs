@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * venice-web login — stores the venice.ai web session (Clerk `__client` cookie)
+ * venice-web login - stores the venice.ai web session (Clerk `__client` cookie)
  * in a local session file. Nothing is sent anywhere except venice.ai/Clerk.
  *
  *   node src/login.mjs                                  # auto-detect browser

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * venice-web sync — writes the `venice-web` provider into an OpenCode config
+ * venice-web sync - writes the `venice-web` provider into an OpenCode config
  * file, pointing it at the local proxy. Existing settings are preserved.
  *
  *   node src/sync.mjs                 # add/update the provider
@@ -62,6 +62,6 @@ writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`)
 renameSync(tmp, configPath)
 
 const count = Object.keys(MODELS).length
-log(`updated ${configPath} — provider "${providerID}" with ${count} models`)
+log(`updated ${configPath} - provider "${providerID}" with ${count} models`)
 if (args.includes('--default')) log(`default model: ${providerID}/${DEFAULT_MODEL}`)
 if (args.includes('--remove')) warn(`provider "${providerID}" removed`)

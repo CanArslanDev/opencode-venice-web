@@ -21,7 +21,7 @@ browser cookie jar                     your machine                Venice
 * **`__client`** is a Clerk JWT on the `.clerk.venice.ai` host. It is long lived (months) and is the *only* credential needed. The proxy stores it in `session.json` (mode `600`).
 * Clerk **rotates** `__client` while it is used. `veneziaFetch()` reads `set-cookie` from every response and rewrites the session file when it changes.
 * The session JWT that actually authorises inference lives ~60 seconds. `mintToken()` caches it and refreshes it 15 s before expiry, single-flight so parallel requests share one mint.
-* **Only `__client` is sent back — never `cf_clearance`.** `cf_clearance` is bound to the browser's TLS/IP and expires; `__client` alone passes Cloudflare. `user-agent` must look like a real browser (picked from the browser that owns the cookie), otherwise Cloudflare replies `403` with `cf-mitigated: challenge`.
+* **Only `__client` is sent back - never `cf_clearance`.** `cf_clearance` is bound to the browser's TLS/IP and expires; `__client` alone passes Cloudflare. `user-agent` must look like a real browser (picked from the browser that owns the cookie), otherwise Cloudflare replies `403` with `cf-mitigated: challenge`.
 * If a request still gets challenged, the proxy raises a `SignInError` which surfaces as **HTTP 401** with a "refresh the cookies" message.
 
 Session discovery (`GET /v1/client`) yields the active session id and account. It picks the session matching the stored `uid` when several exist.
@@ -58,7 +58,7 @@ Body (responses-API flavoured, not chat-completions):
 Notes:
 
 * `modelId` uses the web catalogue's dotted ids (`zai-org-glm-5.2`), not the API's dashed ids.
-* `tools` and `clientTools` are what the web *agent* uses. Sending `tools: []` does not disable Venice's built-in server tools — the model may still call `view_media`/`get_attachment`.
+* `tools` and `clientTools` are what the web *agent* uses. Sending `tools: []` does not disable Venice's built-in server tools - the model may still call `view_media`/`get_attachment`.
 * The endpoint ignores `temperature`, `top_p` and `max_tokens`.
 * Requests with `attestationToken` minted are required for `/api/inference/*`; the mint call needs the same headers (sans attestation).
 
@@ -71,7 +71,7 @@ Newline-delimited SSE (`\n\n` separated `event:`/`data:` frames, `: keepalive` c
 | `response.created`, `response.in_progress` | lifecycle |
 | `response.output_item.added` / `.done` | item boundaries; `item.type` is `message`, `reasoning`, `veniceai:tool_call_generation`, `veniceai:server_function_call`, `veniceai:server_function_call_output` |
 | `response.content_part.added` / `.done` | content part boundaries |
-| `response.output_text.delta` / `.done` | text deltas (also used for reasoning — disambiguate via the `item.type` of the `output_index`) |
+| `response.output_text.delta` / `.done` | text deltas (also used for reasoning - disambiguate via the `item.type` of the `output_index`) |
 | `response.reasoning_text.delta`, `response.reasoning_summary_text.delta` | reasoning deltas |
 | `response.completed` / `response.incomplete` | terminal |
 | `veniceai:tool_call_generation.in_progress` / `.done` | the server-side step that parses tool calls out of the model's text (`detected_tools`) |
@@ -87,7 +87,7 @@ Two facts make this necessary:
    ```
    invalid_union_discriminator at ["tools",0,"type"]: expected one of calculator, web_search, …
    ```
-2. `clientTools` must be shaped `{ name, description, inputSchema }`, and handing them over did **not** make the model call them: it kept calling Venice's own server tools (`view_media`) and then concluded `read_file` did not exist. Making that path work would mean teaching the model Venice's own call syntax *and* handling `veniceai:client_function_call` items — more moving parts than the envelope below.
+2. `clientTools` must be shaped `{ name, description, inputSchema }`, and handing them over did **not** make the model call them: it kept calling Venice's own server tools (`view_media`) and then concluded `read_file` did not exist. Making that path work would mean teaching the model Venice's own call syntax *and* handling `veniceai:client_function_call` items - more moving parts than the envelope below.
 
 So the proxy hides the tool machinery from Venice entirely and asks the model for an envelope:
 
@@ -99,7 +99,7 @@ The proxy then emits real OpenAI `tool_calls` and, on the next turn, sends resul
 
 ### Reliability measures
 
-A small model asked for a custom format is *usually* compliant, but not always. Four measures, each measured on ~6–12 runs of a real OpenCode session:
+A small model asked for a custom format is *usually* compliant, but not always. Four measures, each measured on ~6-12 runs of a real OpenCode session:
 
 | Measure | Effect |
 | --- | --- |
@@ -110,7 +110,7 @@ A small model asked for a custom format is *usually* compliant, but not always. 
 
 Additional hardening in `extractEnvelopes()`:
 
-* multiple concatenated envelopes are all parsed (models emit 2–3 at once),
+* multiple concatenated envelopes are all parsed (models emit 2-3 at once),
 * prose before/after an envelope is kept as `content`,
 * arguments may sit at the call's top level instead of under `arguments`,
 * `<tool_result>` tags the model writes by hand are stripped,
@@ -157,6 +157,6 @@ Usage is estimated (`countTokens` ≈ characters/4) because the web endpoint rep
 | --- | --- | --- |
 | `x-venice-middleface-version` | `0.1.1128` | config `middlefaceVersion` |
 | Clerk FAPI query | `?__clerk_api_version=2026-05-12&_clerk_js_version=6.39.0` | config `clerkVersion` |
-| `clerk-active-*` / `__client_uat` cookies | not used | — |
+| `clerk-active-*` / `__client_uat` cookies | not used | - |
 
 Both are overridable via environment variables, which is the first thing to try when Venice ships a web update and something starts failing with `400`s.

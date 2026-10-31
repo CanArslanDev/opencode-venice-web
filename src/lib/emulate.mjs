@@ -27,9 +27,9 @@ Use an empty tool_calls array when answering without tools. To request a tool, p
 
 /** Appended as the last user message; see docs/PROTOCOL.md ("format reminder"). */
 export const REMINDER_FIRST_TURN =
-  'Reply with exactly one JSON object and nothing else. If the task needs files, a command or a search, call those tools in tool_calls now and stop — do not answer yet.'
+  'Reply with exactly one JSON object and nothing else. If the task needs files, a command or a search, call those tools in tool_calls now and stop - do not answer yet.'
 export const REMINDER_AFTER_TOOL =
-  'Answer now: reply with exactly one JSON object and nothing else, "tool_calls":[] with your answer in "content" — unless another tool is really needed.'
+  'Answer now: reply with exactly one JSON object and nothing else, "tool_calls":[] with your answer in "content" - unless another tool is really needed.'
 
 /** Sent as a system reminder on the single automatic retry. */
 export const RETRY_REMINDER =

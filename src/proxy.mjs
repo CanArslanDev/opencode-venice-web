@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * venice-web proxy — exposes the venice.ai web session as a local
+ * venice-web proxy - exposes the venice.ai web session as a local
  * OpenAI-compatible endpoint.
  *
  *   node src/proxy.mjs            # listens on 127.0.0.1:3456
@@ -8,11 +8,14 @@
  * Environment: see src/lib/config.mjs (VENICE_WEB_PORT, VENICE_WEB_CONFIG_DIR, …)
  */
 import { createServer as createHttpServer } from 'node:http'
+import { fileURLToPath } from 'node:url'
 import { createServer } from './lib/server.mjs'
-import { configDir, host, port, requestTimeoutMs, sessionFile } from './lib/config.mjs'
+import { host, port, requestTimeoutMs, sessionFile } from './lib/config.mjs'
 import { log, warn } from './lib/log.mjs'
 import { loadSession, mintToken } from './lib/venice.mjs'
 import { modelIds } from './lib/models.mjs'
+
+const loginCmd = fileURLToPath(new URL('./login.mjs', import.meta.url))
 
 const http = createHttpServer({ requestTimeout: 0, headersTimeout: 0 })
 const handler = createServer()
@@ -28,14 +31,14 @@ http.on('request', (req, res) => {
 })
 
 http.listen(port, host, async () => {
-  log(`venice-web proxy on http://${host}:${port}/v1 — ${modelIds.length} free web models`)
+  log(`venice-web proxy on http://${host}:${port}/v1 - ${modelIds.length} free web models`)
   log(`session: ${sessionFile}`)
   const session = await loadSession().catch((error) => {
     warn('could not read the session:', error.message)
     return null
   })
   if (!session) {
-    warn(`no usable session yet — sign in with: node ${configDir}/login.mjs  (or run the login command)`)
+    warn(`no usable session yet - sign in with: node ${loginCmd}  (or run the login command)`)
     return
   }
   log(`account: ${session.email ?? session.uid ?? 'unknown'} (UA: ${session.userAgent.slice(0, 40)}…)`)

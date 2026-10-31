@@ -3,7 +3,7 @@
  *
  * Venice web auth is a long-lived Clerk `__client` cookie. Chromium based
  * browsers encrypt cookies with a key stored in the OS keychain, so we read the
- * key, decrypt the cookie, and stop there — nothing is written back to the
+ * key, decrypt the cookie, and stop there - nothing is written back to the
  * browser and no password is stored.
  *
  * Supported automatically: Brave, Chrome, Edge, Chromium on macOS (Keychain) and

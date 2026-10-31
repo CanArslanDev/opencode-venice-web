@@ -35,7 +35,7 @@
     "login": "node ./src/login.mjs",
     "sync": "node ./src/sync.mjs",
     "doctor": "node ./src/doctor.mjs",
-    "test": "node --test test/",
+    "test": "node --test",
     "test:smoke": "node test/smoke.mjs",
     "doctor": "node src/doctor.mjs"
   },

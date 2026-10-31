@@ -50,14 +50,14 @@ VENICE_WEB_DUMP=/tmp/req.json node src/proxy.mjs
 
 ## Gotchas that cost real debugging time
 
-* OpenCode v2 plugins must `export default { id, setup|effect }` — the v1 "function returning hooks" shape (as used by `magpie-venice-web`) is **not** loaded. Hence this is a proxy, not a plugin.
+* OpenCode v2 plugins must `export default { id, setup|effect }` - the v1 "function returning hooks" shape (as used by `magpie-venice-web`) is **not** loaded. Hence this is a proxy, not a plugin.
 * The web endpoint ignores OpenAI `tools`; `clientTools` exists (`{name, description, inputSchema}`) but the model prefers Venice's own server tools. Tool calling is therefore emulated through a JSON envelope. Details and measured trade-offs: `docs/PROTOCOL.md` §4.
-* OpenCode's Code Mode system prompt says "the tools listed below cannot be called directly" — models read this as "tools are broken" and stop calling them. The proxy therefore filters `execute`/`search` out of the advertised tools and states plainly that the tools *are* called directly.
+* OpenCode's Code Mode system prompt says "the tools listed below cannot be called directly" - models read this as "tools are broken" and stop calling them. The proxy therefore filters `execute`/`search` out of the advertised tools and states plainly that the tools *are* called directly.
 * Models imitate their own history: if an assistant turn is plain text, the next turn is plain text too. Assistant history is re-serialised into envelope form for that reason.
-* Models emit **several** envelopes per message, or prose plus an envelope. `JSON.parse` of the whole text loses the calls — `extractEnvelopes()` exists for this.
+* Models emit **several** envelopes per message, or prose plus an envelope. `JSON.parse` of the whole text loses the calls - `extractEnvelopes()` exists for this.
 * The format reminder appended as the *last user message* is the single biggest reliability lever (`1/4 → 4/4` in testing). A system reminder in the same place is much weaker.
 * `response.output_text.delta` carries reasoning too; distinguish via `item.type` of the `output_index`.
-* Clerk rotates `__client` on use — always read `set-cookie` and persist.
+* Clerk rotates `__client` on use - always read `set-cookie` and persist.
 
 ## Changing the model catalogue
 
