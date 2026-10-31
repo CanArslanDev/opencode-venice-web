@@ -23,7 +23,7 @@ import { MODELS } from './models.mjs'
 export const TOOL_PROMPT = `You are connected to an external agent that executes tools on the user's computer. These tools ARE called directly by name in \`tool_calls\` (not inside \`execute\`); they are NOT Venice server tools.
 Return ONLY one valid JSON object, without markdown fences and without any text outside JSON, with this exact shape:
 {"content":"text for the user, or an empty string","tool_calls":[{"name":"exact tool name","arguments":{}}]}
-Use an empty tool_calls array when answering without tools. To request a tool, put its name and arguments in tool_calls and STOP; the agent executes it and sends a tool result in the next user message. Never invent tool results. If a task needs the filesystem, call a tool instead of guessing.`
+Use an empty tool_calls array when answering without tools. To request a tool, put its name and arguments in tool_calls and STOP; the agent executes it and sends a tool result in the next user message. Never invent tool results. If a task needs the filesystem, call a tool instead of guessing. Never send an empty "content" unless you are calling a tool.`
 
 /** Appended as the last user message; see docs/PROTOCOL.md ("format reminder"). */
 export const REMINDER_FIRST_TURN =
@@ -34,6 +34,66 @@ export const REMINDER_AFTER_TOOL =
 /** Sent as a system reminder on the single automatic retry. */
 export const RETRY_REMINDER =
   'your whole reply must be exactly one JSON object, nothing outside it. If the task needs the filesystem, a command or the web, put the tool call in tool_calls now instead of guessing.'
+
+/**
+ * Sent when the model answered with an empty `content` and no tool calls. A
+ * blank answer is stored as an assistant turn with no parts at all, which makes
+ * the session look frozen, so it always deserves another try.
+ */
+export const EMPTY_RETRY_REMINDER =
+  'your last reply was an empty JSON object with no content. Put the actual answer text in "content" now (or call a tool in tool_calls if you still need one). Never send an empty content unless you are calling a tool.'
+
+/** Empty reply: no tool calls and nothing but whitespace in content. */
+export function isEmptyAnswer(message) {
+  return !message?.tool_calls && !(message?.content ?? '').trim()
+}
+
+/** Shown when every attempt came back blank, so the turn is never invisible. */
+export const EMPTY_MARKER = '(empty reply)'
+
+/**
+ * Decides whether a reply deserves another upstream attempt.
+ * @param {{ message: {tool_calls: unknown[], content: string, sawEnvelope: boolean}, lastRole?: string }} input
+ * @returns {{ retry: boolean, reason?: string, reminder?: string }}
+ */
+export function shouldRetry({ message, lastRole }) {
+  if (isEmptyAnswer(message)) return { retry: true, reason: 'empty reply', reminder: EMPTY_RETRY_REMINDER }
+  if (!message.sawEnvelope) return { retry: true, reason: 'plain prose reply', reminder: RETRY_REMINDER }
+  if (!message.tool_calls && lastRole === 'user') {
+    return { retry: true, reason: 'envelope without tool calls', reminder: RETRY_REMINDER }
+  }
+  return { retry: false }
+}
+
+/**
+ * A blank assistant turn is stored with no parts at all and looks frozen in the
+ * client, so the last resort is the raw text and then a marker. Mutates and
+ * returns the message.
+ */
+export function applyFallback(message, rawText) {
+  if (!isEmptyAnswer(message)) return message
+  message.content = fallbackAnswerText(rawText) || EMPTY_MARKER
+  return message
+}
+
+/**
+ * Picks between two model replies. Tool calls win; a non-empty answer beats an
+ * empty one; between two real answers the format-compliant one wins. Keeping
+ * this decision explicit is what stops a retry from replacing a good answer with
+ * a blank one.
+ */
+export function preferAnswer(candidate, current) {
+  if (!candidate) return false
+  if (candidate.tool_calls && !current?.tool_calls) return true
+  if (!candidate.tool_calls && current?.tool_calls) return false
+  if (candidate.tool_calls && current?.tool_calls) return false
+  const candidateText = (candidate.content ?? '').trim()
+  const currentText = (current?.content ?? '').trim()
+  if (candidateText && !currentText) return true
+  if (!candidateText && currentText) return false
+  if (candidateText && currentText && candidate.sawEnvelope && !current?.sawEnvelope) return true
+  return false
+}
 
 /**
  * Code Mode wrappers. OpenCode advertises `execute`/`search` alongside real
@@ -175,11 +235,11 @@ export function toVeniceRequest(body) {
   }
 }
 
-/** Same request, with an extra system reminder used for the single retry. */
-export function withRetryReminder(request) {
+/** Same request, with an extra system reminder used for the retry. */
+export function withRetryReminder(request, reminder = RETRY_REMINDER) {
   return {
     ...request,
-    systemPrompt: { instructions: `${request.systemPrompt.instructions}\n\nREMINDER: ${RETRY_REMINDER}` },
+    systemPrompt: { instructions: `${request.systemPrompt.instructions}\n\nREMINDER: ${reminder}` },
   }
 }
 
@@ -287,6 +347,10 @@ export function extractEnvelopes(text) {
   return { content: stripToolResultTags(parts.join('\n')), tool_calls, sawEnvelope }
 }
 
+/**
+ * Turns a raw model reply into `{ content, tool_calls, sawEnvelope }`.
+ * `sawEnvelope: false` means the model ignored the format entirely.
+ */
 export function parseToolReply(text) {
   const envelope = extractEnvelopes(text)
   if (!envelope.sawEnvelope) {
@@ -297,6 +361,18 @@ export function parseToolReply(text) {
     tool_calls: envelope.tool_calls.length ? envelope.tool_calls : null,
     sawEnvelope: true,
   }
+}
+
+/**
+ * Best-effort text when a reply parsed to nothing: prose is returned as is, a
+ * bare envelope returns nothing (so the caller can show a marker instead).
+ */
+export function fallbackAnswerText(text) {
+  const raw = (text ?? '').trim()
+  if (!raw) return ''
+  const plain = extractEnvelopes(raw).content.trim()
+  if (plain) return plain
+  return raw.startsWith('{') ? '' : raw
 }
 
 /** Rough token estimate; the web endpoint reports none. */

@@ -58,6 +58,7 @@ VENICE_WEB_DUMP=/tmp/req.json node src/proxy.mjs
 * Models emit **several** envelopes per message, or prose plus an envelope. `JSON.parse` of the whole text loses the calls - `extractEnvelopes()` exists for this.
 * The format reminder appended as the *last user message* is the single biggest reliability lever (`1/4 → 4/4` in testing). A system reminder in the same place is much weaker.
 * `response.output_text.delta` carries reasoning too; distinguish via `item.type` of the `output_index`.
+* The model sometimes answers `{"content":"","tool_calls":[]}`. That becomes an assistant turn with **no parts**, `finish: stop`, no error: the client shows nothing and the session looks frozen. `isEmptyAnswer()` / `shouldRetry()` / `preferAnswer()` / `applyFallback()` in `src/lib/emulate.mjs` exist for exactly this; never forward empty content.
 * NUL bytes in the payload make Venice answer `400 String must not contain null bytes` (only when they land in `systemPrompt`, but that is enough to kill a session). `src/lib/sanitize.mjs` scrubs them; do not remove that step, and keep the body-repair before `JSON.parse` (JSON forbids raw control characters in strings).
 * Clerk rotates `__client` on use - always read `set-cookie` and persist.
 

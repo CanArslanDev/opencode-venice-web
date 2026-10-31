@@ -172,7 +172,7 @@ Installing `--with-nul-plugin` adds a small OpenCode plugin (`packaging/opencode
 
 ## Troubleshooting
 
-Start with `node src/doctor.mjs`. The full list - Cloudflare challenges, expired sessions, "tools do not work", port conflicts, service logs - is in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+Start with `node src/doctor.mjs`. The full list - Cloudflare challenges, expired sessions, "tools do not work", a turn with no output, port conflicts, service logs - is in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 Common ones:
 

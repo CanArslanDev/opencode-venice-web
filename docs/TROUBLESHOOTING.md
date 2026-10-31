@@ -91,6 +91,28 @@ systemctl --user restart ai.opencode.venice-web
 journalctl --user -u ai.opencode.venice-web -f
 ```
 
+## A turn produces no output and the session looks frozen
+
+Symptom: the assistant message ends with nothing in it (`content: []`, `finish: stop`,
+no error), so the client shows no answer and the session appears to stop. Asking
+`cevap?` may produce another blank turn.
+
+Cause: the model sometimes replies with an empty envelope,
+`{"content":"","tool_calls":[]}`. Forwarded as-is, that is an assistant turn with
+no parts at all.
+
+The proxy handles it (0 blank turns over a 24-turn reproduction):
+
+* an empty reply is detected and retried with a reminder that says the content was
+  empty (`empty reply, retrying...` in the log),
+* a retry may only replace the first answer when it is actually better
+  (`preferAnswer`), so a blank retry cannot overwrite a good reply,
+* if everything is blank, the raw text is used and then an `(empty reply)` marker,
+  so the turn is never invisible.
+
+If you still see it, check the log for the reason and open an issue with the raw
+reply (`VENICE_WEB_DEBUG=1`, then `debug.log`).
+
 ## `400 String must not contain null bytes`
 
 A NUL byte (`\x00`) reached the request. It usually comes from reading a binary file: `grep -a`, `cat` or `tail` on a `.db`, `.pyc`, binary or app bundle puts NUL bytes into a tool result, they land in the stored session, and every later request of that session carries them.

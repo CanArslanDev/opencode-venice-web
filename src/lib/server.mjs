@@ -11,8 +11,11 @@ import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
 import { apiBase, dumpFile, host, port, providerID } from './config.mjs'
 import {
+  applyFallback,
   countTokens,
   parseToolReply,
+  preferAnswer,
+  shouldRetry,
   sseReader,
   toVeniceRequest,
   withRetryReminder,
@@ -112,10 +115,10 @@ async function collectStream(upstreamBody, mapping, chunk) {
 /**
  * Yields OpenAI chunks for one request.
  *
- * Reliability: when the model answers with plain prose instead of the envelope
- * (or with an envelope that has no tool calls on the first turn), the request is
- * retried once with a harder reminder. Retries are free on the web plan, and
- * they turned "tools look broken" into a 100% hit rate in testing.
+ * Reliability: an empty reply, plain prose instead of the envelope, or an
+ * envelope without tool calls on a first turn all get another upstream attempt
+ * (free on the web plan). `preferAnswer()` decides whether the retry replaces
+ * the first answer, so a retry can never blank out a good reply.
  */
 async function* openaiChunks(body, mapping, upstreamBody, signal) {
   const id = `chatcmpl-${randomUUID().replaceAll('-', '')}`
@@ -137,34 +140,34 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
   if (mapping.emulatedTools) {
     message = parseToolReply(state.text)
 
-    const last = [...(body.messages ?? [])].reverse().find((item) => item.role !== 'system' && item.role !== 'developer')
-    const needsRetry = !message.sawEnvelope || (message.sawEnvelope && !message.tool_calls && last?.role === 'user')
+    // Up to two extra attempts while the reply is unhelpful: empty content, no
+    // tool calls on a user turn, or prose instead of the envelope.
+    for (let round = 0; round < 2; round++) {
+      const last = [...(body.messages ?? [])].reverse().find((item) => item.role !== 'system' && item.role !== 'developer')
+      const { retry, reason, reminder } = shouldRetry({ message, lastRole: last?.role })
+      if (!retry) break
 
-    if (needsRetry) {
-      log(`  ~ ${message.sawEnvelope ? 'envelope without tool calls' : 'plain prose reply'}, retrying once…`)
+      log(`  ~ ${reason}, retrying...`)
       try {
-        const retry = await upstreamChat(withRetryReminder(mapping.request), INFERENCE_PATH, signal)
-        if (retry.ok) {
-          const retryState = await collectStream(retry.body, mapping, chunk)
-          const retryMessage = parseToolReply(retryState.text)
-          if (retryMessage.tool_calls) {
-            state = retryState
-            message = retryMessage
-            log('  ~ retry produced tool calls')
-          } else if (!message.sawEnvelope && retryMessage.sawEnvelope) {
-            // First attempt ignored the format; prefer the compliant retry.
-            state = retryState
-            message = retryMessage
-            state.chunks = []
-            log('  ~ retry produced a plain answer envelope')
-          } else {
-            log('  ~ retry produced no tool calls, keeping the first answer')
-          }
+        const retryResponse = await upstreamChat(withRetryReminder(mapping.request, reminder), INFERENCE_PATH, signal)
+        if (!retryResponse.ok) break
+        const retryState = await collectStream(retryResponse.body, mapping, chunk)
+        const retryMessage = parseToolReply(retryState.text)
+        if (preferAnswer(retryMessage, message)) {
+          state = retryState
+          message = retryMessage
+          log('  ~ retry improved the reply')
+        } else {
+          log('  ~ retry did not improve the reply, keeping the first')
         }
       } catch (error) {
         warn('  ~ retry failed:', error.message)
+        break
       }
     }
+
+    // Never forward a blank assistant turn: it is invisible in the client.
+    applyFallback(message, state.text)
   }
 
   if (!state.terminal) throw new Error('the Venice stream ended before response.completed')
