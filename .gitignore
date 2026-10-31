@@ -1,0 +1,14 @@
+# local state
+session.json
+proxy.log
+debug.log
+cookie-accounts/
+.venice-web-session.json
+
+# tooling
+node_modules/
+npm-debug.log*
+.DS_Store
+.idea/
+.vscode/
+*.tgz

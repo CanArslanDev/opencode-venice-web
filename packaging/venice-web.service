@@ -1,0 +1,15 @@
+[Unit]
+# Linux systemd --user unit. install.sh replaces __NODE__, __PROXY__ and __LOG__.
+Description=venice.ai web session as a local OpenAI-compatible endpoint (OpenCode)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__NODE__ __PROXY__
+Restart=always
+RestartSec=3
+StandardOutput=append:__LOG__
+StandardError=append:__LOG__
+
+[Install]
+WantedBy=default.target

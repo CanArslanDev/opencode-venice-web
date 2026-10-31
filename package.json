@@ -1,0 +1,46 @@
+{
+  "name": "opencode-venice-web",
+  "version": "0.1.0",
+  "description": "Turn your venice.ai web subscription into a local OpenAI-compatible endpoint, so OpenCode (and any other agent) can use the unlimited web models without spending API credits.",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "venice",
+    "venice.ai",
+    "openai-compatible",
+    "proxy",
+    "unlimited"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "venice-web": "./src/proxy.mjs",
+    "venice-web-login": "./src/login.mjs",
+    "venice-web-sync": "./src/sync.mjs",
+    "venice-web-doctor": "./src/doctor.mjs"
+  },
+  "files": [
+    "src",
+    "docs",
+    "packaging",
+    "README.md",
+    "CLAUDE.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "start": "node ./src/proxy.mjs",
+    "login": "node ./src/login.mjs",
+    "sync": "node ./src/sync.mjs",
+    "doctor": "node ./src/doctor.mjs",
+    "test": "node --test test/",
+    "test:smoke": "node test/smoke.mjs",
+    "doctor": "node src/doctor.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CanArslanDev/opencode-venice-web.git"
+  }
+}
