@@ -1,6 +1,6 @@
 {
   "name": "opencode-venice-web",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Turn your venice.ai web subscription into a local OpenAI-compatible endpoint, so OpenCode (and any other agent) can use the unlimited web models without spending API credits.",
   "keywords": [
     "opencode",

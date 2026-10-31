@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.4 - 2026-10-31
+
+- Stop the session from pausing on a plan. Real session ("Notchnook Pro
+  crackleme"): after a tool result the model wrote "Şimdi ... arayacağım" with
+  `tool_calls:[]` and the session went idle halfway through the task. The proxy now
+  detects a reply that only announces the next step (`looksLikePlan`: closing
+  sentences, a trailing colon, a numbered next-steps list) and retries it with an
+  ACT NOW reminder.
+- The retry reminder moved from the system prompt to a trailing **user** message,
+  which the model obeys far more reliably (27 of 28 retries turned into tool calls
+  in the real session, versus 1 of 5 before).
+- New trigger: when the last tool output looks like a failure ("No such file",
+  traceback, non-zero exit) and the model answers anyway, it is retried too. This
+  came from a stress task where the model assumed a file existed and reported
+  success without ever writing it.
+- Tool prompt says not to end a turn with a plan.
+- Stress suite result after these fixes: 16/16 verified tasks, twice in a row.
+
 ## 0.1.3 - 2026-10-31
 
 - Survive the model's sloppy JSON. A real capture showed file content dumped

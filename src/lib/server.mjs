@@ -15,6 +15,7 @@ import {
   countTokens,
   parseToolReply,
   preferAnswer,
+  lastToolResult,
   shouldRetry,
   sseReader,
   toVeniceRequest,
@@ -144,7 +145,11 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
     // tool calls on a user turn, or prose instead of the envelope.
     for (let round = 0; round < 2; round++) {
       const last = [...(body.messages ?? [])].reverse().find((item) => item.role !== 'system' && item.role !== 'developer')
-      const { retry, reason, reminder } = shouldRetry({ message, lastRole: last?.role })
+      const { retry, reason, reminder } = shouldRetry({
+        message,
+        lastRole: last?.role,
+        lastToolOutput: lastToolResult(body.messages),
+      })
       if (!retry) break
 
       log(`  ~ ${reason}, retrying...`)
