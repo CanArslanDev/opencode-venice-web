@@ -38,6 +38,8 @@ Or without cloning:
 curl -fsSL https://raw.githubusercontent.com/CanArslanDev/opencode-venice-web/main/install.sh | sh -s -- --default
 ```
 
+> The `raw.githubusercontent.com` shortcut only works while the repository is **public**. For a private repo, use the `git clone` flow above (or any mirror you control).
+
 Prefer doing it by hand? Three commands:
 
 ```sh
