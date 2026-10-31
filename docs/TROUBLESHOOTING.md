@@ -91,6 +91,36 @@ systemctl --user restart ai.opencode.venice-web
 journalctl --user -u ai.opencode.venice-web -f
 ```
 
+## `400 String must not contain null bytes`
+
+A NUL byte (`\x00`) reached the request. It usually comes from reading a binary file: `grep -a`, `cat` or `tail` on a `.db`, `.pyc`, binary or app bundle puts NUL bytes into a tool result, they land in the stored session, and every later request of that session carries them.
+
+The web endpoint tolerates NUL bytes in messages and tool results but rejects them in the system prompt, where the message is:
+
+```
+String must not contain null bytes   (path: ["systemPrompt","instructions"])
+```
+
+The proxy already fixes this for you:
+
+* it repairs a request body that contains a raw control byte before parsing it, and
+* it replaces NUL bytes in the outgoing payload, logging `scrubbed N NUL byte(s)`.
+
+So a NUL byte in the session is harmless for `venice-web`. For **other** providers, install the plugin once:
+
+```sh
+./install.sh --with-nul-plugin
+# or: cp packaging/opencode-nul-sanitizer.ts ~/.config/opencode/plugins/
+```
+
+To keep the tool output clean in the first place:
+
+```sh
+grep -a "pattern" file | tr -d '\000'
+strings -a file | grep "pattern"
+tail -5 file | tr -d '\000'
+```
+
 ## `400 Invalid request body` from Venice
 
 The web client shipped a new schema. Try:

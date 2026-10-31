@@ -30,6 +30,8 @@ cd opencode-venice-web
 
 That installs the code to `~/.local/share/opencode-venice-web`, adds the `venice-web` provider to `~/.config/opencode/opencode.json`, starts a background service (launchd or systemd), and signs in by reading the `venice.ai` cookie from Brave/Chrome/Edge/Chromium.
 
+Add `--with-nul-plugin` if you also use other providers from OpenCode (see [NUL bytes](#nul-bytes-and-400-invalid-request)).
+
 Then **restart OpenCode** and pick a model such as `venice-web/deepseek-v4-1-flash-free`.
 
 Or without cloning:
@@ -154,6 +156,17 @@ All environment variables are optional; the defaults are what the installer uses
 - **No sampling controls.** `temperature`, `top_p` and `max_tokens` are not applied by this endpoint.
 - **Unlimited, not infinite.** Venice's fair-use and Cloudflare bot checks apply. A Cloudflare challenge surfaces as HTTP 401 with a "refresh the cookies" message.
 - **Web session, not API route.** Anything that needs the official API surface (embeddings, images, video, `/responses`) still has to use `api.venice.ai` with an API key. Both can coexist in OpenCode - the installer only *adds* a provider.
+
+### NUL bytes and `400 Invalid request parameters`
+
+Reading a binary file with `grep -a`, `cat` or `tail` puts NUL bytes into a tool result, from there into the stored conversation, and from there into every later request. The web inference endpoint tolerates NUL bytes in most places but rejects them inside `systemPrompt` with `String must not contain null bytes`, which breaks that session for good.
+
+The proxy handles this on its own, so `venice-web` needs no plugin:
+
+* a request body with a raw control byte is repaired before parsing,
+* every string in the outgoing payload is scrubbed (NUL becomes a space) and logged.
+
+Installing `--with-nul-plugin` adds a small OpenCode plugin (`packaging/opencode-nul-sanitizer.ts`, copied to `~/.config/opencode/plugins/`) that does the same for **every other provider** you use from OpenCode. It is redundant for `venice-web` but the official Venice API has the same limit, so it is worth having if you switch providers per session. Use `/fix-nuls` style history cleanups as usual.
 
 ---
 

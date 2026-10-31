@@ -19,6 +19,7 @@ import {
 } from './emulate.mjs'
 import { MODELS } from './models.mjs'
 import { debugRaw, log, preview, warn } from './log.mjs'
+import { deepStripNulls, repairJsonControlChars } from './sanitize.mjs'
 import { INFERENCE_PATH, SignInError, loadSession, resetSessionCache, upstreamChat } from './venice.mjs'
 
 const json = (res, status, payload) => {
@@ -32,7 +33,16 @@ async function readJson(req) {
   const chunks = []
   for await (const chunk of req) chunks.push(chunk)
   const raw = Buffer.concat(chunks).toString('utf8')
-  return raw ? JSON.parse(raw) : {}
+  if (!raw) return {}
+  try {
+    return JSON.parse(raw)
+  } catch (error) {
+    // JSON forbids raw control characters inside strings; some clients send a
+    // literal 0x00 byte anyway, which makes JSON.parse throw.
+    const repaired = repairJsonControlChars(raw)
+    if (repaired === raw) throw error
+    return JSON.parse(repaired)
+  }
 }
 
 /** Model catalog in OpenAI shape. */
@@ -189,6 +199,15 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
 async function handleChat(req, res) {
   const body = await readJson(req)
   const mapping = toVeniceRequest(body)
+
+  // Venice rejects null bytes ("String must not contain null bytes", HTTP 400)
+  // and a nested leak in the system prompt breaks the whole session, so scrub
+  // the outgoing payload. Tool results are the usual source (grep/cat/tail over
+  // a binary file).
+  const scrubbed = deepStripNulls(mapping.request)
+  const scrubbedBody = deepStripNulls(body)
+  const nulls = scrubbed + scrubbedBody
+  if (nulls) log(`   ~ scrubbed ${nulls} NUL byte(s) before sending upstream`)
 
   if (dumpFile) {
     try {

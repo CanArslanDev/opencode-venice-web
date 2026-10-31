@@ -27,7 +27,7 @@ jobs:
       - name: syntax check
         run: |
           sh -n install.sh
-          for file in src/*.mjs src/lib/*.mjs test/*.mjs; do node --check "$file"; done
+          for file in src/*.mjs src/lib/*.mjs test/*.mjs packaging/*.ts; do node --check "$file"; done
 
       # Boots the proxy without a session file and exercises the HTTP surface.
       - name: boot and smoke test

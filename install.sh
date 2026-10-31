@@ -6,6 +6,9 @@
 #   ./install.sh --no-service    ... without launchd/systemd
 #   ./install.sh --no-sync       ... without touching opencode.json
 #   ./install.sh --login         ... and sign in from this terminal
+#   ./install.sh --with-nul-plugin   ... also install the OpenCode NUL byte plugin
+#                                      (only needed for OTHER providers; the proxy
+#                                       already scrubs NUL bytes itself)
 #   ./install.sh --uninstall     remove code, service and the provider entry
 #   ./install.sh --uninstall --purge   ... and delete the stored session
 #
@@ -25,9 +28,11 @@ XDG_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
 INSTALL_DIR="${VENICE_WEB_INSTALL_DIR:-$HOME/.local/share/opencode-venice-web}"
 CONFIG_DIR="${VENICE_WEB_CONFIG_DIR:-$XDG_CONFIG/opencode/venice-web}"
 CONFIG_FILE="${OPENCODE_CONFIG:-$XDG_CONFIG/opencode/opencode.json}"
+PLUGIN_DIR="$XDG_CONFIG/opencode/plugins"
 
 SERVICE=1
 SYNC=1
+NUL_PLUGIN=0
 DO_LOGIN=0
 DEFAULT=0
 UNINSTALL=0
@@ -39,6 +44,7 @@ for arg in "$@"; do
     --no-sync) SYNC=0 ;;
     --default) DEFAULT=1 ;;
     --login) DO_LOGIN=1 ;;
+    --with-nul-plugin) NUL_PLUGIN=1 ;;
     --uninstall) UNINSTALL=1 ;;
     --purge) PURGE=1 ;;
     -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -84,6 +90,7 @@ start_service() {
 if [ "$UNINSTALL" = "1" ]; then
   stop_service
   rm -f "$PLIST" "$UNIT"
+  rm -f "$PLUGIN_DIR/venice-web-nul-sanitizer.ts"
   if [ "$SYNC" = "1" ] && [ -f "$INSTALL_DIR/src/sync.mjs" ]; then
     node "$INSTALL_DIR/src/sync.mjs" --remove --config "$CONFIG_FILE" || true
   fi
@@ -134,6 +141,19 @@ if [ "$SYNC" = "1" ]; then
   fi
 else
   say "skipped opencode.json (--no-sync)"
+fi
+
+# ------------------------------------------------------------------- nul plugin
+
+if [ "$NUL_PLUGIN" = "1" ]; then
+  mkdir -p "$PLUGIN_DIR"
+  cp "$INSTALL_DIR/packaging/opencode-nul-sanitizer.ts" "$PLUGIN_DIR/venice-web-nul-sanitizer.ts"
+  say "installed $PLUGIN_DIR/venice-web-nul-sanitizer.ts"
+  for existing in "$PLUGIN_DIR"/*.ts; do
+    [ -f "$existing" ] || continue
+    case "$existing" in *venice-web-nul-sanitizer.ts) continue ;; esac
+    grep -q 'u0000' "$existing" 2>/dev/null && say "note: $existing also scrubs NUL bytes (harmless overlap)"
+  done
 fi
 
 # ------------------------------------------------------------------- service
