@@ -15,7 +15,10 @@ import {
   isEmptyAnswer,
   parseToolReply,
   preferAnswer,
+  cleanLeakedEnvelope,
   reasoningMode,
+  repairArguments,
+  salvageCalls,
   shouldRetry,
   textOf,
   toVeniceRequest,
@@ -229,4 +232,61 @@ test('applyFallback never leaves a blank turn', () => {
   assert.equal(applyFallback(emptyEnvelope(), '  rescued prose  ').content, 'rescued prose')
   assert.equal(applyFallback(answerEnvelope('kept'), 'ignored').content, 'kept')
   assert.equal(applyFallback(callEnvelope(), '').content, '')
+})
+
+// ---------------------------------------------------- sloppy model JSON
+//
+// Real capture: on one turn the model dumped raw file content after
+// `"arguments":` with literal line breaks, which made JSON.parse fail, dropped
+// both tool calls, and leaked the envelope into the visible answer.
+
+const BROKEN_ENVELOPE = [
+  '{"content":"","tool_calls":[{"id":"call_1c0a","name":"write","arguments":',
+  'blob.bin ANALIZ RAPORU',
+  '=======================',
+  '',
+  'Dosya: blob.bin',
+  'Boyut: 30 bayt',
+  '',
+  ',"workdir":"/tmp/t13"}},{"id":"call_1c0b","name":"shell","arguments":{"command":"cat rapor.txt","workdir":"/tmp/t13"}}]}',
+].join('\n')
+
+test('extractEnvelopes: raw argument blob is repaired, calls survive', () => {
+  const out = extractEnvelopes(BROKEN_ENVELOPE)
+  assert.equal(out.sawEnvelope, true)
+  assert.deepEqual(out.tool_calls.map((call) => call.function.name), ['write', 'shell'])
+  assert.match(out.tool_calls[0].function.arguments, /"content":"blob.bin ANALIZ RAPORU/)
+  assert.deepEqual(JSON.parse(out.tool_calls[1].function.arguments), { command: 'cat rapor.txt', workdir: '/tmp/t13' })
+})
+
+test('extractEnvelopes: the leaked text becomes the visible content', () => {
+  const out = extractEnvelopes(BROKEN_ENVELOPE)
+  assert.match(out.content, /blob.bin ANALIZ RAPORU/)
+  assert.ok(!out.content.includes('"tool_calls"'), 'envelope scaffolding leaked into content')
+})
+
+test('repairArguments quotes only the raw run', () => {
+  const repaired = repairArguments('{"name":"write","arguments":\nraw line\nmore,"path":"a"}')
+  assert.deepEqual(JSON.parse(repaired), { name: 'write', arguments: 'raw line\nmore', path: 'a' })
+})
+
+test('salvageCalls handles a broken object and keeps JSON arguments intact', () => {
+  const calls = salvageCalls('{"name":"shell","arguments":{"command":"ls -la","workdir":"/x"},"name":"read","arguments":\nraw text,"path":"b"}')
+  assert.deepEqual(calls.map((call) => call.name), ['shell', 'read'])
+  assert.deepEqual(calls[0].arguments, { command: 'ls -la', workdir: '/x' })
+  assert.deepEqual(calls[1].arguments, { content: 'raw text' })
+})
+
+test('extractEnvelopes: literal newlines and trailing commas are tolerated', () => {
+  const out = extractEnvelopes('{"content":"line1\nline2","tool_calls":[],}')
+  assert.equal(out.sawEnvelope, true)
+  assert.equal(out.content, 'line1\nline2')
+})
+
+test('cleanLeakedEnvelope leaves normal prose alone', () => {
+  assert.equal(cleanLeakedEnvelope('just prose'), 'just prose')
+})
+
+test('tool prompt asks for escaped arguments', () => {
+  assert.match(TOOL_PROMPT, /arguments" is always a JSON object/)
 })

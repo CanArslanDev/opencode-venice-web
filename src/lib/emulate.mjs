@@ -14,6 +14,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { MODELS } from './models.mjs'
+import { repairJsonControlChars } from './sanitize.mjs'
 
 /**
  * Instruction appended to the system prompt. Small models obey a short, blunt
@@ -23,7 +24,8 @@ import { MODELS } from './models.mjs'
 export const TOOL_PROMPT = `You are connected to an external agent that executes tools on the user's computer. These tools ARE called directly by name in \`tool_calls\` (not inside \`execute\`); they are NOT Venice server tools.
 Return ONLY one valid JSON object, without markdown fences and without any text outside JSON, with this exact shape:
 {"content":"text for the user, or an empty string","tool_calls":[{"name":"exact tool name","arguments":{}}]}
-Use an empty tool_calls array when answering without tools. To request a tool, put its name and arguments in tool_calls and STOP; the agent executes it and sends a tool result in the next user message. Never invent tool results. If a task needs the filesystem, call a tool instead of guessing. Never send an empty "content" unless you are calling a tool.`
+Use an empty tool_calls array when answering without tools. To request a tool, put its name and arguments in tool_calls and STOP; the agent executes it and sends a tool result in the next user message. Never invent tool results. If a task needs the filesystem, call a tool instead of guessing. Never send an empty "content" unless you are calling a tool.
+"arguments" is always a JSON object: write file content into it as a properly escaped string (escape line breaks as \\n, escape quotes as \\").`
 
 /** Appended as the last user message; see docs/PROTOCOL.md ("format reminder"). */
 export const REMINDER_FIRST_TURN =
@@ -244,6 +246,31 @@ export function withRetryReminder(request, reminder = RETRY_REMINDER) {
 }
 
 /** Returns the index just past the balanced object starting at `start`, or -1. */
+/** Balanced end of a value that starts with `{` or `[`. */
+function scanObjectByKind(text) {
+  const open = text[0]
+  const close = open === '{' ? '}' : ']'
+  let depth = 0
+  let inString = false
+  let escaped = false
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i]
+    if (inString) {
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === '"') inString = false
+      continue
+    }
+    if (char === '"') inString = true
+    else if (char === open) depth++
+    else if (char === close) {
+      depth--
+      if (depth === 0) return i + 1
+    }
+  }
+  return -1
+}
+
 export function scanObject(text, start) {
   let depth = 0
   let inString = false
@@ -278,6 +305,153 @@ const newCallId = () => `call_${randomUUID().replaceAll('-', '').slice(0, 24)}`
  * which is what made the first version of this proxy look like "tools are
  * broken". Content pieces are joined; tool calls are concatenated.
  */
+/**
+ * Quotes a raw (non-JSON) run that follows `"arguments":`.
+ *
+ * The model sometimes dumps file content straight after the key, with literal
+ * line breaks and unescaped quotes:
+ *
+ *   "arguments":
+ *   blob.bin ANALIZ RAPORU
+ *   ...
+ *   ,"workdir":"/tmp"
+ *
+ * `JSON.stringify()` escapes the run, so the object becomes parseable again.
+ */
+export function repairArguments(text) {
+  const marker = /"arguments"\s*:\s*/g
+  let out = ''
+  let last = 0
+  let match
+  while ((match = marker.exec(text))) {
+    const start = match.index + match[0].length
+    out += text.slice(last, start)
+    last = start
+    const first = text[start]
+    // already looks like a JSON value? leave it alone
+    if (first !== undefined && '{["-0123456789tfn'.includes(first)) continue
+    const rest = text.slice(start)
+    const boundary = /,[\s\r\n]*"[\w$]+"\s*:/.exec(rest)
+    const end = boundary ? start + boundary.index : text.length
+    const raw = text.slice(start, end).replace(/\s+$/, '')
+    out += JSON.stringify(raw)
+    last = start + raw.length
+  }
+  out += text.slice(last)
+  return out
+}
+
+/**
+ * Parses an envelope slice, repairing the model's JSON slips step by step:
+ * literal control characters, trailing commas, and raw argument blobs.
+ */
+function parseLoose(slice) {
+  const steps = [
+    (text) => text,
+    repairJsonControlChars,
+    (text) => repairJsonControlChars(text).replace(/,\s*([}\]])/g, '$1'),
+    (text) => repairArguments(repairJsonControlChars(text)),
+    (text) => repairArguments(repairJsonControlChars(text)).replace(/,\s*([}\]])/g, '$1'),
+  ]
+  for (const step of steps) {
+    try {
+      const parsed = JSON.parse(step(slice))
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed
+    } catch {
+      /* try the next repair */
+    }
+  }
+  return null
+}
+
+/**
+ * Last resort: pull `name`/`arguments` pairs out of a broken object with a
+ * tolerant scan, so a tool call is not lost just because the JSON is invalid.
+ */
+export function salvageCalls(slice) {
+  const calls = []
+  const nameRe = /"name"\s*:\s*"([^"]+)"/g
+  const argRe = /"arguments"\s*:\s*/g
+  let match
+  while ((match = nameRe.exec(slice))) {
+    const name = match[1]
+    argRe.lastIndex = match.index + match[0].length
+    const argMatch = argRe.exec(slice)
+    if (!argMatch || argMatch.index - (match.index + match[0].length) > 40) {
+      calls.push({ name, arguments: {} })
+      continue
+    }
+    const start = argMatch.index + argMatch[0].length
+    const rest = slice.slice(start)
+    let end
+    const trimmed = rest.replace(/^\s+/, '')
+    if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      // a real JSON value: take the balanced slice, not the next `,"key":`
+      const offset = rest.length - trimmed.length
+      const balanced = scanObjectByKind(trimmed)
+      end = start + (balanced > 0 ? offset + balanced : rest.length)
+    } else {
+      const boundary = /,[\s\r\n]*"[\w$]+"\s*:/.exec(rest)
+      end = boundary ? start + boundary.index : slice.length
+    }
+    const raw = slice.slice(start, end).replace(/[\s,]+$/, '')
+    let args = null
+    try {
+      args = JSON.parse(repairJsonControlChars(raw))
+    } catch {
+      args = null
+    }
+    if (args && typeof args === 'object' && !Array.isArray(args)) calls.push({ name, arguments: args })
+    else calls.push({ name, arguments: { content: raw } })
+  }
+  return calls
+}
+
+/** Removes the envelope scaffolding from text that failed to parse. */
+export function cleanLeakedEnvelope(text) {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith('{') || !trimmed.includes('"tool_calls"')) return trimmed
+  const start = trimmed.search(/"arguments"\s*:\s*/)
+  if (start < 0) return trimmed
+  const valueStart = trimmed.slice(start).search(/:\s*/) + start + 1
+  let body = trimmed.slice(valueStart).replace(/^\s+/, '')
+  // the tool call tail lives after the raw blob: strip it when present
+  body = body.replace(/\}?\s*\}?\s*,?\s*$/, '')
+  body = body.replace(/\}\s*\]\s*\}?\s*$/, '')
+  return stripToolResultTags(body).trim() || trimmed
+}
+
+const isValidArgString = (value) => {
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+  } catch {
+    return false
+  }
+}
+
+/** Builds an OpenAI tool call from a parsed envelope entry. */
+function buildCall(call) {
+  if (!call || typeof call.name !== 'string') return null
+  // Some models put the arguments at the call's top level instead of under
+  // `arguments`; accept both shapes.
+  let args = call.arguments
+  if (args === undefined) {
+    const { name, id, type, ...rest } = call
+    args = rest
+  }
+  if (typeof args === 'string') {
+    // A plain string that is not JSON (raw file content) is passed on as-is,
+    // wrapped so the tool sees an object.
+    args = isValidArgString(args) ? args : JSON.stringify({ content: args })
+  }
+  return {
+    id: newCallId(),
+    type: 'function',
+    function: { name: call.name, arguments: typeof args === 'string' ? args : JSON.stringify(args ?? {}) },
+  }
+}
+
 export function extractEnvelopes(text) {
   const parts = []
   const tool_calls = []
@@ -293,19 +467,25 @@ export function extractEnvelopes(text) {
     }
     if (start > index) pending += text.slice(index, start)
     const end = scanObject(text, start)
-    let parsed = null
-    if (end > 0) {
-      try {
-        parsed = JSON.parse(text.slice(start, end))
-      } catch {
-        parsed = null
+    const slice = end > 0 ? text.slice(start, end) : ''
+    const parsed = slice ? parseLoose(slice) : null
+
+    let calls = null
+    let piece = typeof parsed?.content === 'string' ? parsed.content.trim() : ''
+    const looksLikeEnvelope = parsed !== null || slice.includes('"tool_calls"')
+
+    if (looksLikeEnvelope && !Array.isArray(parsed?.tool_calls) && !piece) {
+      // Broken JSON: salvage the tool calls and the leaked text next to them.
+      const salvaged = salvageCalls(slice)
+      if (salvaged.length) {
+        calls = salvaged
+        piece = cleanLeakedEnvelope(slice)
       }
     }
+
     const isEnvelope =
-      parsed !== null &&
-      typeof parsed === 'object' &&
-      !Array.isArray(parsed) &&
-      (Array.isArray(parsed.tool_calls) || typeof parsed.content === 'string')
+      looksLikeEnvelope &&
+      (Array.isArray(parsed?.tool_calls) || typeof parsed?.content === 'string' || (calls?.length ?? 0) > 0)
 
     if (!isEnvelope) {
       // Not an envelope: keep the brace as prose and keep scanning after it.
@@ -317,29 +497,14 @@ export function extractEnvelopes(text) {
     sawEnvelope = true
     if (pending.trim()) parts.push(pending.trim())
     pending = ''
-
-    const piece = typeof parsed.content === 'string' ? parsed.content.trim() : ''
     if (piece) parts.push(piece)
 
-    for (const call of parsed.tool_calls ?? []) {
-      if (!call || typeof call.name !== 'string') continue
-      // Some models put the arguments at the call's top level instead of under
-      // `arguments`; accept both shapes.
-      let args = call.arguments
-      if (args === undefined) {
-        const { name, id, type, ...rest } = call
-        args = rest
-      }
-      tool_calls.push({
-        id: newCallId(),
-        type: 'function',
-        function: {
-          name: call.name,
-          arguments: typeof args === 'string' ? args : JSON.stringify(args ?? {}),
-        },
-      })
+    const rawCalls = calls ?? parsed.tool_calls ?? []
+    for (const call of rawCalls) {
+      const built = buildCall(call)
+      if (built) tool_calls.push(built)
     }
-    index = end
+    index = end > 0 ? end : start + 1
   }
 
   if (pending.trim()) parts.push(pending.trim())

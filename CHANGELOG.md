@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.3 - 2026-10-31
+
+- Survive the model's sloppy JSON. A real capture showed file content dumped
+  straight after `"arguments":` with literal line breaks, which made
+  `JSON.parse` fail: the tool calls were dropped and the envelope leaked into the
+  visible answer. `extractEnvelopes()` now runs a repair ladder (control
+  characters, trailing commas, raw argument blobs), a tolerant `salvageCalls()`
+  fallback, and `cleanLeakedEnvelope()` so the leaked text becomes the answer.
+  A tool call is no longer lost to invalid JSON.
+- Raw argument blobs that are not JSON are wrapped as `{"content": ...}` instead
+  of being passed through as an unparseable string.
+- The tool prompt asks for escaped arguments (newlines as `\n`, quotes as `\"`).
+
 ## 0.1.2 - 2026-10-31
 
 - Never forward a blank assistant turn. The model occasionally answers
