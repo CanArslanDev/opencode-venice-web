@@ -110,6 +110,7 @@ A small model asked for a custom format is *usually* compliant, but not always. 
 | **Broken JSON is repaired, not dropped**: repair ladder (control chars, trailing commas, raw `arguments` blobs) + `salvageCalls()` + `cleanLeakedEnvelope()` | a raw file dump after `"arguments":` used to cost both tool calls and leak the envelope into the answer |
 | **A plan is not an answer**: `looksLikePlan()` spots "now I will X" / a trailing numbered list and retries with an ACT NOW reminder sent as a user message | real session stopped halfway at every plan; after the fix 27/28 retries became tool calls and the task finished |
 | **A failed tool output blocks a final answer**: missing file / traceback / non-zero exit triggers one retry | the model assumed a file existed, never wrote it, and reported success |
+| **Failure detection ignores zero counts and grep output**: "0 failed" / "fail 0" are blanked first, and `error:` / `not found` are not signals inside search results | 18 of 110 failure retries in the same log changed nothing |
 | **A blank reply never wins**: `preferAnswer()` guards the retry, and `applyFallback()` uses the raw text then an `(empty reply)` marker | an empty assistant message has no parts at all, so the client shows nothing and the session looks frozen |
 
 Additional hardening in `extractEnvelopes()`:

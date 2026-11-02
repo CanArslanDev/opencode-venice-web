@@ -17,6 +17,7 @@ import {
   lastToolResult,
   looksLikeFailure,
   looksLikePlan,
+  looksLikeSearchOutput,
   PLAN_RETRY_REMINDER,
   parseToolReply,
   preferAnswer,
@@ -386,6 +387,43 @@ test('looksLikeFailure spots real tool failures', () => {
   assert.equal(looksLikeFailure('zsh: command not found: nm'), true)
   assert.equal(looksLikeFailure('{"error":{"type":"tool.execution","message":"boom"}}'), true)
   assert.equal(looksLikeFailure('total 8\ndrwxr-xr-x  3 user  staff  96'), false)
+})
+
+test('looksLikeFailure ignores zero-count summaries', () => {
+  assert.equal(looksLikeFailure('0 failed'), false)
+  assert.equal(looksLikeFailure('Tests 12 passed, 0 failed'), false)
+  assert.equal(looksLikeFailure('fail 0'), false)
+  assert.equal(looksLikeFailure('passed 20, failed: 0, errors: 0'), false)
+})
+
+test('looksLikeFailure spots real failures next to counts', () => {
+  assert.equal(looksLikeFailure('Error: ENOENT: no such file or directory'), true)
+  assert.equal(looksLikeFailure('Tests 3 passed, 2 failed'), true)
+  assert.equal(looksLikeFailure('process exited with code 1'), true)
+  assert.equal(looksLikeFailure('Traceback (most recent call last):\n  File "a.py", line 1'), true)
+  assert.equal(looksLikeFailure('bash: foo: command not found'), true)
+})
+
+test('looksLikeSearchOutput recognises grep style hits', () => {
+  const grep = 'src/a.mjs:12:const x = 1\nsrc/b.mjs:40:if (y) {\nsrc/c.mjs:7:z()'
+  // `: ` right after the line number is not required by grep -n output
+  assert.equal(looksLikeSearchOutput('src/a.mjs:12:const x = 1\nsrc/b.mjs:40:if (y) {'), true)
+  assert.equal(looksLikeSearchOutput(grep), true)
+  assert.equal(looksLikeSearchOutput('total 8\ndrwxr-xr-x  3 user  staff  96'), false)
+  assert.equal(looksLikeSearchOutput('only one line'), false)
+})
+
+test('looksLikeFailure ignores error:/not found inside grep output', () => {
+  const grep = [
+    'src/a.mjs:12:throw new Error("boom")',
+    'src/b.mjs:40:catch (error:) {}',
+    'src/c.mjs:7:const message = "not found"',
+  ].join('\n')
+  assert.equal(looksLikeFailure(grep), false)
+  // a real failure line in the output still counts
+  assert.equal(looksLikeFailure('src/a.mjs:1:const error = 1\nsrc/b.mjs:2:x'), false)
+  assert.equal(looksLikeFailure('src/a.mjs:1:const error = 1\nsrc/b.mjs:2:y\nsrc/c.mjs:3:z'), false)
+  assert.equal(looksLikeFailure('src/a.mjs:1:x\nError: ENOENT: no such file or directory'), true)
 })
 
 test('lastToolResult finds the newest tool message', () => {

@@ -75,7 +75,7 @@ const ERROR_SIGNALS = [
   /is not a function/i,
   /no tool named/i,
   /exited with (code )?[1-9]/i,
-  /failed\b/i,
+  /\b(\d+\s+)?failed\b/i,
 ]
 
 export function lastToolResult(messages) {
@@ -87,10 +87,38 @@ export function lastToolResult(messages) {
   return ''
 }
 
+/**
+ * Zero-count summaries ("0 failed", "Tests 12 passed, 0 failed", "fail 0") read
+ * like a failure because of the word, so they are blanked out first. Same for
+ * the phrases that only say something about the source when the text is a
+ * search result rather than a command output.
+ */
+const ZERO_COUNT = [
+  /\b0\s+(failed|failures?|errors?)\b/gi,
+  /\b(failed|failures?|errors?)\s*:\s*0\b/gi,
+  /\bfail\s+0\b/gi,
+]
+const SEARCH_ONLY_SIGNAL_SOURCES = ['not found', '\\berror:']
+const SEARCH_LINE = /^[^\s:]+:\d+:/
+
+/** grep/ripgrep output: most non-blank lines start with `path:line: `. */
+export function looksLikeSearchOutput(text) {
+  const lines = (text ?? '').split('\n').filter((line) => line.trim())
+  if (lines.length < 2) return false
+  const hits = lines.filter((line) => SEARCH_LINE.test(line)).length
+  return hits / lines.length > 0.5
+}
+
 export function looksLikeFailure(text) {
-  const value = (text ?? '').trim()
+  let value = (text ?? '').trim()
   if (!value) return false
-  return ERROR_SIGNALS.some((pattern) => pattern.test(value))
+  for (const pattern of ZERO_COUNT) value = value.replace(pattern, ' ')
+  if (!value.trim()) return false
+  const search = looksLikeSearchOutput(value)
+  const skip = search ? SEARCH_ONLY_SIGNAL_SOURCES : []
+  return ERROR_SIGNALS.some(
+    (pattern) => !skip.includes(pattern.source) && pattern.test(value),
+  )
 }
 
 /** Empty reply: no tool calls and nothing but whitespace in content. */
