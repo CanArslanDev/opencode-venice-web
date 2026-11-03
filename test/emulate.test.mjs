@@ -358,6 +358,33 @@ test('looksLikePlan does not fire on finished answers', () => {
   assert.equal(looksLikePlan(''), false)
 })
 
+test('looksLikePlan ignores markers inside longer words', () => {
+  assert.equal(looksLikePlan('Fixed the authentication flow; all 12 tests pass.'), false)
+  assert.equal(looksLikePlan('Added an explanation section to the README.'), false)
+  assert.equal(looksLikePlan('Değişiklikleri yaptım, testler geçti. Bunu öneriyorum.'), false)
+  assert.equal(looksLikePlan('Tamamlandı: 3 dosya güncellendi, testler geçiyor.'), false)
+})
+
+test('looksLikePlan still fires on English and Turkish future plans', () => {
+  assert.equal(looksLikePlan('Now I will update the tests.'), true)
+  assert.equal(looksLikePlan('Şimdi testleri güncelleyeceğim.'), true)
+})
+
+test('looksLikePlan matches the Turkish future/optative suffix without a word start', () => {
+  assert.equal(looksLikePlan('Testleri güncelleyeceğim.'), true)
+  assert.equal(looksLikePlan('Dosyaya bir bakayım.'), true)
+})
+
+test('looksLikePlan: a strong marker wins over a done marker in the same sentence', () => {
+  assert.equal(looksLikePlan('Tamam, şimdi testleri güncelleyeceğim.'), true)
+  assert.equal(looksLikePlan('Done, now let me run the tests.'), true)
+})
+
+test('looksLikePlan needs "şimdi" next to a present-continuous verb', () => {
+  assert.equal(looksLikePlan('Dosya hazır, içeriği yazıyorum.'), false)
+  assert.equal(looksLikePlan('Şimdi dosyayı yazıyorum.'), true)
+})
+
 test('shouldRetry: a plan after a tool result is retried with its own reminder', () => {
   const plan = parseToolReply(JSON.stringify({ content: REAL_PLAN, tool_calls: [] }))
   assert.deepEqual(shouldRetry({ message: plan, lastRole: 'tool' }), {

@@ -131,29 +131,54 @@ export function isEmptyAnswer(message) {
  * symbols", "next step: ..."). The model then stops with `tool_calls: []` and the
  * session looks finished while half the task is still open.
  */
-const PLAN_MARKERS = [
-  // "now I will ..." / "next up ..." - substring form, because Turkish letters
-  // (ı, ş, ğ, ü) are not \w in JavaScript regexes and \b boundaries misfire.
-  /(şimdi|simdi|şu an|su an|şu anda)/,
-  /(sonra|ardından|sırada|sıradaki|sonraki|plan|planım|(^| )adım)/,
-  /(acağım|eceğim|acağız|eceğiz|ayım\b|eyim\b)/,
-  /(ıyorum|iyorum|uyorum|üyorum)/,
-  /(will|let me|going to|about to|next step|now let|then)/,
+// Turkish letters are not \w, so \b misfires around them; the u flag plus
+// Unicode-aware boundaries matches whole words instead. Substring matches
+// ("then" inside "authentication", "plan" inside "explanation") were the
+// biggest source of useless retries, so every marker is word-bounded.
+const B = '(?<![\\p{L}\\p{N}])'
+const E = '(?![\\p{L}\\p{N}])'
+const word = (alternatives) => new RegExp(`${B}(?:${alternatives})${E}`, 'iu')
+
+// A strong marker announces action right now and wins over a done marker in the
+// same sentence ("Tamam, şimdi testleri güncelleyeceğim."); weak ones only count
+// when the sentence has no done marker at all.
+const STRONG_PLAN_MARKERS = [
+  word('şimdi|simdi|şu an|şu anda'),
+  // Turkish future/optative suffixes only close a word: "güncelleyeceğim",
+  // "bakayım" - so they are end-anchored only, without a boundary before them
+  new RegExp('(?:acağım|eceğim|acağız|eceğiz|ayım|eyim)' + E, 'iu'),
+  word('will|let me|going to|about to|next step|now let'),
 ]
-const DONE_MARKERS = /\b(tamamland[ıi]|tamamdır|bitti|tamam|haz[ıi]r|tamamen|done|complete[d]?|finished|özet|özetle|sonuç|sonuc)\b/
+const WEAK_PLAN_MARKERS = [word('sonra|ardından|sırada|sıradaki|sonraki|plan|planım|adım|then')]
+// Present-continuous ("öneriyorum") alone is too weak: it also closes a final
+// summary, so it only counts next to an explicit "şimdi"/"simdi".
+const PRESENT_CONTINUOUS = word('ıyorum|iyorum|uyorum|üyorum')
+const NOW_MARKER = word('şimdi|simdi')
+const DONE_MARKERS = word(
+  'tamamland[ıi]|tamamdır|bitti|tamam|haz[ıi]r|tamamen|done|complete[d]?|finished|özet|özetle|sonuç|sonuc',
+)
+
+/** Splits at sentence ends and returns the last sentence. */
+function lastSentence(text) {
+  const matches = [...text.matchAll(/[.!?…]+\s+/g)]
+  const start = matches.length ? matches[matches.length - 1].index + matches[matches.length - 1][0].length : 0
+  return text.slice(start)
+}
 
 export function looksLikePlan(content) {
   const text = (content ?? '').trim()
   if (!text) return false
-  // A plan announces itself in the closing sentences ("... now I will resign it"),
-  // so both signals are checked on the tail only: a "tamam" in the middle of a
-  // long status report must not hide the plan at the end.
   if (/[:…]\s*$/.test(text)) return true
-  // The closing part decides. 240 chars was too narrow for long status reports
-  // that end with a numbered "next steps" list, so the window is wider; a
-  // "tamam" earlier in the reply must not veto a plan announced at the end.
-  const tail = text.toLowerCase().slice(-600)
-  if (PLAN_MARKERS.some((pattern) => pattern.test(tail))) return true
+  // Only the closing part decides: a "tamam" in the middle of a long status
+  // report must not hide the plan at the end.
+  const tail = text.slice(-300)
+  const last = lastSentence(tail)
+  // A strong plan marker wins even next to a done marker; only then a done
+  // marker vetoes, and a weak marker is the last resort.
+  if (STRONG_PLAN_MARKERS.some((pattern) => pattern.test(last))) return true
+  if (DONE_MARKERS.test(last)) return false
+  if (WEAK_PLAN_MARKERS.some((pattern) => pattern.test(last))) return true
+  if (PRESENT_CONTINUOUS.test(last) && NOW_MARKER.test(last)) return true
   // a trailing enumeration of upcoming work counts as a plan too
   return /\(1\)[\s\S]{0,600}\(2\)/.test(text.slice(-700))
 }
