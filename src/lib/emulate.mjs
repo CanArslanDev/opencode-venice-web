@@ -240,6 +240,40 @@ export function preferAnswer(candidate, current) {
 }
 
 /**
+ * Maps the names models invent for common tools onto the real ones. `shell`,
+ * `read`, `grep` and friends are the names this proxy advertises, so an
+ * invented alias is only useful when the target is actually available.
+ */
+const TOOL_ALIASES = {
+  bash: 'shell',
+  sh: 'shell',
+  zsh: 'shell',
+  terminal: 'shell',
+  run: 'shell',
+  run_command: 'shell',
+  execute_command: 'shell',
+  cat: 'read',
+  read_file: 'read',
+  view: 'read',
+  write_file: 'write',
+  create_file: 'write',
+  edit_file: 'edit',
+  str_replace: 'edit',
+  search: 'grep',
+  rg: 'grep',
+  find: 'grep',
+  ls: 'glob',
+  list_files: 'glob',
+}
+
+/** Resolves an invented tool name to an available one, or returns it unchanged. */
+export function normalizeToolName(name, available) {
+  if (available?.has(name)) return name
+  const target = TOOL_ALIASES[name]
+  return target && available?.has(target) ? target : name
+}
+
+/**
  * Code Mode wrappers. OpenCode advertises `execute`/`search` alongside real
  * tools and their description ("cannot be called directly") confuses models
  * that are being asked to call tools by name, so they are hidden when other

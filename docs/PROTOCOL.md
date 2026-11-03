@@ -112,6 +112,7 @@ A small model asked for a custom format is *usually* compliant, but not always. 
 | **Plan markers are word-bounded**: Unicode-aware boundaries plus the Turkish future/optative suffix at word end; a done marker only vetoes weak markers | substring hits ("then" in authentication, "plan" in explanation) made the model retry finished answers; 64 of 240 plan retries in a 2,400-request log changed nothing |
 | **A failed tool output blocks a final answer**: missing file / traceback / non-zero exit triggers one retry | the model assumed a file existed, never wrote it, and reported success |
 | **Failure detection ignores zero counts and grep output**: "0 failed" / "fail 0" are blanked first, and `error:` / `not found` are not signals inside search results | 18 of 110 failure retries in the same log changed nothing |
+| **Invented tool names are normalised**: `bash`, `cat`, `ls` and friends are mapped onto the available tool via `normalizeToolName()` | the model otherwise calls a tool that does not exist and the turn dies |
 | **A blank reply never wins**: `preferAnswer()` guards the retry, and `applyFallback()` uses the raw text then an `(empty reply)` marker | an empty assistant message has no parts at all, so the client shows nothing and the session looks frozen |
 
 Additional hardening in `extractEnvelopes()`:
@@ -120,7 +121,8 @@ Additional hardening in `extractEnvelopes()`:
 * prose before/after an envelope is kept as `content`,
 * arguments may sit at the call's top level instead of under `arguments`,
 * `<tool_result>` tags the model writes by hand are stripped,
-* string escapes and nested braces are scanned correctly.
+* string escapes and nested braces are scanned correctly,
+* `normalizeToolName()` maps invented tool names (`bash`, `sh`, `cat`, `ls`, `rg`, …) onto the real tool when that tool is available, and leaves unknown names alone.
 
 ### Things that do **not** help (measured)
 

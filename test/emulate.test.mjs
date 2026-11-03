@@ -18,6 +18,7 @@ import {
   looksLikeFailure,
   looksLikePlan,
   looksLikeSearchOutput,
+  normalizeToolName,
   PLAN_RETRY_REMINDER,
   parseToolReply,
   preferAnswer,
@@ -451,6 +452,24 @@ test('looksLikeFailure ignores error:/not found inside grep output', () => {
   assert.equal(looksLikeFailure('src/a.mjs:1:const error = 1\nsrc/b.mjs:2:x'), false)
   assert.equal(looksLikeFailure('src/a.mjs:1:const error = 1\nsrc/b.mjs:2:y\nsrc/c.mjs:3:z'), false)
   assert.equal(looksLikeFailure('src/a.mjs:1:x\nError: ENOENT: no such file or directory'), true)
+})
+
+test('normalizeToolName keeps available names and maps invented ones', () => {
+  const available = new Set(['shell', 'read', 'write', 'edit', 'grep', 'glob'])
+  assert.equal(normalizeToolName('read', available), 'read')
+  assert.equal(normalizeToolName('bash', available), 'shell')
+  assert.equal(normalizeToolName('run_command', available), 'shell')
+  assert.equal(normalizeToolName('cat', available), 'read')
+  assert.equal(normalizeToolName('write_file', available), 'write')
+  assert.equal(normalizeToolName('str_replace', available), 'edit')
+  assert.equal(normalizeToolName('rg', available), 'grep')
+  assert.equal(normalizeToolName('list_files', available), 'glob')
+})
+
+test('normalizeToolName leaves unknown names and missing targets alone', () => {
+  assert.equal(normalizeToolName('todowrite', new Set(['shell', 'read'])), 'todowrite')
+  assert.equal(normalizeToolName('bash', new Set(['read'])), 'bash')
+  assert.equal(normalizeToolName('bash', new Set()), 'bash')
 })
 
 test('lastToolResult finds the newest tool message', () => {

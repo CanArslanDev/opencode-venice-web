@@ -16,6 +16,7 @@ import {
   parseToolReply,
   preferAnswer,
   lastToolResult,
+  normalizeToolName,
   shouldRetry,
   sseReader,
   toVeniceRequest,
@@ -185,6 +186,13 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
     debugRaw(body.model, state.text)
     contentForUsage = message.content ?? ''
     if (message.tool_calls) {
+      for (const call of message.tool_calls) {
+        const mapped = normalizeToolName(call.function.name, mapping.toolNames)
+        if (mapped && mapped !== call.function.name) {
+          log(`  ~ tool name ${call.function.name} -> ${mapped}`)
+          call.function.name = mapped
+        }
+      }
       finish = 'tool_calls'
       log(`  <- tools: ${message.tool_calls.map((call) => `${call.function.name}(${call.function.arguments.slice(0, 80)})`).join(' | ')}`)
       yield chunk({
