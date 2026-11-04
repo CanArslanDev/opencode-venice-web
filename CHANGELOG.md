@@ -12,13 +12,35 @@
 - Reasoning deltas now stream live instead of being buffered to the end of the
   reply, and an SSE keepalive comment goes out every 15 s. The client no longer
   sits through minutes of silence while a tool reply is parsed and retried.
-- The plan detector matches whole words only, with Unicode-aware boundaries and
-  the Turkish future/optative suffix at word end. Substring hits ("then" inside
-  "authentication", "plan" inside "explanation") made the model retry finished
-  answers; a done marker now vetoes only weak markers. In a 2,400-request log, 64
-  of 240 plan retries and 18 of 110 failure retries changed nothing.
-- The failure detector ignores zero-count summaries ("0 failed", "fail 0") and
-  grep output, where `error:` and `not found` are content, not a failure.
+- **No more word lists.** The plan detector (`looksLikePlan`) and the failure
+  detector (`looksLikeFailure`) matched Turkish and English words; on 29 labelled
+  turn endings from real sessions they caught 0 of 13 early stops and could never
+  work in other languages. They are gone. Whether a turn may end is now decided by
+  structure: the envelope has a required `status` (`continue`/`done`/`ask`), and
+  `continue` without a tool call is retried. Every other answer after a tool
+  result goes to a judge, a second model call (`qwen3-5-35b-a3b` by default) that
+  reads the request, the last tool outputs and the reply. It caught ~87% of the
+  real stops, also in German, Japanese and Spanish. Replaying the real stop points,
+  the session went on at 18 of 18 (previous build: 15 of 18). Re-serialised
+  history keeps its `status`, which took compliance from 8/15 to 15/15.
+  `VENICE_WEB_JUDGE`, `VENICE_WEB_JUDGE_MODEL`, `VENICE_WEB_JUDGE_TIMEOUT`.
+- **Structural JSON repair.** A new tolerant reader (`src/lib/lenient-json.mjs`)
+  closes unclosed call objects, puts keys back into an `arguments` object that
+  was closed too early, and tolerates unescaped quotes. All 8 broken shapes seen
+  on 2026-11-04 (13 replies, 4 of them lost a tool call) now parse into complete
+  calls; they are kept as fixtures in `test/fixtures/real-replies.mjs`. An
+  envelope nested inside `content` is unwrapped. A reply that still cannot be
+  read is retried instead of shown as raw JSON.
+- **Calls are checked before they reach the agent.** Each call is validated
+  against the tool's own JSON schema; an unknown tool (`view_media`) or a missing
+  required argument (`edit` without `newString`) is sent back to the model with
+  the exact problem and the list of available tools.
+- DeepSeek's native `｜DSML｜` tool markup and invented `<tool_response>` blocks
+  are stripped from answers; complete native `invoke` blocks become tool calls.
+- The tool prompt asks for multi-line scripts to be written to a file first
+  (OpenCode's shell scanner rejects multi-line quoted commands) and not to ask for
+  permission the user already gave.
+- `scripts/stress/`: eight self-verifying OpenCode tasks in five languages.
 - Invented tool names (`bash`, `cat`, `ls`, ...) are mapped onto the available
   tools instead of failing as unknown.
 

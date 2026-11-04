@@ -116,27 +116,40 @@ The proxy handles it (0 blank turns over a 24-turn reproduction):
 If you still see it, check the log for the reason and open an issue with the raw
 reply (`VENICE_WEB_DEBUG=1`, then `debug.log`).
 
-## The session stops mid-task with a plan
+## The session stops mid-task
 
-Symptom: the assistant writes "Şimdi ... bakacağım / Sıradaki adım: ..." (or a
-numbered next-steps list) and the turn ends with `tool_calls: []`, so the session
-looks finished while half the work is open.
+Symptom: the assistant says what it is about to do (in any language) or lists the
+remaining steps, and the turn ends with `tool_calls: []`, so the session looks
+finished while half the work is open.
 
-The proxy retries such a reply once with an ACT NOW reminder, sent as a *user*
-message (the channel the model actually obeys), and prefers the retry when it
-contains tool calls. The same applies when the last tool output looks like a
-failure. Watch it in the log:
+The proxy decides this without reading the words. The envelope carries a `status`;
+`continue` without a tool call is retried at once. Any other answer that follows a
+tool result is checked by the judge, a second model call that reads the request,
+the last tool outputs and the reply. If it says the turn stopped early or skipped a
+failed tool output, the reply is retried with a reminder sent as a *user* message.
+Watch it in the log:
 
 ```
-  ~ reply describes the next step, retrying...
+  ~ judge: stopped_early (promises to run the tests but calls no tool)
+  ~ judge: stopped early, retrying...
   ~ retry improved the reply
-  <- tools: write(...)
+  <- tools: shell(...)
 ```
 
-If it still stops, the model is out of step with the task: ask for the next step
-explicitly ("devam et") or switch to a more obedient model
-(`venice-web/qwen-3-8-27b`). `VENICE_WEB_DEBUG=1` writes the raw replies to
-`debug.log`.
+`VENICE_WEB_JUDGE_MODEL` picks the judge model (default `qwen3-5-35b-a3b`),
+`VENICE_WEB_JUDGE=0` turns it off. A judge that fails or times out never blocks a
+reply. If the session still stops, ask for the next step explicitly and open an
+issue with the raw reply (`VENICE_WEB_DEBUG=1`, then `debug.log`).
+
+## Raw JSON or `｜DSML｜` tags in an answer, or `Invalid arguments for tool`
+
+The model's envelope was malformed: an unclosed object, an `arguments` object closed
+too early, or DeepSeek's native tool markup. The proxy repairs these by structure
+(see docs/PROTOCOL.md §4.6), checks every call against the tool's schema, and
+retries when a call names an unknown tool or misses a required argument
+(`invalid tool call (...)` / `unreadable envelope` in the log). If a new shape
+slips through, capture it with `VENICE_WEB_DEBUG=1` and add it to
+`test/fixtures/real-replies.mjs`.
 
 ## `400 String must not contain null bytes`
 

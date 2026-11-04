@@ -136,6 +136,9 @@ All environment variables are optional; the defaults are what the installer uses
 | `VENICE_WEB_TRANSPORT` | `auto` | client for the inference host: `auto` (curl when installed), `curl`, `fetch` |
 | `VENICE_WEB_CURL` | `curl` | curl binary to use |
 | `VENICE_WEB_TIMEOUT` | `900000` | per-request upstream timeout (ms) |
+| `VENICE_WEB_JUDGE` | on | `0` turns off the judge that checks whether a turn may end |
+| `VENICE_WEB_JUDGE_MODEL` | `qwen3-5-35b-a3b` | model for the judge (empty: the request's own model) |
+| `VENICE_WEB_JUDGE_TIMEOUT` | `45000` | judge timeout (ms); a late judge keeps the reply |
 | `VENICE_WEB_MIDDLEFACE` | `0.1.1128` | `x-venice-middleface-version` header |
 | `VENICE_WEB_CLERK_VERSION` | pinned | Clerk frontend API version query |
 | `OPENCODE_CONFIG` | `~/.config/opencode/opencode.json` | config file `sync.mjs` patches |

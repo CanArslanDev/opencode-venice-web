@@ -21,10 +21,14 @@ src/lib/curl.mjs              curl transport for the inference host (Cloudflare 
 src/lib/emulate.mjs           tool-call emulation: prompt, envelope parser, SSE reader, translation, retry heuristics
 src/lib/server.mjs            routing + live chunk translation (reasoning, keepalive) + retry logic
 src/lib/cookies.mjs           Chromium cookie decryption (macOS Keychain / Linux secret-tool)
+src/lib/lenient-json.mjs      structural JSON reader for broken envelopes (pure)
 src/lib/sanitize.mjs          NUL byte scrubbing + lenient JSON control character repair
 test/emulate.test.mjs         unit tests (node --test)
+test/lenient-json.test.mjs    unit tests for the structural JSON reader
+test/fixtures/real-replies.mjs  real broken model replies (anonymised); every shape must keep parsing
 test/curl.test.mjs            curl transport helpers (head parser, header lines)
 test/smoke.mjs                end-to-end check against a running proxy
+scripts/stress/               multilingual OpenCode stress tasks with their own verification (not in npm test)
 docs/PROTOCOL.md              upstream protocol + why tools are emulated + measurements
 docs/TROUBLESHOOTING.md       user-facing problem solving
 packaging/                    launchd plist / systemd unit templates (__NODE__ __PROXY__ __LOG__)
@@ -61,7 +65,8 @@ VENICE_WEB_DUMP=/tmp/req.json node src/proxy.mjs
 * The format reminder appended as the *last user message* is the single biggest reliability lever (`1/4 → 4/4` in testing). A system reminder in the same place is much weaker.
 * `response.output_text.delta` carries reasoning too; distinguish via `item.type` of the `output_index`.
 * The model also emits *invalid* JSON: raw file content after `"arguments":` with literal line breaks, trailing commas, arguments as a bare string. `parseLoose()` / `repairArguments()` / `salvageCalls()` handle it; keep the repair ladder when touching `extractEnvelopes()`, and keep `test/emulate.test.mjs`'s real capture fixture passing.
-* The model also *stops mid-task*: it writes "now I will X" with `tool_calls:[]` after a tool result and the session looks finished. `looksLikePlan()` + `PLAN_RETRY_REMINDER` handle it, and the reminder must go as a **user** message (system prompt reminders are ~4x weaker). Trigger order in `shouldRetry()` matters; keep the tests.
+* The model also *stops mid-task*: it writes what it is about to do with `tool_calls:[]` after a tool result and the session looks finished. **Never detect this by matching words** (an earlier Turkish/English word list caught 0 of 13 real stops and cannot work in other languages). The envelope's `status` (`continue`/`done`/`ask`) and the judge (`buildJudgeRequest()` / `parseJudgeVerdict()` in emulate.mjs, `askJudge()` in server.mjs) decide; reminders still go as a **user** message (system prompt reminders are ~4x weaker). Re-serialised history must keep its `status`, or the model stops writing it. Measurements: `docs/PROTOCOL.md` §4.7.
+* Broken envelopes are repaired by structure (`readLenient()`), never by guessing at the text; calls are checked against the tool's JSON schema (`inspectCalls()`) and sent back to the model when they cannot run. Add every new broken shape to `test/fixtures/real-replies.mjs`.
 * The model sometimes answers `{"content":"","tool_calls":[]}`. That becomes an assistant turn with **no parts**, `finish: stop`, no error: the client shows nothing and the session looks frozen. `isEmptyAnswer()` / `shouldRetry()` / `preferAnswer()` / `applyFallback()` in `src/lib/emulate.mjs` exist for exactly this; never forward empty content.
 * NUL bytes in the payload make Venice answer `400 String must not contain null bytes` (only when they land in `systemPrompt`, but that is enough to kill a session). `src/lib/sanitize.mjs` scrubs them; do not remove that step, and keep the body-repair before `JSON.parse` (JSON forbids raw control characters in strings).
 * Clerk rotates `__client` on use - always read `set-cookie` and persist.
@@ -79,6 +84,7 @@ VENICE_WEB_DUMP=/tmp/req.json node src/proxy.mjs
 
 1. `npm test`
 2. `node src/login.mjs` then `node test/smoke.mjs`
-3. One real OpenCode session: list a directory, read a file, edit it, run a command.
-4. Re-run the failing-session scenario from `docs/PROTOCOL.md` §4 (prose-only model first turn) to confirm the retry still rescues it.
-5. `./install.sh` on a clean `$HOME` (or `$VENICE_WEB_INSTALL_DIR`) to confirm install/uninstall.
+3. `VENICE_WEB_PORT=3457 node src/proxy.mjs` and `node scripts/stress/run.mjs --base-url http://127.0.0.1:3457/v1` (runs real OpenCode sessions with auto-approved permissions in temp dirs)
+4. One real OpenCode session: list a directory, read a file, edit it, run a command.
+5. Re-run the failing-session scenario from `docs/PROTOCOL.md` §4 (prose-only model first turn) to confirm the retry still rescues it.
+6. `./install.sh` on a clean `$HOME` (or `$VENICE_WEB_INSTALL_DIR`) to confirm install/uninstall.
