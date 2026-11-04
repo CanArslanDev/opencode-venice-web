@@ -2,10 +2,11 @@
  * HTTP layer: an OpenAI-compatible `/v1/chat/completions` (streaming and not)
  * plus `/v1/models` and `/health`.
  *
- * Reply handling: the Venice stream is read to the end before anything is
- * emitted, because with emulated tools the whole message has to be parsed before
- * we know whether it is an answer or a tool call. Reasoning deltas are buffered
- * with it and replayed in order.
+ * Reply handling: reasoning deltas stream straight through, and so does content
+ * when tools are not emulated. With emulated tools the message is read to the end
+ * first, because the whole text has to be parsed before we know whether it is an
+ * answer or a tool call; those deltas are buffered and replayed in order. An SSE
+ * keepalive comment bridges the silent stretches.
  */
 import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
@@ -65,10 +66,14 @@ function modelList() {
 }
 
 /**
- * Reads an upstream stream to completion.
- * @returns {Promise<{text: string, answer: string, reasoning: string, terminal: boolean, chunks: object[]}>}
+ * Reads an upstream stream to completion, yielding deltas that are safe to
+ * forward while it runs: reasoning always, content only when tools are not
+ * emulated (in emulated mode the whole text has to be parsed first).
+ *
+ * The returned generator resolves to the collected state.
+ * @returns {AsyncGenerator<object, {text: string, answer: string, reasoning: string, terminal: boolean, chunks: object[]}>}
  */
-async function collectStream(upstreamBody, mapping, chunk) {
+async function* collectStream(upstreamBody, mapping, chunk) {
   const reader = upstreamBody.getReader()
   const stream = sseReader()
   const state = { text: '', answer: '', reasoning: '', terminal: false, chunks: [] }
@@ -85,27 +90,30 @@ async function collectStream(upstreamBody, mapping, chunk) {
       const delta = event.delta ?? ''
       if (itemTypes.get(event.output_index) === 'reasoning') {
         state.reasoning += delta
-        state.chunks.push(chunk({ reasoning_content: delta }))
-        return
+        return chunk({ reasoning_content: delta })
       }
       if (mapping.emulatedTools) state.text += delta
       else {
         state.answer += delta
-        state.chunks.push(chunk({ content: delta }))
+        return chunk({ content: delta })
       }
     }
     if (/^response\.(reasoning_text|reasoning_summary_text)\.delta$/.test(event.type)) {
       state.reasoning += event.delta ?? ''
-      state.chunks.push(chunk({ reasoning_content: event.delta ?? '' }))
+      return chunk({ reasoning_content: event.delta ?? '' })
     }
     if (event.type === 'response.completed') state.terminal = true
     if (event.type === 'response.incomplete') throw new Error('Venice generation was incomplete')
+    return null
   }
 
   try {
     for (;;) {
       const { value, done } = await reader.read()
-      for (const event of stream.feed(value, done)) apply(event)
+      for (const event of stream.feed(value, done)) {
+        const live = apply(event)
+        if (live) yield live
+      }
       if (done) break
     }
   } finally {
@@ -136,7 +144,7 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
 
   yield chunk({ role: 'assistant', content: '' })
 
-  let state = await collectStream(upstreamBody, mapping, chunk)
+  let state = yield* collectStream(upstreamBody, mapping, chunk)
   let message = null
 
   if (mapping.emulatedTools) {
@@ -157,7 +165,7 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
       try {
         const retryResponse = await upstreamChat(withRetryReminder(mapping.request, reminder), INFERENCE_PATH, signal)
         if (!retryResponse.ok) break
-        const retryState = await collectStream(retryResponse.body, mapping, chunk)
+        const retryState = yield* collectStream(retryResponse.body, mapping, chunk)
         const retryMessage = parseToolReply(retryState.text)
         if (preferAnswer(retryMessage, message)) {
           state = retryState
@@ -285,12 +293,26 @@ async function handleChat(req, res) {
     'cache-control': 'no-cache',
     connection: 'keep-alive',
   })
+
+  // Emulated tool calls can stay silent for minutes while the reply is parsed
+  // and retried; a comment line keeps the client from dropping the connection.
+  const keepalive = setInterval(() => {
+    if (!res.writableEnded) res.write(': keepalive\n\n')
+  }, 15_000)
+  const stopKeepalive = () => {
+    clearInterval(keepalive)
+    req.off('aborted', stopKeepalive)
+  }
+  req.on('aborted', stopKeepalive)
+
   try {
     for await (const part of chunks) res.write(`data: ${JSON.stringify(part)}\n\n`)
     res.write('data: [DONE]\n\n')
   } catch (error) {
     warn('stream error:', error.message)
     res.write(`data: ${JSON.stringify({ error: { message: error.message } })}\n\n`)
+  } finally {
+    stopKeepalive()
   }
   res.end()
 }
