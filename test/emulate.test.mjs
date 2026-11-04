@@ -13,14 +13,19 @@ import {
   extractEnvelopes,
   fallbackAnswerText,
   FAILURE_RETRY_REMINDER,
+  BROKEN_ENVELOPE_REMINDER,
+  CONTINUE_REMINDER,
+  JUDGE_PROMPT,
+  buildJudgeRequest,
+  inspectCalls,
   isEmptyAnswer,
+  judgeDecision,
   lastToolResult,
-  looksLikeFailure,
-  looksLikePlan,
-  looksLikeSearchOutput,
   normalizeToolName,
-  PLAN_RETRY_REMINDER,
+  parseJudgeVerdict,
+  parseNativeCalls,
   parseToolReply,
+  stripToolMarkup,
   preferAnswer,
   cleanLeakedEnvelope,
   reasoningMode,
@@ -32,6 +37,7 @@ import {
   withRetryReminder,
 } from '../src/lib/emulate.mjs'
 import { MODELS } from '../src/lib/models.mjs'
+import * as real from './fixtures/real-replies.mjs'
 
 const tool = (name) => ({ type: 'function', function: { name, description: name, parameters: { type: 'object' } } })
 
@@ -148,9 +154,23 @@ test('toVeniceRequest: assistant history is re-serialised in envelope form', () 
   assert.equal(parsed.content, 'hello')
   assert.equal(parsed.tool_calls[0].name, 'read')
   assert.deepEqual(parsed.tool_calls[0].arguments, { path: 'a' })
+  assert.equal(parsed.status, 'continue')
   const toolMessage = mapping.request.messages[2]
   assert.equal(toolMessage.role, 'user')
   assert.match(toolMessage.content[0].text, /"tool_result"/)
+})
+
+test('toVeniceRequest: a history turn without calls carries status done', () => {
+  const mapping = toVeniceRequest({
+    model: Object.keys(MODELS)[0],
+    messages: [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: 'hello' },
+      { role: 'user', content: 'again' },
+    ],
+    tools: [tool('read')],
+  })
+  assert.equal(JSON.parse(mapping.request.messages[1].content[0].text).status, 'done')
 })
 
 // --------------------------------------------------------------- empty replies
@@ -303,157 +323,6 @@ test('tool prompt asks for escaped arguments', () => {
   assert.match(TOOL_PROMPT, /arguments" is always a JSON object/)
 })
 
-// ------------------------------------------------- plan without action
-//
-// Real session (a long multi-step task): after a tool result the model wrote
-// "Şimdi ... arayacağım" with tool_calls: [] and the session stopped halfway.
-
-const REAL_PLAN = 'Projeyi açtım ve ilk analizde net bir tablo çıktı. Şimdi sembol taramasında asıl karar fonksiyonlarını (SessionManager içindeki isReady benzeri erişimciler) arayacağım.\n\nBu arada elimde şu var:'
-
-test('looksLikePlan detects the real capture', () => {
-  assert.equal(looksLikePlan(REAL_PLAN), true)
-  assert.equal(looksLikePlan('Next step: extract the archive.'), true)
-  assert.equal(looksLikePlan('Let me check the symbols now.'), true)
-  assert.equal(looksLikePlan('sonra devam edeceğim'), true)
-  assert.equal(looksLikePlan('Şimdi inceliyorum:' ), true)
-})
-
-test('looksLikePlan detects a plan even when the report says "tamam" mid-way', () => {
-  // real capture: a long status table said "halkası tamam" in the middle and
-  // closed with "şimdi ... doğruluyorum" - the earlier rule missed the retry
-  const captured =
-    'Config değişikliği başarıyla uygulandı ve `jq` ile doğrulandı. Önbellek de üretildi: plan `full`.\n' +
-    'Bu noktada derleme zincirinin kritik halkası tamam: uygulama config\'ten yeni ayarı okuyacak.\n\n' +
-    '**Durum tablosu:**\n\n| Adım | Durum |\n|---|---|\n| Temiz derleme | ⏳ sırada |\n| Entegrasyon testi | ⏳ sırada |\n\n' +
-    "Şimdi önbellek bozulduğu için uygulamayı temiz olarak yeniden derliyorum, geçici dosyaları temizliyorum ve açıp ayar durumunu doğruluyorum."
-  assert.equal(looksLikePlan(captured), true)
-})
-
-test('looksLikePlan detects the "şu an ... çıkarıyorum" capture', () => {
-  // second real capture from the same session: present-continuous closing
-  // sentence, no future-tense word, no trailing colon
-  const captured =
-    'Paket 141 MB\'lık universal (x86_64 + arm64) ve içinde ayar/önbellek ile ilgili string çıkmadı — sembollerin büyük kısmı Swift\'te mangled. ' +
-    'Şu an arm64 dilimini ayırıp sembol tablosundan `cache`/`config`/`Loader` geçen sembolleri çıkarıyorum; yükleme sırasını netleştirmeden config\'i değiştirirsem takılırsın.'
-  assert.equal(looksLikePlan(captured), true)
-})
-
-test('looksLikePlan detects a long report closing with a numbered plan', () => {
-  // third real capture: 1.8k chars, the plan is a "(1) ... (7)" list at the end
-  const captured =
-    'Proje çalışma kopyasına alındı. Ayar doğrulaması JSON şema ile yapılıyor; şema config\'ten okunuyor.\n\n' +
-    'Ayar kodu ayrı modüllere bölünmüş: ConfigReader, ConfigSession, ConfigLifecycle.\n\n' +
-    'Çevrimdışı bir önbellek katmanı var: com.example.settings.v2 domain\'i.\n\n' +
-    'Kaldığım yer: önbelleğin tam disk yolunu kesinleştirmeden yazmak boşa iş olurdu; grep çıktısı gürültülü geldi, hedefleyip çıkarmam gerekiyor.\n\n' +
-    'Devamında sırayla yapacağım: (1) önbellek yolunu ve isReady kapısını tespit, (2) yeni şemayı üret, (3) migrate.sh\'ı doğru yola çevir, (4) yeni config\'i koy, (5) temiz derle, (6) uygulamayı açıp doğrula, (7) bir rollback.sh yaz.'
-  assert.equal(looksLikePlan(captured), true)
-})
-
-test('looksLikePlan does not fire on finished answers', () => {
-  assert.equal(looksLikePlan('rapor.txt oluşturuldu ve cat ile gösterildi.'), false)
-  assert.equal(looksLikePlan('Refactor tamam, davranış birebir aynı.'), false)
-  assert.equal(looksLikePlan('Sonuç: 5'), false)
-  assert.equal(looksLikePlan('İki TODO\'yu da bulup kodladım ve testler geçti.'), false)
-  // documented false positive: a "sonra" in the closing sentence reads as a plan
-  assert.equal(looksLikePlan('Dosya yazıldı ve testler geçti ama sonra silindi.'), true)
-  assert.equal(looksLikePlan(''), false)
-})
-
-test('looksLikePlan ignores markers inside longer words', () => {
-  assert.equal(looksLikePlan('Fixed the authentication flow; all 12 tests pass.'), false)
-  assert.equal(looksLikePlan('Added an explanation section to the README.'), false)
-  assert.equal(looksLikePlan('Değişiklikleri yaptım, testler geçti. Bunu öneriyorum.'), false)
-  assert.equal(looksLikePlan('Tamamlandı: 3 dosya güncellendi, testler geçiyor.'), false)
-})
-
-test('looksLikePlan still fires on English and Turkish future plans', () => {
-  assert.equal(looksLikePlan('Now I will update the tests.'), true)
-  assert.equal(looksLikePlan('Şimdi testleri güncelleyeceğim.'), true)
-})
-
-test('looksLikePlan matches the Turkish future/optative suffix without a word start', () => {
-  assert.equal(looksLikePlan('Testleri güncelleyeceğim.'), true)
-  assert.equal(looksLikePlan('Dosyaya bir bakayım.'), true)
-})
-
-test('looksLikePlan: a strong marker wins over a done marker in the same sentence', () => {
-  assert.equal(looksLikePlan('Tamam, şimdi testleri güncelleyeceğim.'), true)
-  assert.equal(looksLikePlan('Done, now let me run the tests.'), true)
-})
-
-test('looksLikePlan needs "şimdi" next to a present-continuous verb', () => {
-  assert.equal(looksLikePlan('Dosya hazır, içeriği yazıyorum.'), false)
-  assert.equal(looksLikePlan('Şimdi dosyayı yazıyorum.'), true)
-})
-
-test('shouldRetry: a plan after a tool result is retried with its own reminder', () => {
-  const plan = parseToolReply(JSON.stringify({ content: REAL_PLAN, tool_calls: [] }))
-  assert.deepEqual(shouldRetry({ message: plan, lastRole: 'tool' }), {
-    retry: true,
-    reason: 'reply describes the next step',
-    reminder: PLAN_RETRY_REMINDER,
-  })
-})
-
-test('shouldRetry: a finished answer after a tool result is accepted', () => {
-  const done = parseToolReply(JSON.stringify({ content: 'rapor.txt oluşturuldu ve gösterildi.', tool_calls: [] }))
-  assert.equal(shouldRetry({ message: done, lastRole: 'tool' }).retry, false)
-})
-
-test('the tool prompt forbids ending a turn with a plan', () => {
-  assert.match(TOOL_PROMPT, /Never end a turn by describing what you are about to do/)
-})
-
-// ------------------------------------------------------- failed tool output
-//
-// Real miss (stress task 02): the model assumed a file existed, `cat` failed,
-// and it still answered as if the work was done.
-
-test('looksLikeFailure spots real tool failures', () => {
-  assert.equal(looksLikeFailure('cat: summary.py: No such file or directory'), true)
-  assert.equal(looksLikeFailure('Traceback (most recent call last): AssertionError'), true)
-  assert.equal(looksLikeFailure('zsh: command not found: nm'), true)
-  assert.equal(looksLikeFailure('{"error":{"type":"tool.execution","message":"boom"}}'), true)
-  assert.equal(looksLikeFailure('total 8\ndrwxr-xr-x  3 user  staff  96'), false)
-})
-
-test('looksLikeFailure ignores zero-count summaries', () => {
-  assert.equal(looksLikeFailure('0 failed'), false)
-  assert.equal(looksLikeFailure('Tests 12 passed, 0 failed'), false)
-  assert.equal(looksLikeFailure('fail 0'), false)
-  assert.equal(looksLikeFailure('passed 20, failed: 0, errors: 0'), false)
-})
-
-test('looksLikeFailure spots real failures next to counts', () => {
-  assert.equal(looksLikeFailure('Error: ENOENT: no such file or directory'), true)
-  assert.equal(looksLikeFailure('Tests 3 passed, 2 failed'), true)
-  assert.equal(looksLikeFailure('process exited with code 1'), true)
-  assert.equal(looksLikeFailure('Traceback (most recent call last):\n  File "a.py", line 1'), true)
-  assert.equal(looksLikeFailure('bash: foo: command not found'), true)
-})
-
-test('looksLikeSearchOutput recognises grep style hits', () => {
-  const grep = 'src/a.mjs:12:const x = 1\nsrc/b.mjs:40:if (y) {\nsrc/c.mjs:7:z()'
-  // `: ` right after the line number is not required by grep -n output
-  assert.equal(looksLikeSearchOutput('src/a.mjs:12:const x = 1\nsrc/b.mjs:40:if (y) {'), true)
-  assert.equal(looksLikeSearchOutput(grep), true)
-  assert.equal(looksLikeSearchOutput('total 8\ndrwxr-xr-x  3 user  staff  96'), false)
-  assert.equal(looksLikeSearchOutput('only one line'), false)
-})
-
-test('looksLikeFailure ignores error:/not found inside grep output', () => {
-  const grep = [
-    'src/a.mjs:12:throw new Error("boom")',
-    'src/b.mjs:40:catch (error:) {}',
-    'src/c.mjs:7:const message = "not found"',
-  ].join('\n')
-  assert.equal(looksLikeFailure(grep), false)
-  // a real failure line in the output still counts
-  assert.equal(looksLikeFailure('src/a.mjs:1:const error = 1\nsrc/b.mjs:2:x'), false)
-  assert.equal(looksLikeFailure('src/a.mjs:1:const error = 1\nsrc/b.mjs:2:y\nsrc/c.mjs:3:z'), false)
-  assert.equal(looksLikeFailure('src/a.mjs:1:x\nError: ENOENT: no such file or directory'), true)
-})
-
 test('normalizeToolName keeps available names and maps invented ones', () => {
   const available = new Set(['shell', 'read', 'write', 'edit', 'grep', 'glob'])
   assert.equal(normalizeToolName('read', available), 'read')
@@ -483,12 +352,262 @@ test('lastToolResult finds the newest tool message', () => {
   assert.equal(lastToolResult([{ role: 'user', content: 'x' }]), '')
 })
 
-test('shouldRetry: a failed tool output gets its own reminder', () => {
-  const answered = parseToolReply('{"content":"hepsi tamam","tool_calls":[]}')
-  assert.deepEqual(shouldRetry({ message: answered, lastRole: 'tool', lastToolOutput: 'cat: a.py: No such file' }), {
+
+// ------------------------------------------- real broken replies (fixtures)
+//
+// test/fixtures/real-replies.mjs keeps the exact structure of replies the
+// proxy used to lose. Each one must now become complete, executable calls.
+
+const SCHEMAS = new Map([
+  ['edit', { type: 'object', required: ['path', 'oldString', 'newString'] }],
+  ['shell', { type: 'object', required: ['command'] }],
+  ['read', { type: 'object', required: ['path'] }],
+  ['glob', { type: 'object', required: ['pattern'] }],
+])
+const argsOf = (call) => JSON.parse(call.function.arguments)
+const checked = (text) => {
+  const message = parseToolReply(text)
+  inspectCalls(message, SCHEMAS)
+  return message
+}
+
+test('fixture: a call object that is never closed keeps its call', () => {
+  const message = checked(real.MISSING_CALL_BRACE)
+  assert.equal(message.tool_calls.length, 1)
+  assert.equal(message.tool_calls[0].function.name, 'shell')
+  assert.deepEqual(Object.keys(argsOf(message.tool_calls[0])), ['command', 'workdir', 'timeout'])
+  assert.match(argsOf(message.tool_calls[0]).command, /^node -e '\nconst p=/)
+  assert.equal(message.content, 'Syntax and contract checks passed. Now running against the real sources.')
+  assert.deepEqual(message.problems, [])
+})
+
+test('fixture: arguments closed one key early - newString is put back', () => {
+  const message = checked(real.EARLY_ARGUMENTS_CLOSE)
+  assert.equal(message.tool_calls.length, 2)
+  const first = argsOf(message.tool_calls[0])
+  assert.equal(first.path, '/home/user/project/meta/_journal.json')
+  assert.match(first.oldString, /"idx": 5\n {4}}\n {2}]\n}$/)
+  assert.match(first.newString, /"idx": 6/)
+  assert.equal(argsOf(message.tool_calls[1]).path, '/home/user/project/src/writes.ts')
+  assert.deepEqual(message.problems, [])
+  assert.equal(message.content, '')
+})
+
+test('fixture: the same slip on the last call before "]"', () => {
+  const message = checked(real.EARLY_ARGUMENTS_CLOSE_LAST)
+  assert.equal(message.tool_calls.length, 1)
+  assert.equal(argsOf(message.tool_calls[0]).newString, 'The provider throws when every source it tried failed.')
+  assert.deepEqual(message.problems, [])
+})
+
+test('fixture: a call left open before the next call keeps both calls', () => {
+  const message = checked(real.OPEN_CALL_BETWEEN_CALLS)
+  assert.equal(message.tool_calls.length, 2)
+  assert.equal(argsOf(message.tool_calls[0]).newString, 'const KEPT = 3;\nconst MIN_SCORE = 0.6;')
+  assert.match(argsOf(message.tool_calls[1]).oldString, /if \(fragment === ""\) continue;/)
+  assert.equal(message.content, 'Now replacing the exact matching with word similarity.')
+})
+
+test('fixture: an envelope nested in content is unwrapped and its call runs', () => {
+  const message = checked(real.NESTED_ENVELOPE)
+  assert.equal(message.tool_calls.length, 1)
+  assert.equal(argsOf(message.tool_calls[0]).command, 'npx vitest run src/sources')
+  assert.equal(message.content, 'Prettier reformatted the test file, so the suite runs once more.')
+})
+
+test('fixture: native DSML markup is never shown', () => {
+  const tailed = checked(real.DSML_TAIL)
+  assert.equal(tailed.tool_calls.length, 1)
+  assert.equal(tailed.content, '')
+  const wrapped = checked(real.DSML_CONTENT_WRAPPER)
+  assert.equal(wrapped.content, 'Let me read the files using the shell.')
+  assert.equal(wrapped.tool_calls[0].function.name, 'read')
+  const invented = checked(real.INVENTED_TOOL_RESPONSE)
+  assert.equal(invented.content, '')
+  assert.equal(invented.tool_calls[0].function.name, 'glob')
+})
+
+test('no fixture leaks envelope JSON into the visible text', () => {
+  for (const [name, text] of Object.entries(real)) {
+    const { content } = parseToolReply(text)
+    assert.doesNotMatch(content, /"tool_calls"|"arguments"|DSML|<\/?parameter/, name)
+  }
+})
+
+// --------------------------------------------- structural envelope repairs
+
+test('lenient reader: unescaped quotes and raw line breaks inside strings', () => {
+  const message = parseToolReply('{"content":"","tool_calls":[{"name":"write","arguments":{"path":"a.md","content":"He said "hi" to me\nand left"}}]}')
+  assert.equal(argsOf(message.tool_calls[0]).content, 'He said "hi" to me\nand left')
+})
+
+test('lenient reader: a missing bracket at the very end', () => {
+  const message = parseToolReply('{"content":"ok","status":"continue","tool_calls":[{"name":"read","arguments":{"path":"a"}}')
+  assert.equal(message.tool_calls.length, 1)
+  assert.equal(message.status, 'continue')
+})
+
+test('an unreadable envelope is flagged instead of shown raw', () => {
+  const message = parseToolReply('{"content":"Running the tests now.","tool_calls":[{"name":"shell","arguments":@@@}]}')
+  assert.equal(message.tool_calls?.length ?? 0, 1) // salvaged: the raw blob is kept as content
+  const hopeless = parseToolReply('{"content":"Running the tests now.","tool_calls":[ !!! ')
+  assert.equal(hopeless.tool_calls, null)
+  assert.equal(hopeless.brokenEnvelope, true)
+  assert.equal(hopeless.content, 'Running the tests now.')
+  assert.deepEqual(shouldRetry({ message: hopeless, lastRole: 'tool' }), {
     retry: true,
-    reason: 'last tool output looks failed',
-    reminder: FAILURE_RETRY_REMINDER,
+    reason: 'unreadable envelope',
+    reminder: BROKEN_ENVELOPE_REMINDER,
   })
-  assert.equal(shouldRetry({ message: answered, lastRole: 'tool', lastToolOutput: 'ok' }).retry, false)
+})
+
+test('the OpenAI call shape and stray call keys are accepted', () => {
+  const openai = parseToolReply('{"content":"","tool_calls":[{"type":"function","function":{"name":"read","arguments":"{\\"path\\":\\"a\\"}"}}]}')
+  assert.deepEqual(argsOf(openai.tool_calls[0]), { path: 'a' })
+  const stray = parseToolReply('{"content":"","tool_calls":[{"name":"shell","arguments":{"command":"ls"},"timeout":5}]}')
+  assert.deepEqual(argsOf(stray.tool_calls[0]), { command: 'ls', timeout: 5 })
+})
+
+test('parseNativeCalls reads complete DeepSeek invoke blocks', () => {
+  const text =
+    '<｜DSML｜function_calls>\n<｜DSML｜invoke name="shell">\n<｜DSML｜parameter name="command" string="true">ls -la</｜DSML｜parameter>\n' +
+    '<｜DSML｜parameter name="timeout" string="false">5000</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜function_calls>'
+  assert.deepEqual(parseNativeCalls(text), [{ name: 'shell', arguments: { command: 'ls -la', timeout: 5000 } }])
+  const message = parseToolReply(`Listing.\n${text}`)
+  assert.equal(message.tool_calls[0].function.name, 'shell')
+  assert.equal(message.content, 'Listing.')
+})
+
+test('stripToolMarkup keeps prose and drops markup', () => {
+  assert.equal(stripToolMarkup('Hallo <tool_response>\n</tool_response> Welt'), 'Hallo \n Welt')
+  assert.equal(stripToolMarkup('a < b and c > d'), 'a < b and c > d')
+})
+
+// ------------------------------------------------- executable tool calls
+
+test('inspectCalls maps aliases and reports what the agent cannot execute', () => {
+  const message = parseToolReply(
+    '{"content":"","tool_calls":[{"name":"bash","arguments":{"command":"ls"}},{"name":"view_media","arguments":{"media_ids":["a.png"]}},{"name":"edit","arguments":{"path":"a","oldString":"x"}}]}',
+  )
+  const renames = inspectCalls(message, SCHEMAS)
+  assert.deepEqual(renames, ['bash -> shell'])
+  assert.equal(message.tool_calls[0].function.name, 'shell')
+  assert.deepEqual(message.problems, ['there is no tool named "view_media"', 'edit: missing required argument "newString"'])
+  const decision = shouldRetry({ message, lastRole: 'tool', available: ['shell', 'edit'] })
+  assert.equal(decision.retry, true)
+  assert.match(decision.reminder, /view_media/)
+  assert.match(decision.reminder, /Available tools: shell, edit/)
+})
+
+test('inspectCalls without schemas checks nothing', () => {
+  const message = parseToolReply('{"content":"","tool_calls":[{"name":"anything","arguments":{}}]}')
+  assert.deepEqual(inspectCalls(message, new Map()), [])
+  assert.deepEqual(message.problems, [])
+})
+
+test('preferAnswer: executable calls beat calls with problems', () => {
+  const broken = { tool_calls: [{}], content: '', sawEnvelope: true, problems: ['edit: missing required argument "newString"'] }
+  const fixed = { tool_calls: [{}], content: '', sawEnvelope: true, problems: [] }
+  assert.equal(preferAnswer(fixed, broken), true)
+  assert.equal(preferAnswer(broken, fixed), false)
+})
+
+test('toVeniceRequest keeps each tool schema for validation', () => {
+  const mapping = toVeniceRequest({
+    model: 'deepseek-v4-1-flash-free',
+    messages: [{ role: 'user', content: 'hi' }],
+    tools: [{ type: 'function', function: { name: 'read', parameters: { type: 'object', required: ['path'] } } }],
+  })
+  assert.deepEqual(mapping.toolSchemas.get('read').required, ['path'])
+})
+
+// ------------------------------------------------------- status and judge
+//
+// Whether a turn may end is decided by structure (`status`) and, after a tool
+// result, by the judge - never by matching words in the reply.
+
+const statusReply = (status, content = 'text') => parseToolReply(JSON.stringify({ content, status, tool_calls: [] }))
+
+test('the envelope status is read and normalised', () => {
+  assert.equal(statusReply('continue').status, 'continue')
+  assert.equal(parseToolReply('{"content":"x","status":" DONE ","tool_calls":[]}').status, 'done')
+  assert.equal(parseToolReply('{"content":"x","status":"maybe","tool_calls":[]}').status, undefined)
+})
+
+test('shouldRetry: status continue without a tool call is retried in any language', () => {
+  for (const content of ['Devam ediyorum.', 'Ich mache weiter.', '続けます。', 'I will now run the tests.']) {
+    assert.deepEqual(shouldRetry({ message: statusReply('continue', content), lastRole: 'tool' }), {
+      retry: true,
+      reason: 'status continue without a tool call',
+      reminder: CONTINUE_REMINDER,
+    })
+  }
+})
+
+test('shouldRetry: an answer after a tool result goes to the judge, whatever its words', () => {
+  for (const status of ['done', 'ask', undefined]) {
+    assert.deepEqual(shouldRetry({ message: statusReply(status, 'Devam ediyorum.'), lastRole: 'tool' }), {
+      retry: false,
+      judge: true,
+    })
+  }
+})
+
+test('shouldRetry: a question on a user turn is accepted', () => {
+  assert.deepEqual(shouldRetry({ message: statusReply('ask', 'Which one?'), lastRole: 'user' }), { retry: false })
+})
+
+test('the tool prompt defines status and the multi-line script rule', () => {
+  assert.match(TOOL_PROMPT, /"status" is required/)
+  assert.match(TOOL_PROMPT, /"continue"/)
+  assert.match(TOOL_PROMPT, /write it to a file first/)
+  assert.match(TOOL_PROMPT, /Do not ask the user for permission to do what they already asked for/)
+})
+
+test('buildJudgeRequest carries the request, the newest tool outputs and the reply', () => {
+  const body = {
+    model: 'deepseek-v4-1-flash-free',
+    messages: [
+      { role: 'system', content: 'sys' },
+      { role: 'user', content: 'old request' },
+      { role: 'user', content: [{ type: 'text', text: 'Hepsini tamamla, durma' }] },
+      { role: 'tool', content: 'first output' },
+      { role: 'tool', content: 'second output' },
+      { role: 'tool', content: 'Tests 1 failed | 50 passed' },
+    ],
+  }
+  const request = buildJudgeRequest(body, statusReply('done', 'DONE'), 'qwen3-5-35b-a3b')
+  assert.equal(request.modelId, 'qwen3-5-35b-a3b')
+  assert.equal(request.systemPrompt.instructions, JUDGE_PROMPT)
+  assert.equal(request.reasoningMode, 'disabled')
+  const text = request.messages[0].content[0].text
+  assert.match(text, /USER REQUEST:\nHepsini tamamla, durma/)
+  assert.doesNotMatch(text, /old request|first output/)
+  assert.match(text, /\[1\] second output\n\n\[2\] Tests 1 failed/)
+  assert.match(text, /AGENT REPLY \(declared status: done\):\nDONE/)
+})
+
+test('buildJudgeRequest keeps the tail of long texts', () => {
+  const long = `${'x'.repeat(5000)}END`
+  const body = { messages: [{ role: 'user', content: long }, { role: 'tool', content: long }] }
+  const text = buildJudgeRequest(body, statusReply(undefined, long), 'm').messages[0].content[0].text
+  assert.ok(text.length < 9000)
+  assert.equal((text.match(/END/g) ?? []).length, 3)
+})
+
+test('parseJudgeVerdict reads the verdict and rejects anything else', () => {
+  assert.deepEqual(parseJudgeVerdict('{"verdict":"stopped_early","reason":"promises to run tests"}'), {
+    verdict: 'stopped_early',
+    reason: 'promises to run tests',
+  })
+  assert.equal(parseJudgeVerdict('Sure! {"verdict": "Finished"}').verdict, 'finished')
+  assert.equal(parseJudgeVerdict('{"verdict":"maybe"}'), null)
+  assert.equal(parseJudgeVerdict('no json'), null)
+  assert.equal(parseJudgeVerdict(''), null)
+})
+
+test('judgeDecision: only an early stop or an ignored failure is retried', () => {
+  assert.equal(judgeDecision('stopped_early').reminder, CONTINUE_REMINDER)
+  assert.equal(judgeDecision('ignored_failure').reminder, FAILURE_RETRY_REMINDER)
+  for (const verdict of ['finished', 'needs_user', undefined, null]) assert.deepEqual(judgeDecision(verdict), { retry: false })
 })

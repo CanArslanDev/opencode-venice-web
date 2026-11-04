@@ -56,3 +56,15 @@ export const dumpFile = process.env.VENICE_WEB_DUMP
  * Clerk calls always use Node's fetch.
  */
 export const transport = process.env.VENICE_WEB_TRANSPORT ?? 'auto'
+
+/**
+ * The judge: a second model call that decides whether a reply without tool
+ * calls may end the turn (see emulate.mjs `buildJudgeRequest`). `VENICE_WEB_JUDGE=0`
+ * turns it off; `VENICE_WEB_JUDGE_MODEL` picks the model (an empty value means the
+ * request's own model). Qwen 3.5 35B A3B was the most accurate of four measured
+ * candidates (docs/PROTOCOL.md §4.7). A judge that fails or times out never blocks
+ * the reply.
+ */
+export const judgeEnabled = process.env.VENICE_WEB_JUDGE !== '0'
+export const judgeModel = process.env.VENICE_WEB_JUDGE_MODEL ?? 'qwen3-5-35b-a3b'
+export const judgeTimeoutMs = Number(process.env.VENICE_WEB_JUDGE_TIMEOUT ?? 45_000)

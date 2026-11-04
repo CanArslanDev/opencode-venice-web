@@ -10,14 +10,16 @@
  */
 import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
-import { apiBase, dumpFile, host, port, providerID } from './config.mjs'
+import { apiBase, dumpFile, host, judgeEnabled, judgeModel, judgeTimeoutMs, port, providerID } from './config.mjs'
 import {
   applyFallback,
+  buildJudgeRequest,
   countTokens,
+  inspectCalls,
+  judgeDecision,
+  parseJudgeVerdict,
   parseToolReply,
   preferAnswer,
-  lastToolResult,
-  normalizeToolName,
   shouldRetry,
   sseReader,
   toVeniceRequest,
@@ -123,12 +125,45 @@ async function* collectStream(upstreamBody, mapping, chunk) {
 }
 
 /**
+ * Asks the judge whether a reply without tool calls may end the turn. Any
+ * failure (network, timeout, an unreadable verdict) returns `null`, which keeps
+ * the reply: the judge can only add a retry, never block an answer.
+ */
+async function askJudge(body, message, signal) {
+  const model = judgeModel || body.model
+  const timeout = AbortSignal.timeout(judgeTimeoutMs)
+  try {
+    const response = await upstreamChat(
+      buildJudgeRequest(body, message, model),
+      INFERENCE_PATH,
+      signal ? AbortSignal.any([signal, timeout]) : timeout,
+    )
+    if (!response.ok) {
+      await response.body?.cancel()
+      warn(`  ~ judge: HTTP ${response.status}, keeping the reply`)
+      return null
+    }
+    const collected = collectStream(response.body, { emulatedTools: true }, () => null)
+    let step
+    do step = await collected.next()
+    while (!step.done)
+    const verdict = parseJudgeVerdict(step.value.text)
+    if (!verdict) warn(`  ~ judge: unreadable verdict ${preview(step.value.text, 80)}, keeping the reply`)
+    return verdict
+  } catch (error) {
+    warn('  ~ judge failed, keeping the reply:', error.message)
+    return null
+  }
+}
+
+/**
  * Yields OpenAI chunks for one request.
  *
- * Reliability: an empty reply, plain prose instead of the envelope, or an
- * envelope without tool calls on a first turn all get another upstream attempt
- * (free on the web plan). `preferAnswer()` decides whether the retry replaces
- * the first answer, so a retry can never blank out a good reply.
+ * Reliability: an empty reply, prose instead of the envelope, an envelope that
+ * cannot be read, a tool call the agent cannot execute, `status: continue`
+ * without a tool call, and a turn the judge says ended too early all get another
+ * upstream attempt (free on the web plan). `preferAnswer()` decides whether the
+ * retry replaces the first answer, so a retry can never blank out a good reply.
  */
 async function* openaiChunks(body, mapping, upstreamBody, signal) {
   const id = `chatcmpl-${randomUUID().replaceAll('-', '')}`
@@ -148,31 +183,43 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
   let message = null
 
   if (mapping.emulatedTools) {
-    message = parseToolReply(state.text)
+    const available = [...mapping.toolNames]
+    const read = (text) => {
+      const parsed = parseToolReply(text)
+      for (const rename of inspectCalls(parsed, mapping.toolSchemas)) log(`  ~ tool name ${rename}`)
+      return parsed
+    }
+    message = read(state.text)
+    const last = [...(body.messages ?? [])].reverse().find((item) => item.role !== 'system' && item.role !== 'developer')
+    let judged = 0
 
-    // Up to two extra attempts while the reply is unhelpful: empty content, no
-    // tool calls on a user turn, or prose instead of the envelope.
+    // Up to two extra attempts while the reply is unhelpful. Every trigger is
+    // structural (see shouldRetry); a reply that ends the turn right after a tool
+    // result is checked by the judge instead.
     for (let round = 0; round < 2; round++) {
-      const last = [...(body.messages ?? [])].reverse().find((item) => item.role !== 'system' && item.role !== 'developer')
-      const { retry, reason, reminder } = shouldRetry({
-        message,
-        lastRole: last?.role,
-        lastToolOutput: lastToolResult(body.messages),
-      })
-      if (!retry) break
+      let decision = shouldRetry({ message, lastRole: last?.role, available })
+      if (decision.judge) {
+        if (!judgeEnabled || judged >= 2) break
+        judged++
+        const verdict = await askJudge(body, message, signal)
+        if (verdict) log(`  ~ judge: ${verdict.verdict}${verdict.reason ? ` (${preview(verdict.reason, 100)})` : ''}`)
+        decision = judgeDecision(verdict?.verdict)
+      }
+      if (!decision.retry) break
 
-      log(`  ~ ${reason}, retrying...`)
+      log(`  ~ ${decision.reason}, retrying...`)
       try {
-        const retryResponse = await upstreamChat(withRetryReminder(mapping.request, reminder), INFERENCE_PATH, signal)
+        const retryResponse = await upstreamChat(withRetryReminder(mapping.request, decision.reminder), INFERENCE_PATH, signal)
         if (!retryResponse.ok) break
         const retryState = yield* collectStream(retryResponse.body, mapping, chunk)
-        const retryMessage = parseToolReply(retryState.text)
+        const retryMessage = read(retryState.text)
         if (preferAnswer(retryMessage, message)) {
           state = retryState
           message = retryMessage
           log('  ~ retry improved the reply')
         } else {
           log('  ~ retry did not improve the reply, keeping the first')
+          if (decision.reason.startsWith('judge:')) break
         }
       } catch (error) {
         warn('  ~ retry failed:', error.message)
@@ -194,13 +241,6 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
     debugRaw(body.model, state.text)
     contentForUsage = message.content ?? ''
     if (message.tool_calls) {
-      for (const call of message.tool_calls) {
-        const mapped = normalizeToolName(call.function.name, mapping.toolNames)
-        if (mapped && mapped !== call.function.name) {
-          log(`  ~ tool name ${call.function.name} -> ${mapped}`)
-          call.function.name = mapped
-        }
-      }
       finish = 'tool_calls'
       log(`  <- tools: ${message.tool_calls.map((call) => `${call.function.name}(${call.function.arguments.slice(0, 80)})`).join(' | ')}`)
       yield chunk({
@@ -208,7 +248,7 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
         tool_calls: message.tool_calls.map((call, index) => ({ index, ...call })),
       })
     } else {
-      log(`  <- no tools • text: ${preview(state.text, 110)}`)
+      log(`  <- no tools${message.status ? ` • status ${message.status}` : ''} • text: ${preview(message.content ?? '', 110)}`)
       yield chunk({ content: message.content ?? '' })
     }
   }

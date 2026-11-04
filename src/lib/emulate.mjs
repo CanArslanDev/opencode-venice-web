@@ -14,29 +14,41 @@
  */
 import { randomUUID } from 'node:crypto'
 import { MODELS } from './models.mjs'
+import { readLenient } from './lenient-json.mjs'
 import { repairJsonControlChars } from './sanitize.mjs'
 
 /**
  * Instruction appended to the system prompt. Small models obey a short, blunt
  * format instruction far more reliably than a long one; the wording below was
  * picked by measuring compliance, see docs/PROTOCOL.md.
+ *
+ * `status` is how the model tells the proxy whether its turn is over. Nothing in
+ * the proxy reads the prose: whether a reply is a finished answer, a question or
+ * a plan the model forgot to act on is decided from this field and, when it is
+ * not enough, by a second model (the judge), so it works the same in every
+ * language.
  */
 export const TOOL_PROMPT = `You are connected to an external agent that executes tools on the user's computer. These tools ARE called directly by name in \`tool_calls\` (not inside \`execute\`); they are NOT Venice server tools.
 Return ONLY one valid JSON object, without markdown fences and without any text outside JSON, with this exact shape:
-{"content":"text for the user, or an empty string","tool_calls":[{"name":"exact tool name","arguments":{}}]}
-Use an empty tool_calls array when answering without tools. To request a tool, put its name and arguments in tool_calls and STOP; the agent executes it and sends a tool result in the next user message. Never invent tool results. If a task needs the filesystem, call a tool instead of guessing. Never send an empty "content" unless you are calling a tool.
-"arguments" is always a JSON object: write file content into it as a properly escaped string (escape line breaks as \\n, escape quotes as \\").
-Never end a turn by describing what you are about to do: if you say "now I will check X", call that tool in the same turn. Use "tool_calls":[] only when the whole request is answered.`
+{"content":"text for the user, or an empty string","status":"continue","tool_calls":[{"name":"exact tool name","arguments":{}}]}
+"status" is required and is one of:
+- "continue": the request needs more work from you. tool_calls must then contain the next tool call(s).
+- "done": the whole request is finished; "content" is your final answer and tool_calls is [].
+- "ask": you need a decision or information that only the user can give; "content" is the question and tool_calls is [].
+To request a tool, put its name and arguments in tool_calls and STOP; the agent executes it and sends a tool result in the next user message. Never invent tool results. If a task needs the filesystem, call a tool instead of guessing. Never send an empty "content" unless you are calling a tool.
+"arguments" is always a JSON object: write file content into it as a properly escaped string (escape line breaks as \\n, escape quotes as \\"). Close every object: each tool call is {"name":...,"arguments":{...}}.
+Do not ask the user for permission to do what they already asked for, and do not end a turn by describing what you are about to do: do it now with tool_calls and "status":"continue".
+For a script longer than one line, write it to a file first and run the file; do not pass multi-line code to a shell command.`
 
 /** Appended as the last user message; see docs/PROTOCOL.md ("format reminder"). */
 export const REMINDER_FIRST_TURN =
-  'Reply with exactly one JSON object and nothing else. If the task needs files, a command or a search, call those tools in tool_calls now and stop - do not answer yet.'
+  'Reply with exactly one JSON object and nothing else, with "status". If the task needs files, a command or a search, call those tools in tool_calls now with "status":"continue" - do not answer yet.'
 export const REMINDER_AFTER_TOOL =
-  'Answer now: reply with exactly one JSON object and nothing else, "tool_calls":[] with your answer in "content" - unless another tool is really needed.'
+  'Reply with exactly one JSON object and nothing else. If more work is needed, call the next tool now with "status":"continue". Only when the whole request is finished answer with "status":"done" and "tool_calls":[]; use "status":"ask" only for a question the user must answer.'
 
-/** Sent as a system reminder on the single automatic retry. */
+/** Sent on a retry when the reply was prose or did not call a tool on a user turn. */
 export const RETRY_REMINDER =
-  'your whole reply must be exactly one JSON object, nothing outside it. If the task needs the filesystem, a command or the web, put the tool call in tool_calls now instead of guessing.'
+  'your whole reply must be exactly one JSON object with "content", "status" and "tool_calls", nothing outside it. If the task needs the filesystem, a command or the web, put the tool call in tool_calls now instead of guessing.'
 
 /**
  * Sent when the model answered with an empty `content` and no tool calls. A
@@ -46,79 +58,30 @@ export const RETRY_REMINDER =
 export const EMPTY_RETRY_REMINDER =
   'your last reply was an empty JSON object with no content. Put the actual answer text in "content" now (or call a tool in tool_calls if you still need one). Never send an empty content unless you are calling a tool.'
 
-/**
- * Sent when the model described the next step but did not call a tool, which is
- * how a session "stops by itself" halfway through a task.
- */
-/** Sent when the last tool output looks like a failure and the model just answered. */
+/** Sent when the reply looked like an envelope but could not be read. */
+export const BROKEN_ENVELOPE_REMINDER =
+  'your last reply was not valid JSON, so its tool calls could not be executed. Send it again as exactly one valid JSON object: {"content":"...","status":"...","tool_calls":[{"name":"...","arguments":{...}}]}, closing every object and escaping quotes and line breaks inside strings.'
+
+/** Sent when the model said it is not finished but called no tool. */
+export const CONTINUE_REMINDER =
+  'your last reply did not finish the request: work is still open and you did not call a tool. ACT NOW: put the tool call(s) for the next step in tool_calls with "status":"continue". Use "status":"done" only when the whole request is finished, and "status":"ask" only for a question the user must answer.'
+
+/** Sent when the judge saw a failed tool output that the reply skipped over. */
 export const FAILURE_RETRY_REMINDER =
-  'a previous tool output looks like it failed (missing file, error or non-zero exit). Finish the job: fix it and call the tool for it now in tool_calls. Repeat your answer only if the failure is already handled.'
+  'the latest tool output shows a failure (an error, a failing test, a missing file or command, or a non-zero exit) that your reply does not handle. Fix it now with tool_calls and "status":"continue", or, if it cannot be fixed, say so plainly with "status":"done".'
 
-export const PLAN_RETRY_REMINDER =
-  'your last reply only described the next step. ACT NOW: put the tool call(s) for that step in tool_calls and stop. Send "tool_calls":[] only when the whole request is finished.'
+/** Builds the reminder for tool calls the agent cannot execute. */
+export const invalidCallReminder = (problems, available) =>
+  `your last tool call(s) cannot be executed: ${problems.join('; ')}. Send the reply again with complete, valid tool calls. Available tools: ${available.join(', ')}.`
 
-/**
- * A tool output that looks like a failure ("No such file", a traceback, a
- * non-zero command). After such a result an answer is often premature: the model
- * assumed the file existed, or skipped the fix it was about to make.
- */
-const ERROR_SIGNALS = [
-  /no such file/i,
-  /not found/i,
-  /command not found/i,
-  /traceback \(most recent call last\)/i,
-  /assertionerror/i,
-  /syntaxerror/i,
-  /\berror:/i,
-  /"error"\s*:/,
-  /permission denied/i,
-  /is not a function/i,
-  /no tool named/i,
-  /exited with (code )?[1-9]/i,
-  /\b(\d+\s+)?failed\b/i,
-]
+/** Every value the envelope's `status` may take. */
+export const STATUSES = new Set(['continue', 'done', 'ask'])
 
+/** Text of the newest tool message, for the judge. */
 export function lastToolResult(messages) {
   const last = [...(messages ?? [])].reverse().find((message) => message.role === 'tool')
   if (!last) return ''
-  const content = last.content
-  if (typeof content === 'string') return content
-  if (Array.isArray(content)) return content.map((part) => (typeof part === 'string' ? part : part?.text ?? '')).join('\n')
-  return ''
-}
-
-/**
- * Zero-count summaries ("0 failed", "Tests 12 passed, 0 failed", "fail 0") read
- * like a failure because of the word, so they are blanked out first. Same for
- * the phrases that only say something about the source when the text is a
- * search result rather than a command output.
- */
-const ZERO_COUNT = [
-  /\b0\s+(failed|failures?|errors?)\b/gi,
-  /\b(failed|failures?|errors?)\s*:\s*0\b/gi,
-  /\bfail\s+0\b/gi,
-]
-const SEARCH_ONLY_SIGNAL_SOURCES = ['not found', '\\berror:']
-const SEARCH_LINE = /^[^\s:]+:\d+:/
-
-/** grep/ripgrep output: most non-blank lines start with `path:line: `. */
-export function looksLikeSearchOutput(text) {
-  const lines = (text ?? '').split('\n').filter((line) => line.trim())
-  if (lines.length < 2) return false
-  const hits = lines.filter((line) => SEARCH_LINE.test(line)).length
-  return hits / lines.length > 0.5
-}
-
-export function looksLikeFailure(text) {
-  let value = (text ?? '').trim()
-  if (!value) return false
-  for (const pattern of ZERO_COUNT) value = value.replace(pattern, ' ')
-  if (!value.trim()) return false
-  const search = looksLikeSearchOutput(value)
-  const skip = search ? SEARCH_ONLY_SIGNAL_SOURCES : []
-  return ERROR_SIGNALS.some(
-    (pattern) => !skip.includes(pattern.source) && pattern.test(value),
-  )
+  return textOf(last.content)
 }
 
 /** Empty reply: no tool calls and nothing but whitespace in content. */
@@ -126,87 +89,46 @@ export function isEmptyAnswer(message) {
   return !message?.tool_calls && !(message?.content ?? '').trim()
 }
 
-/**
- * A reply that announces the next step instead of doing it ("now I will scan the
- * symbols", "next step: ..."). The model then stops with `tool_calls: []` and the
- * session looks finished while half the task is still open.
- */
-// Turkish letters are not \w, so \b misfires around them; the u flag plus
-// Unicode-aware boundaries matches whole words instead. Substring matches
-// ("then" inside "authentication", "plan" inside "explanation") were the
-// biggest source of useless retries, so every marker is word-bounded.
-const B = '(?<![\\p{L}\\p{N}])'
-const E = '(?![\\p{L}\\p{N}])'
-const word = (alternatives) => new RegExp(`${B}(?:${alternatives})${E}`, 'iu')
-
-// A strong marker announces action right now and wins over a done marker in the
-// same sentence ("Tamam, şimdi testleri güncelleyeceğim."); weak ones only count
-// when the sentence has no done marker at all.
-const STRONG_PLAN_MARKERS = [
-  word('şimdi|simdi|şu an|şu anda'),
-  // Turkish future/optative suffixes only close a word: "güncelleyeceğim",
-  // "bakayım" - so they are end-anchored only, without a boundary before them
-  new RegExp('(?:acağım|eceğim|acağız|eceğiz|ayım|eyim)' + E, 'iu'),
-  word('will|let me|going to|about to|next step|now let'),
-]
-const WEAK_PLAN_MARKERS = [word('sonra|ardından|sırada|sıradaki|sonraki|plan|planım|adım|then')]
-// Present-continuous ("öneriyorum") alone is too weak: it also closes a final
-// summary, so it only counts next to an explicit "şimdi"/"simdi".
-const PRESENT_CONTINUOUS = word('ıyorum|iyorum|uyorum|üyorum')
-const NOW_MARKER = word('şimdi|simdi')
-const DONE_MARKERS = word(
-  'tamamland[ıi]|tamamdır|bitti|tamam|haz[ıi]r|tamamen|done|complete[d]?|finished|özet|özetle|sonuç|sonuc',
-)
-
-/** Splits at sentence ends and returns the last sentence. */
-function lastSentence(text) {
-  const matches = [...text.matchAll(/[.!?…]+\s+/g)]
-  const start = matches.length ? matches[matches.length - 1].index + matches[matches.length - 1][0].length : 0
-  return text.slice(start)
-}
-
-export function looksLikePlan(content) {
-  const text = (content ?? '').trim()
-  if (!text) return false
-  if (/[:…]\s*$/.test(text)) return true
-  // Only the closing part decides: a "tamam" in the middle of a long status
-  // report must not hide the plan at the end.
-  const tail = text.slice(-300)
-  const last = lastSentence(tail)
-  // A strong plan marker wins even next to a done marker; only then a done
-  // marker vetoes, and a weak marker is the last resort.
-  if (STRONG_PLAN_MARKERS.some((pattern) => pattern.test(last))) return true
-  if (DONE_MARKERS.test(last)) return false
-  if (WEAK_PLAN_MARKERS.some((pattern) => pattern.test(last))) return true
-  if (PRESENT_CONTINUOUS.test(last) && NOW_MARKER.test(last)) return true
-  // a trailing enumeration of upcoming work counts as a plan too
-  return /\(1\)[\s\S]{0,600}\(2\)/.test(text.slice(-700))
-}
-
 /** Shown when every attempt came back blank, so the turn is never invisible. */
 export const EMPTY_MARKER = '(empty reply)'
 
 /**
- * Decides whether a reply deserves another upstream attempt.
- * @param {{ message: {tool_calls: unknown[], content: string, sawEnvelope: boolean}, lastRole?: string }} input
- * @returns {{ retry: boolean, reason?: string, reminder?: string }}
+ * Decides what happens to a parsed reply before it is forwarded.
+ *
+ * Every rule is structural - the envelope's shape, its `status`, its tool calls
+ * - and none reads the prose. A reply that answers right after a tool result is
+ * the one case structure cannot settle ("finished" and "stopped halfway" look
+ * the same), so it is handed to the judge instead (`judge: true`).
+ *
+ * @param {{ message: {tool_calls: unknown[]|null, content: string, sawEnvelope: boolean, brokenEnvelope?: boolean, status?: string, problems?: string[]}, lastRole?: string, available?: string[] }} input
+ * @returns {{ retry: boolean, reason?: string, reminder?: string, judge?: boolean }}
  */
-export function shouldRetry({ message, lastRole, lastToolOutput }) {
-  if (isEmptyAnswer(message)) return { retry: true, reason: 'empty reply', reminder: EMPTY_RETRY_REMINDER }
+export function shouldRetry({ message, lastRole, available = [] }) {
+  if (isEmptyAnswer(message) && !message.brokenEnvelope) {
+    return { retry: true, reason: 'empty reply', reminder: EMPTY_RETRY_REMINDER }
+  }
+  if (message.brokenEnvelope && !message.tool_calls) {
+    return { retry: true, reason: 'unreadable envelope', reminder: BROKEN_ENVELOPE_REMINDER }
+  }
   if (!message.sawEnvelope) return { retry: true, reason: 'plain prose reply', reminder: RETRY_REMINDER }
-  if (!message.tool_calls && lastRole === 'user') {
+  if (message.problems?.length) {
+    return {
+      retry: true,
+      reason: `invalid tool call (${message.problems.join('; ')})`,
+      reminder: invalidCallReminder(message.problems, available),
+    }
+  }
+  if (message.tool_calls) return { retry: false }
+  if (message.status === 'continue') {
+    return { retry: true, reason: 'status continue without a tool call', reminder: CONTINUE_REMINDER }
+  }
+  if (lastRole === 'user') {
+    if (message.status === 'ask') return { retry: false }
     return { retry: true, reason: 'envelope without tool calls', reminder: RETRY_REMINDER }
   }
-  if (!message.tool_calls && looksLikeFailure(lastToolOutput)) {
-    return { retry: true, reason: 'last tool output looks failed', reminder: FAILURE_RETRY_REMINDER }
-  }
-  // After a tool result an answer is expected, but "let me now do X" is not an
-  // answer: it is the model stopping mid-task. This is the case that made a real
-  // session look frozen.
-  if (!message.tool_calls && lastRole !== 'user' && looksLikePlan(message.content)) {
-    return { retry: true, reason: 'reply describes the next step', reminder: PLAN_RETRY_REMINDER }
-  }
-  return { retry: false }
+  // After a tool result: done, ask, or no status at all. Only a reader of the
+  // conversation can tell a finished answer from a stop halfway.
+  return { retry: false, judge: true }
 }
 
 /**
@@ -221,13 +143,16 @@ export function applyFallback(message, rawText) {
 }
 
 /**
- * Picks between two model replies. Tool calls win; a non-empty answer beats an
- * empty one; between two real answers the format-compliant one wins. Keeping
- * this decision explicit is what stops a retry from replacing a good answer with
- * a blank one.
+ * Picks between two model replies. Executable tool calls win; a non-empty
+ * answer beats an empty one; between two real answers the format-compliant one
+ * wins. Keeping this decision explicit is what stops a retry from replacing a
+ * good answer with a blank one.
  */
 export function preferAnswer(candidate, current) {
   if (!candidate) return false
+  const candidateOk = !!candidate.tool_calls && !candidate.problems?.length
+  const currentOk = !!current?.tool_calls && !current?.problems?.length
+  if (candidateOk !== currentOk) return candidateOk
   if (candidate.tool_calls && !current?.tool_calls) return true
   if (!candidate.tool_calls && current?.tool_calls) return false
   if (candidate.tool_calls && current?.tool_calls) return false
@@ -235,8 +160,90 @@ export function preferAnswer(candidate, current) {
   const currentText = (current?.content ?? '').trim()
   if (candidateText && !currentText) return true
   if (!candidateText && currentText) return false
+  if (candidate.brokenEnvelope !== current?.brokenEnvelope) return !candidate.brokenEnvelope
   if (candidateText && currentText && candidate.sawEnvelope && !current?.sawEnvelope) return true
   return false
+}
+
+/* ------------------------------------------------------------------------ */
+/* The judge                                                                 */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Instructions for the judge: a second model call that decides whether a reply
+ * without tool calls may end the turn. It reads the conversation itself, so it
+ * works for any language and any wording; see docs/PROTOCOL.md §4.7 for how the
+ * prompt and the model were measured.
+ */
+export const JUDGE_PROMPT = `You review one turn of an AI coding agent. The agent works for a user and can call tools (shell, read, edit, write, ...). It has just received tool results, and its latest reply calls no tool, so the turn is about to END and control goes back to the user. Decide whether ending here is right. The conversation can be in any language.
+Answer with exactly one JSON object and nothing else: {"verdict":"...","reason":"one short sentence"}
+verdict is one of:
+- "finished": the request is done, or the reply gives the user the result they asked for (an honest report that something failed or cannot be done also counts).
+- "needs_user": the agent needs a decision, information or permission that only the user can give and that the request did not already give.
+- "stopped_early": work the user asked for is still open and the agent could do it now with its tools - for example the reply announces or lists next steps, promises to run, check or fix something, says it will continue, or asks permission for something the user already asked for.
+- "ignored_failure": the latest tool output shows a failure (an error, a failing test, a missing file or command, a non-zero exit) that the reply ignores or presents as success.`
+
+const tail = (text, max) => (text.length > max ? `…${text.slice(-max)}` : text)
+
+/**
+ * Builds the judge's upstream request from the client's request and the reply.
+ * The newest user message is the request; the newest tool outputs are the
+ * evidence.
+ */
+export function buildJudgeRequest(body, message, model) {
+  const messages = body.messages ?? []
+  const request = [...messages].reverse().find((item) => item.role === 'user')
+  const toolOutputs = messages.filter((item) => item.role === 'tool').slice(-2)
+  const evidence = toolOutputs.length
+    ? toolOutputs.map((item, index) => `[${index + 1}] ${tail(textOf(item.content), 1500)}`).join('\n\n')
+    : '(none)'
+  const text = [
+    `USER REQUEST:\n${tail(textOf(request?.content).trim(), 3000) || '(none)'}`,
+    `LATEST TOOL RESULTS (oldest first):\n${evidence}`,
+    `AGENT REPLY (declared status: ${message.status ?? 'none'}):\n${tail((message.content ?? '').trim(), 3000) || '(empty)'}`,
+  ].join('\n\n')
+  return {
+    modelId: model,
+    systemPrompt: { instructions: JUDGE_PROMPT },
+    messages: [
+      {
+        id: randomUUID(),
+        type: 'message',
+        status: 'completed',
+        role: 'user',
+        content: [{ type: 'output_text', text, annotations: [] }],
+      },
+    ],
+    tools: [],
+    clientTools: [],
+    reasoningMode: 'disabled',
+  }
+}
+
+export const VERDICTS = new Set(['finished', 'needs_user', 'stopped_early', 'ignored_failure'])
+
+/** Reads the judge's verdict, or `null` when its reply is unusable. */
+export function parseJudgeVerdict(text) {
+  const raw = (text ?? '').trim()
+  const start = raw.indexOf('{')
+  if (start < 0) return null
+  let value
+  try {
+    value = readLenient(raw, start).value
+  } catch {
+    return null
+  }
+  const verdict = typeof value?.verdict === 'string' ? value.verdict.trim().toLowerCase() : ''
+  return VERDICTS.has(verdict) ? { verdict, reason: typeof value.reason === 'string' ? value.reason : '' } : null
+}
+
+/** What a judge verdict means for the reply: keep it, or retry with which reminder. */
+export function judgeDecision(verdict) {
+  if (verdict === 'stopped_early') return { retry: true, reason: 'judge: stopped early', reminder: CONTINUE_REMINDER }
+  if (verdict === 'ignored_failure') {
+    return { retry: true, reason: 'judge: ignored a failed tool output', reminder: FAILURE_RETRY_REMINDER }
+  }
+  return { retry: false }
 }
 
 /**
@@ -310,7 +317,7 @@ function safeJson(value) {
 /**
  * Builds the upstream request.
  *
- * @returns {{ request: object, toolNames: Set<string>, emulatedTools: boolean }}
+ * @returns {{ request: object, toolNames: Set<string>, toolSchemas: Map<string, object>, emulatedTools: boolean }}
  */
 export function toVeniceRequest(body) {
   if (!MODELS[body.model]) {
@@ -351,9 +358,13 @@ export function toVeniceRequest(body) {
     if (message.role === 'assistant') {
       // History is re-serialised in envelope form: the model imitates its own
       // previous turns, so a plain-text assistant turn makes it drop the format.
+      // The status is written back too (a turn with calls went on, one without
+      // ended it), otherwise the model copies envelopes that have none.
+      const calls = message.tool_calls ?? []
       content = JSON.stringify({
         content: text,
-        tool_calls: (message.tool_calls ?? []).map((call) => ({
+        status: calls.length ? 'continue' : 'done',
+        tool_calls: calls.map((call) => ({
           id: call.id,
           name: call.function?.name,
           arguments: safeJson(call.function?.arguments),
@@ -409,6 +420,7 @@ export function toVeniceRequest(body) {
       ...reasoningMode(body),
     },
     toolNames: names,
+    toolSchemas: new Map(tools.map((tool) => [tool.function.name, tool.function.parameters ?? {}])),
     emulatedTools: tools.length > 0,
   }
 }
@@ -436,7 +448,6 @@ export function withRetryReminder(request, reminder = RETRY_REMINDER) {
   }
 }
 
-/** Returns the index just past the balanced object starting at `start`, or -1. */
 /** Balanced end of a value that starts with `{` or `[`. */
 function scanObjectByKind(text) {
   const open = text[0]
@@ -462,6 +473,7 @@ function scanObjectByKind(text) {
   return -1
 }
 
+/** Returns the index just past the balanced object starting at `start`, or -1. */
 export function scanObject(text, start) {
   let depth = 0
   let inString = false
@@ -484,18 +496,69 @@ export function scanObject(text, start) {
   return -1
 }
 
-const stripToolResultTags = (text) => text.replace(/<\/?tool_result[^>]*>/g, '').trim()
+/*
+ * Tool-call markup that is not our envelope: DeepSeek's native format
+ * (`<｜DSML｜invoke name="...">`, with a full-width or ASCII bar), the XML style
+ * other models were trained on (`<invoke>`, `<parameter>`), and invented
+ * `<tool_response>` / `<tool_result>` blocks. It is never meant for the user.
+ */
+const BAR = '[｜|]\\s*DSML\\s*[｜|]'
+const MARKUP = new RegExp(
+  `<\\/?\\s*(?:${BAR}\\s*)?(?:function_calls|calls|invoke|parameter|tool_calls?|tool_response|tool_result)\\b[^>]*>`,
+  'giu',
+)
+const NATIVE_INVOKE = new RegExp(`<\\s*${BAR}\\s*invoke\\s+name="([^"]+)"\\s*>([\\s\\S]*?)<\\/\\s*${BAR}\\s*invoke\\s*>`, 'gu')
+const NATIVE_PARAMETER = new RegExp(
+  `<\\s*${BAR}\\s*parameter\\s+name="([^"]+)"((?:\\s+[\\w-]+="[^"]*")*)\\s*>([\\s\\S]*?)<\\/\\s*${BAR}\\s*parameter\\s*>`,
+  'gu',
+)
 
-const newCallId = () => `call_${randomUUID().replaceAll('-', '').slice(0, 24)}`
+/** A whole `parameter` block, native or XML style (the bar is optional on either tag). */
+const PARAMETER_BLOCK = new RegExp(
+  `<\\s*(?:${BAR}\\s*)?parameter\\s+name="([^"]+)"[^>]*>([\\s\\S]*?)<\\/\\s*(?:${BAR}\\s*)?parameter\\s*>`,
+  'giu',
+)
 
 /**
- * Collects every envelope in a model reply.
- *
- * Models frequently emit *several* envelopes in one message, or prose followed
- * by an envelope. A plain `JSON.parse` of the whole text loses the tool calls,
- * which is what made the first version of this proxy look like "tools are
- * broken". Content pieces are joined; tool calls are concatenated.
+ * Removes tool-call markup and invented tool blocks from visible text. A
+ * parameter block keeps its text only when it is the turn's `content`; any
+ * other parameter is a tool argument and never meant to be read.
  */
+export function stripToolMarkup(text) {
+  return (text ?? '')
+    .replace(PARAMETER_BLOCK, (_, name, inner) => (name === 'content' ? inner : ''))
+    .replace(MARKUP, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+/**
+ * Tool calls written in DeepSeek's native markup instead of the envelope. Only
+ * complete `invoke` blocks count; a half-written tail is just stripped.
+ */
+export function parseNativeCalls(text) {
+  const calls = []
+  for (const [, name, body] of (text ?? '').matchAll(NATIVE_INVOKE)) {
+    const args = {}
+    for (const [, key, attributes, raw] of body.matchAll(NATIVE_PARAMETER)) {
+      const literal = /\bstring="false"/.test(attributes)
+      let value = raw
+      if (literal) {
+        try {
+          value = JSON.parse(raw)
+        } catch {
+          value = raw
+        }
+      }
+      args[key] = value
+    }
+    calls.push({ name, arguments: args })
+  }
+  return calls
+}
+
+const newCallId = () => `call_${randomUUID().replaceAll('-', '')}`.slice(0, 29)
+
 /**
  * Quotes a raw (non-JSON) run that follows `"arguments":`.
  *
@@ -535,6 +598,7 @@ export function repairArguments(text) {
 /**
  * Parses an envelope slice, repairing the model's JSON slips step by step:
  * literal control characters, trailing commas, and raw argument blobs.
+ * Structural slips (brackets) are left to `readLenient()`.
  */
 function parseLoose(slice) {
   const steps = [
@@ -602,6 +666,16 @@ export function salvageCalls(slice) {
 export function cleanLeakedEnvelope(text) {
   const trimmed = text.trim()
   if (!trimmed.startsWith('{') || !trimmed.includes('"tool_calls"')) return trimmed
+  // the visible text, when the model wrote one
+  const content = /"content"\s*:\s*"((?:[^"\\]|\\.)*)"/.exec(trimmed)
+  if (content) {
+    try {
+      const text = JSON.parse(`"${content[1]}"`).trim()
+      if (text) return stripToolMarkup(text)
+    } catch {
+      /* fall through */
+    }
+  }
   const start = trimmed.search(/"arguments"\s*:\s*/)
   if (start < 0) return trimmed
   const valueStart = trimmed.slice(start).search(/:\s*/) + start + 1
@@ -609,44 +683,103 @@ export function cleanLeakedEnvelope(text) {
   // the tool call tail lives after the raw blob: strip it when present
   body = body.replace(/\}?\s*\}?\s*,?\s*$/, '')
   body = body.replace(/\}\s*\]\s*\}?\s*$/, '')
-  return stripToolResultTags(body).trim() || trimmed
+  return stripToolMarkup(body).trim() || trimmed
 }
+
+const isPlainObject = (value) => !!value && typeof value === 'object' && !Array.isArray(value)
 
 const isValidArgString = (value) => {
   try {
-    const parsed = JSON.parse(value)
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    return isPlainObject(JSON.parse(value))
   } catch {
     return false
   }
 }
 
+/** An object shaped like our envelope (as opposed to, say, a bare arguments object). */
+const isEnvelope = (value) =>
+  isPlainObject(value) && (Array.isArray(value.tool_calls) || typeof value.content === 'string')
+
+/**
+ * The model sometimes writes a whole envelope *into* the `content` string of
+ * another one. The inner one is the real reply.
+ */
+function unwrapNested(envelope, depth = 0) {
+  const hasCalls = Array.isArray(envelope.tool_calls) && envelope.tool_calls.length > 0
+  const inner = typeof envelope.content === 'string' ? envelope.content.trim() : ''
+  if (depth > 2 || hasCalls || !inner.startsWith('{') || !inner.includes('"tool_calls"')) return envelope
+  let value
+  try {
+    value = JSON.parse(inner)
+  } catch {
+    try {
+      value = readLenient(inner, 0).value
+    } catch {
+      value = undefined
+    }
+  }
+  if (!isEnvelope(value)) return envelope
+  return unwrapNested({ ...value, status: value.status ?? envelope.status }, depth + 1)
+}
+
+/** Keys of a call object itself; anything else on it belongs in `arguments`. */
+const CALL_KEYS = new Set(['name', 'id', 'type', 'arguments', 'function'])
+
 /** Builds an OpenAI tool call from a parsed envelope entry. */
 function buildCall(call) {
-  if (!call || typeof call.name !== 'string') return null
-  // Some models put the arguments at the call's top level instead of under
-  // `arguments`; accept both shapes.
+  if (!isPlainObject(call)) return null
+  let name = call.name
   let args = call.arguments
+  // the OpenAI shape, `{"function": {"name", "arguments"}}`, is accepted too
+  if (typeof name !== 'string' && isPlainObject(call.function) && typeof call.function.name === 'string') {
+    name = call.function.name
+    args = call.function.arguments
+  }
+  if (typeof name !== 'string') return null
+
+  const stray = Object.fromEntries(Object.entries(call).filter(([key]) => !CALL_KEYS.has(key)))
   if (args === undefined) {
-    const { name, id, type, ...rest } = call
-    args = rest
+    // some models put the arguments at the call's top level
+    args = stray
+  } else {
+    if (typeof args === 'string' && isValidArgString(args)) args = JSON.parse(args)
+    if (isPlainObject(args) && Object.keys(stray).length) {
+      // `arguments` closed one key too early and the rest landed on the call
+      for (const [key, value] of Object.entries(stray)) if (!(key in args)) args[key] = value
+    }
   }
   if (typeof args === 'string') {
     // A plain string that is not JSON (raw file content) is passed on as-is,
     // wrapped so the tool sees an object.
-    args = isValidArgString(args) ? args : JSON.stringify({ content: args })
+    args = { content: args }
   }
   return {
     id: newCallId(),
     type: 'function',
-    function: { name: call.name, arguments: typeof args === 'string' ? args : JSON.stringify(args ?? {}) },
+    function: { name, arguments: JSON.stringify(args ?? {}) },
   }
 }
 
+/**
+ * Collects every envelope in a model reply.
+ *
+ * Models frequently emit *several* envelopes in one message, or prose followed
+ * by an envelope. A plain `JSON.parse` of the whole text loses the tool calls,
+ * which is what made the first version of this proxy look like "tools are
+ * broken". Content pieces are joined; tool calls are concatenated; the last
+ * `status` wins.
+ *
+ * Each envelope goes through a ladder: strict JSON, the text repairs of
+ * `parseLoose()`, the structural repairs of `readLenient()`, and as the very
+ * last resort `salvageCalls()`. A reply that looks like an envelope but defeats
+ * all of them is flagged `brokenEnvelope`, so it is retried instead of shown.
+ */
 export function extractEnvelopes(text) {
   const parts = []
   const tool_calls = []
   let sawEnvelope = false
+  let brokenEnvelope = false
+  let status
   let pending = ''
   let index = 0
 
@@ -657,28 +790,53 @@ export function extractEnvelopes(text) {
       break
     }
     if (start > index) pending += text.slice(index, start)
-    const end = scanObject(text, start)
-    const slice = end > 0 ? text.slice(start, end) : ''
-    const parsed = slice ? parseLoose(slice) : null
+    let end = scanObject(text, start)
+    let slice = end > 0 ? text.slice(start, end) : ''
+    let parsed = slice ? parseLoose(slice) : null
 
-    let calls = null
-    let piece = typeof parsed?.content === 'string' ? parsed.content.trim() : ''
-    const looksLikeEnvelope = parsed !== null || slice.includes('"tool_calls"')
-
-    if (looksLikeEnvelope && !Array.isArray(parsed?.tool_calls) && !piece) {
-      // Broken JSON: salvage the tool calls and the leaked text next to them.
-      const salvaged = salvageCalls(slice)
-      if (salvaged.length) {
-        calls = salvaged
-        piece = cleanLeakedEnvelope(slice)
+    if (!isEnvelope(parsed)) {
+      // unclosed or misplaced brackets: read it structurally
+      try {
+        const lenient = readLenient(text, start)
+        if (isEnvelope(lenient.value)) {
+          parsed = lenient.value
+          end = lenient.end
+          slice = text.slice(start, end)
+        }
+      } catch {
+        /* not JSON-shaped from here */
       }
     }
 
-    const isEnvelope =
+    let calls = null
+    if (isEnvelope(parsed)) parsed = unwrapNested(parsed)
+    let piece = typeof parsed?.content === 'string' ? parsed.content.trim() : ''
+    const region = slice || text.slice(start)
+    const looksLikeEnvelope = parsed !== null || region.includes('"tool_calls"')
+
+    if (looksLikeEnvelope && !Array.isArray(parsed?.tool_calls) && !piece) {
+      // Broken JSON: salvage the tool calls and the leaked text next to them.
+      const salvaged = salvageCalls(region)
+      if (salvaged.length) {
+        calls = salvaged
+        piece = cleanLeakedEnvelope(region)
+      }
+    }
+
+    const isEnvelopeHere =
       looksLikeEnvelope &&
       (Array.isArray(parsed?.tool_calls) || typeof parsed?.content === 'string' || (calls?.length ?? 0) > 0)
 
-    if (!isEnvelope) {
+    if (!isEnvelopeHere) {
+      if (region.trimStart().startsWith('{"content"') || /^\{\s*"(?:content|tool_calls|status)"\s*:/.test(region)) {
+        // an envelope we could not read at all: do not show its raw JSON
+        brokenEnvelope = true
+        if (pending.trim()) parts.push(pending.trim())
+        pending = ''
+        const leaked = cleanLeakedEnvelope(region)
+        if (leaked && !leaked.startsWith('{')) parts.push(leaked)
+        break
+      }
       // Not an envelope: keep the brace as prose and keep scanning after it.
       pending += '{'
       index = start + 1
@@ -686,6 +844,9 @@ export function extractEnvelopes(text) {
     }
 
     sawEnvelope = true
+    if (typeof parsed?.status === 'string' && STATUSES.has(parsed.status.trim().toLowerCase())) {
+      status = parsed.status.trim().toLowerCase()
+    }
     if (pending.trim()) parts.push(pending.trim())
     pending = ''
     if (piece) parts.push(piece)
@@ -695,28 +856,87 @@ export function extractEnvelopes(text) {
       const built = buildCall(call)
       if (built) tool_calls.push(built)
     }
-    index = end > 0 ? end : start + 1
+    index = end > 0 ? end : text.length
   }
 
   if (pending.trim()) parts.push(pending.trim())
 
-  return { content: stripToolResultTags(parts.join('\n')), tool_calls, sawEnvelope }
+  if (!tool_calls.length) {
+    // DeepSeek's native markup, when the model used it instead of the envelope
+    for (const call of parseNativeCalls(text)) {
+      const built = buildCall(call)
+      if (built) tool_calls.push(built)
+    }
+    if (tool_calls.length) sawEnvelope = true
+  }
+
+  return { content: stripToolMarkup(parts.join('\n')), tool_calls, sawEnvelope, brokenEnvelope, status }
 }
 
 /**
- * Turns a raw model reply into `{ content, tool_calls, sawEnvelope }`.
+ * Turns a raw model reply into `{ content, tool_calls, sawEnvelope, brokenEnvelope, status }`.
  * `sawEnvelope: false` means the model ignored the format entirely.
  */
 export function parseToolReply(text) {
   const envelope = extractEnvelopes(text)
   if (!envelope.sawEnvelope) {
-    return { content: stripToolResultTags(text.trim()), tool_calls: null, sawEnvelope: false }
+    return {
+      content: envelope.brokenEnvelope ? envelope.content : stripToolMarkup(text.trim()),
+      tool_calls: null,
+      sawEnvelope: false,
+      brokenEnvelope: envelope.brokenEnvelope,
+      status: undefined,
+    }
   }
   return {
     content: envelope.content,
     tool_calls: envelope.tool_calls.length ? envelope.tool_calls : null,
     sawEnvelope: true,
+    brokenEnvelope: envelope.brokenEnvelope && !envelope.tool_calls.length,
+    status: envelope.status,
   }
+}
+
+/**
+ * Maps invented tool names onto available ones and lists what makes a call
+ * impossible to execute: an unknown tool, arguments that are not an object, or
+ * a missing required argument (from the tool's own JSON schema, as OpenCode
+ * sent it). Sets `message.problems`; returns the renames for logging.
+ *
+ * @param {{ tool_calls: object[]|null, problems?: string[] }} message
+ * @param {Map<string, object>} schemas tool name -> JSON schema of its parameters
+ */
+export function inspectCalls(message, schemas) {
+  message.problems = []
+  const renames = []
+  if (!message.tool_calls || !schemas?.size) return renames
+  const available = new Set(schemas.keys())
+  for (const call of message.tool_calls) {
+    const original = call.function.name
+    const name = normalizeToolName(original, available)
+    if (name !== original) {
+      call.function.name = name
+      renames.push(`${original} -> ${name}`)
+    }
+    if (!available.has(name)) {
+      message.problems.push(`there is no tool named "${name}"`)
+      continue
+    }
+    let args
+    try {
+      args = JSON.parse(call.function.arguments)
+    } catch {
+      args = undefined
+    }
+    if (!isPlainObject(args)) {
+      message.problems.push(`${name}: "arguments" must be a JSON object`)
+      continue
+    }
+    const required = Array.isArray(schemas.get(name)?.required) ? schemas.get(name).required : []
+    const missing = required.filter((key) => !(key in args))
+    if (missing.length) message.problems.push(`${name}: missing required argument ${missing.map((key) => `"${key}"`).join(', ')}`)
+  }
+  return renames
 }
 
 /**
@@ -728,7 +948,7 @@ export function fallbackAnswerText(text) {
   if (!raw) return ''
   const plain = extractEnvelopes(raw).content.trim()
   if (plain) return plain
-  return raw.startsWith('{') ? '' : raw
+  return raw.startsWith('{') ? '' : stripToolMarkup(raw)
 }
 
 /** Rough token estimate; the web endpoint reports none. */
