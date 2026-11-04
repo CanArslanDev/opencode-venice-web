@@ -16,7 +16,7 @@ OpenCode ──HTTP──> 127.0.0.1:3456  ──HTTPS + your session cookie─�
 - No API key, no credits, no password stored: only the browser's long-lived Clerk `__client` cookie.
 - 20 free web models (DeepSeek, Qwen, GLM, Kimi, Gemma, Aion, TEE-hosted variants).
 - Tool calling works: OpenCode's `read`/`write`/`edit`/`shell`/`glob`/`grep` tools are emulated through a JSON envelope (see [docs/PROTOCOL.md](docs/PROTOCOL.md)).
-- Zero runtime dependencies. Node 22+ only.
+- Zero runtime dependencies. Node 22+ and the system `curl` (preinstalled on macOS and most Linux distributions).
 
 ---
 
@@ -133,6 +133,8 @@ All environment variables are optional; the defaults are what the installer uses
 | `VENICE_WEB_HOST` | `127.0.0.1` | proxy bind address |
 | `VENICE_WEB_DEBUG` | off | write every raw model reply to `<config dir>/debug.log` |
 | `VENICE_WEB_DUMP` | off | dump the last translated upstream request |
+| `VENICE_WEB_TRANSPORT` | `auto` | client for the inference host: `auto` (curl when installed), `curl`, `fetch` |
+| `VENICE_WEB_CURL` | `curl` | curl binary to use |
 | `VENICE_WEB_TIMEOUT` | `900000` | per-request upstream timeout (ms) |
 | `VENICE_WEB_MIDDLEFACE` | `0.1.1128` | `x-venice-middleface-version` header |
 | `VENICE_WEB_CLERK_VERSION` | pinned | Clerk frontend API version query |
@@ -143,7 +145,7 @@ All environment variables are optional; the defaults are what the installer uses
 ## Security and privacy
 
 - The session file (`~/.config/opencode/venice-web/session.json`, mode `600`) holds your Clerk cookie - treat it like a login token, keep it out of git.
-- Only `clerk.venice.ai` and `outerface.venice.ai` are contacted; the proxy is bound to loopback by default. Anything that can reach it can use your Venice account, so do not expose the port publicly without thinking about it.
+- Only `clerk.venice.ai` and `outerface.venice.ai` are contacted (inference through the system `curl`; its headers go over a pipe, so the token never appears in the process list); the proxy is bound to loopback by default. Anything that can reach it can use your Venice account, so do not expose the port publicly without thinking about it.
 - No password is stored (unlike password-based proxies). Logging out of venice.ai in the browser invalidates the cookie; `/out` from the browser plus a fresh login fixes it.
 - Requests leave your machine exactly as the web app would send them: same user agent, same headers, no extra telemetry.
 

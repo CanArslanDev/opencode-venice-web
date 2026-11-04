@@ -22,6 +22,17 @@ browser cookie jar                     your machine                Venice
 * Clerk **rotates** `__client` while it is used. `veneziaFetch()` reads `set-cookie` from every response and rewrites the session file when it changes.
 * The session JWT that actually authorises inference lives ~60 seconds. `mintToken()` caches it and refreshes it 15 s before expiry, single-flight so parallel requests share one mint.
 * **Only `__client` is sent back - never `cf_clearance`.** `cf_clearance` is bound to the browser's TLS/IP and expires; `__client` alone passes Cloudflare. `user-agent` must look like a real browser (picked from the browser that owns the cookie), otherwise Cloudflare replies `403` with `cf-mitigated: challenge`.
+* **The inference host is reached through the system `curl`, not Node's fetch** (`src/lib/curl.mjs`, since 2026-11-04). Cloudflare blocks Node's HTTP client on `/api/inference/*` with an "Attention Required!" `403 text/html` whatever the headers, cookies or TLS options. Measured:
+
+  | client | result |
+  | --- | --- |
+  | Node `fetch` / `node:https` (default, Chrome cipher list, TLS 1.2 only) | 403 html |
+  | `curl --http2` | 403 html |
+  | `curl --http1.1` with `accept: text/event-stream` | 403 html |
+  | `curl --http1.1` with the user agent as a plain `-H` line (lands after `Accept`) | 403 html |
+  | `curl --http1.1 -A <browser UA>`, default `Accept: */*` | **200 SSE** |
+
+  So: HTTP/1.1, the user agent via `-A`, no `accept: text/event-stream` (the backend streams SSE without it), one short-lived curl process per request. Headers go over fd 3 so the bearer token never shows up in `ps`. Clerk calls still use Node's fetch. `VENICE_WEB_TRANSPORT=fetch|curl` overrides the default `auto` (curl when installed).
 * If a request still gets challenged, the proxy raises a `SignInError` which surfaces as **HTTP 401** with a "refresh the cookies" message.
 
 Session discovery (`GET /v1/client`) yields the active session id and account. It picks the session matching the stored `uid` when several exist.

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Inference requests go through the system `curl`. Cloudflare started blocking
+  Node's own HTTP client on the inference route (403 "Attention Required!"), so
+  every request failed with "refresh the cookies". curl over HTTP/1.1 with the
+  user agent passed via `-A` gets through; `accept: text/event-stream` is no
+  longer sent because it triggers the same block. One short-lived curl process
+  per request, no browser, still no npm dependency. `VENICE_WEB_TRANSPORT`
+  overrides the choice.
 - Reasoning deltas now stream live instead of being buffered to the end of the
   reply, and an SSE keepalive comment goes out every 15 s. The client no longer
   sits through minutes of silence while a tool reply is parsed and retried.

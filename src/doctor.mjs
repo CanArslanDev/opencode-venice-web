@@ -8,7 +8,8 @@
 import { existsSync, readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { host, port, providerID, sessionFile } from './lib/config.mjs'
+import { host, port, providerID, sessionFile, transport } from './lib/config.mjs'
+import { findCurl } from './lib/curl.mjs'
 import { MODELS } from './lib/models.mjs'
 import { log, warn } from './lib/log.mjs'
 
@@ -22,6 +23,17 @@ const check = (ok, label, detail = '') => {
 async function main() {
   const major = Number(process.versions.node.split('.')[0])
   check(major >= 22, `node version ${process.versions.node}`, major >= 22 ? '' : 'node 22+ is required')
+
+  const curl = findCurl()
+  check(
+    transport === 'fetch' ? true : !!curl,
+    `inference transport (${transport})`,
+    transport === 'fetch'
+      ? 'Node fetch forced; Cloudflare blocks it on the inference route'
+      : curl
+        ? `using ${curl}`
+        : 'curl not found; Cloudflare blocks Node fetch on the inference route, install curl',
+  )
 
   const hasSession = existsSync(sessionFile)
   check(hasSession, `session file (${sessionFile})`, hasSession ? '' : 'run the login command')

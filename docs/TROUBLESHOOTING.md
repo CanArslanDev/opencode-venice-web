@@ -33,8 +33,11 @@ The session cookie is stale, was rotated by a fresh browser login, or Cloudflare
 
 ```sh
 node src/login.mjs           # re-read the cookie from the browser
-curl -s 127.0.0.1:3456/reload
+launchctl kickstart -k gui/$(id -u)/ai.opencode.venice-web   # macOS: restart the service
+systemctl --user restart ai.opencode.venice-web               # Linux
 ```
+
+If the message says `(fetch)`, the request went through Node's own HTTP client, which Cloudflare blocks on the inference route. Install `curl` (or point `VENICE_WEB_CURL` at one) and leave `VENICE_WEB_TRANSPORT` unset. If it says `(curl)` and fresh cookies do not help, read `docs/PROTOCOL.md` §1: Venice may have changed what its Cloudflare rule looks at.
 
 Logging out of venice.ai in the browser invalidates `__client` - sign in again, then rerun the login command.
 

@@ -17,11 +17,13 @@ src/doctor.mjs                diagnostics
 src/lib/config.mjs            paths, endpoints, tunables (all env-overridable)
 src/lib/models.mjs            free web model catalogue
 src/lib/venice.mjs            session file, Clerk JWT, attestation, upstream fetch
+src/lib/curl.mjs              curl transport for the inference host (Cloudflare blocks Node's fetch there)
 src/lib/emulate.mjs           tool-call emulation: prompt, envelope parser, SSE reader, translation, retry heuristics
 src/lib/server.mjs            routing + live chunk translation (reasoning, keepalive) + retry logic
 src/lib/cookies.mjs           Chromium cookie decryption (macOS Keychain / Linux secret-tool)
 src/lib/sanitize.mjs          NUL byte scrubbing + lenient JSON control character repair
 test/emulate.test.mjs         unit tests (node --test)
+test/curl.test.mjs            curl transport helpers (head parser, header lines)
 test/smoke.mjs                end-to-end check against a running proxy
 docs/PROTOCOL.md              upstream protocol + why tools are emulated + measurements
 docs/TROUBLESHOOTING.md       user-facing problem solving
@@ -41,7 +43,7 @@ VENICE_WEB_DUMP=/tmp/req.json node src/proxy.mjs
 
 ## Invariants
 
-1. **Zero runtime dependencies.** `node_modules` must stay empty; `package.json` has no `dependencies`.
+1. **Zero runtime dependencies.** `node_modules` must stay empty; `package.json` has no `dependencies`. The system `curl` binary is the transport for the inference host; that is a system tool, not a package. No headless browser.
 2. **Only two hosts** may be contacted: `clerk.venice.ai` and `outerface.venice.ai` (`assertDestination`).
 3. **Only the `__client` cookie** is sent upstream, never `cf_clearance`.
 4. **English** everywhere in code, logs, docs, commit messages.
@@ -63,6 +65,7 @@ VENICE_WEB_DUMP=/tmp/req.json node src/proxy.mjs
 * The model sometimes answers `{"content":"","tool_calls":[]}`. That becomes an assistant turn with **no parts**, `finish: stop`, no error: the client shows nothing and the session looks frozen. `isEmptyAnswer()` / `shouldRetry()` / `preferAnswer()` / `applyFallback()` in `src/lib/emulate.mjs` exist for exactly this; never forward empty content.
 * NUL bytes in the payload make Venice answer `400 String must not contain null bytes` (only when they land in `systemPrompt`, but that is enough to kill a session). `src/lib/sanitize.mjs` scrubs them; do not remove that step, and keep the body-repair before `JSON.parse` (JSON forbids raw control characters in strings).
 * Clerk rotates `__client` on use - always read `set-cookie` and persist.
+* Cloudflare blocks Node's own HTTP client on `outerface.venice.ai/api/inference/*` (403 "Attention Required!" HTML). The system curl gets through, but only over HTTP/1.1, with the user agent passed via `-A` (header order matters) and **without** `accept: text/event-stream`. `src/lib/curl.mjs` encodes all three; read `docs/PROTOCOL.md` §1 before changing any of them.
 
 ## Changing the model catalogue
 

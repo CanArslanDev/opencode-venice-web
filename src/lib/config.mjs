@@ -48,3 +48,11 @@ export const providerID = process.env.VENICE_WEB_PROVIDER_ID ?? 'venice-web'
 
 export const debug = !!process.env.VENICE_WEB_DEBUG
 export const dumpFile = process.env.VENICE_WEB_DUMP
+
+/**
+ * HTTP client for the inference host (`outerface.venice.ai`). Cloudflare blocks
+ * Node's own client there, so `auto` uses the system curl when it is installed
+ * (see src/lib/curl.mjs). `fetch` forces Node's client, `curl` requires curl.
+ * Clerk calls always use Node's fetch.
+ */
+export const transport = process.env.VENICE_WEB_TRANSPORT ?? 'auto'

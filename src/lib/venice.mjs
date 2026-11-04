@@ -18,7 +18,9 @@ import {
   requestTimeoutMs,
   sessionFile,
   tokenRefreshSkewMs,
+  transport,
 } from './config.mjs'
+import { curlFetch, findCurl, isCloudflareBlock } from './curl.mjs'
 
 const INFERENCE_PATH = '/api/inference/chat/agents/ad-hoc'
 
@@ -69,6 +71,13 @@ function assertDestination(url) {
   if (origin !== clerkBase && origin !== apiBase) throw new Error(`unexpected upstream: ${origin}`)
 }
 
+/** Which client talks to `url`: curl for the inference host (see config `transport`), fetch otherwise. */
+export function transportFor(url) {
+  if (new URL(url).origin !== apiBase || transport === 'fetch') return 'fetch'
+  if (transport === 'curl') return 'curl'
+  return findCurl() ? 'curl' : 'fetch'
+}
+
 /**
  * Fetch with the headers the Venice web app sends. Only the `__client` cookie is
  * sent, so Cloudflare's `cf_clearance` (which is bound to the browser) cannot
@@ -83,12 +92,12 @@ export async function veneziaFetch(url, init = {}) {
   headers.set('referer', 'https://venice.ai/')
   headers.set('cookie', `__client=${session.client}`)
 
-  const response = await fetch(url, {
-    ...init,
-    headers,
-    redirect: 'error',
-    signal: init.signal ?? AbortSignal.timeout(requestTimeoutMs),
-  })
+  const signal = init.signal ?? AbortSignal.timeout(requestTimeoutMs)
+  const client = transportFor(url)
+  const response =
+    client === 'curl'
+      ? await curlFetch(url, { method: init.method, headers, body: init.body, signal })
+      : await fetch(url, { ...init, headers, redirect: 'error', signal })
 
   // Clerk rotates __client while it is used; keep the newer value.
   const rotated = response.headers.getSetCookie().find((cookie) => cookie.startsWith('__client='))
@@ -100,11 +109,13 @@ export async function veneziaFetch(url, init = {}) {
     }
   }
 
-  if (
-    response.status === 403 &&
-    (response.headers.get('cf-mitigated') === 'challenge' || response.headers.get('content-type')?.includes('text/html'))
-  ) {
-    throw new SignInError('Venice asked for a Cloudflare challenge; refresh the cookies (login command)')
+  if (isCloudflareBlock(response.status, response.headers)) {
+    await response.body?.cancel()
+    const hint =
+      client === 'curl'
+        ? 'refresh the cookies (login command)'
+        : 'Node fetch is blocked on this route; install curl or set VENICE_WEB_TRANSPORT=curl'
+    throw new SignInError(`Venice asked for a Cloudflare challenge (${client}); ${hint}`)
   }
 
   return response
@@ -174,11 +185,10 @@ export async function mintToken({ force = false } = {}) {
 /** Some inference requests carry a short-lived client attestation token. */
 async function attestationToken(headers) {
   if (attestation && attestation.expires > Date.now()) return attestation.value
-  const response = await fetch(`${apiBase}/api/app/user/client_attestation/mint`, {
+  const response = await veneziaFetch(`${apiBase}/api/app/user/client_attestation/mint`, {
     method: 'POST',
     headers: { ...headers, 'content-type': 'application/json' },
     body: JSON.stringify({ env: {} }),
-    redirect: 'error',
   })
   if (!response.ok) return null
   const data = await response.json().catch(() => null)
@@ -200,7 +210,8 @@ export async function upstreamChat(body, route = INFERENCE_PATH, signal) {
     const headers = {
       authorization: `Bearer ${access}`,
       'content-type': 'application/json',
-      accept: 'text/event-stream',
+      // no `accept: text/event-stream`: Cloudflare blocks the route with it, and
+      // the backend streams SSE without it anyway
       'x-venice-middleface-version': middlefaceVersion,
       'x-venice-request-timestamp-ms': String(Date.now()),
     }
