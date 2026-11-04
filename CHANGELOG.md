@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Reasoning deltas now stream live instead of being buffered to the end of the
+  reply, and an SSE keepalive comment goes out every 15 s. The client no longer
+  sits through minutes of silence while a tool reply is parsed and retried.
+- The plan detector matches whole words only, with Unicode-aware boundaries and
+  the Turkish future/optative suffix at word end. Substring hits ("then" inside
+  "authentication", "plan" inside "explanation") made the model retry finished
+  answers; a done marker now vetoes only weak markers. In a 2,400-request log, 64
+  of 240 plan retries and 18 of 110 failure retries changed nothing.
+- The failure detector ignores zero-count summaries ("0 failed", "fail 0") and
+  grep output, where `error:` and `not found` are content, not a failure.
+- Invented tool names (`bash`, `cat`, `ls`, ...) are mapped onto the available
+  tools instead of failing as unknown.
+
 ## 0.1.4 - 2026-10-31
 
 - Stop the session from pausing on a plan. Real session (a long

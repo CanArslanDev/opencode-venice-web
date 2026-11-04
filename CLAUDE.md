@@ -17,8 +17,8 @@ src/doctor.mjs                diagnostics
 src/lib/config.mjs            paths, endpoints, tunables (all env-overridable)
 src/lib/models.mjs            free web model catalogue
 src/lib/venice.mjs            session file, Clerk JWT, attestation, upstream fetch
-src/lib/emulate.mjs           tool-call emulation: prompt, envelope parser, SSE reader, translation
-src/lib/server.mjs            routing + OpenAI chunk translation + retry logic
+src/lib/emulate.mjs           tool-call emulation: prompt, envelope parser, SSE reader, translation, retry heuristics
+src/lib/server.mjs            routing + live chunk translation (reasoning, keepalive) + retry logic
 src/lib/cookies.mjs           Chromium cookie decryption (macOS Keychain / Linux secret-tool)
 src/lib/sanitize.mjs          NUL byte scrubbing + lenient JSON control character repair
 test/emulate.test.mjs         unit tests (node --test)
