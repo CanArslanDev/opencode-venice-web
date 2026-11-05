@@ -136,6 +136,29 @@ Watch it in the log:
   <- tools: shell(...)
 ```
 
+A long task that ends with "the tools are not responding / Tool not found" while the
+earlier tool calls clearly worked is Venice's own agent loop: the model called a tool
+with native function calling, Venice could not run it and fed back "Tool not found".
+The proxy stops such a response after 3 internal steps and asks again:
+
+```
+  ~ venice tool loop stopped after 4 steps (native calls: bash, read)
+  ~ venice tool loop, retrying...
+```
+
+`VENICE_WEB_DEBUG=1` writes every attempt, its step count and the native call names
+to `debug.log`.
+
+The same judge catches the opposite slip: the work is done but the answer only says
+so ("tamamlandı", "results are in report.md") without the values you asked for. That
+is `missing_result`, retried with a reminder to state the results:
+
+```
+  ~ judge: missing_result (says the report was written but never states the top region)
+  ~ judge: result missing, retrying...
+  ~ retry improved the reply
+```
+
 `VENICE_WEB_JUDGE_MODEL` picks the judge model (default `qwen3-5-35b-a3b`),
 `VENICE_WEB_JUDGE=0` turns it off. A judge that fails or times out never blocks a
 reply. If the session still stops, ask for the next step explicitly and open an

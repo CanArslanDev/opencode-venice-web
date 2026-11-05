@@ -10,7 +10,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
-import { apiBase, dumpFile, host, judgeEnabled, judgeModel, judgeTimeoutMs, port, providerID } from './config.mjs'
+import { apiBase, debug, dumpFile, host, judgeEnabled, judgeModel, judgeTimeoutMs, port, providerID } from './config.mjs'
 import {
   applyFallback,
   buildJudgeRequest,
@@ -20,6 +20,7 @@ import {
   parseJudgeVerdict,
   parseToolReply,
   preferAnswer,
+  serverLoopMessage,
   shouldRetry,
   sseReader,
   toVeniceRequest,
@@ -72,13 +73,25 @@ function modelList() {
  * forward while it runs: reasoning always, content only when tools are not
  * emulated (in emulated mode the whole text has to be parsed first).
  *
- * The returned generator resolves to the collected state.
- * @returns {AsyncGenerator<object, {text: string, answer: string, reasoning: string, terminal: boolean, chunks: object[]}>}
+ * The returned generator resolves to the collected state. With `stopServerLoop`
+ * it stops early when Venice's own agent loop runs past `SERVER_LOOP_STEPS` and
+ * sets `serverLoop` (see the comment in `apply`).
+ * @returns {AsyncGenerator<object, {text: string, answer: string, reasoning: string, terminal: boolean, chunks: object[], steps: Set<string>, nativeTools: Set<string>, serverLoop: boolean}>}
  */
-async function* collectStream(upstreamBody, mapping, chunk) {
+export async function* collectStream(upstreamBody, mapping, chunk, { stopServerLoop = false } = {}) {
   const reader = upstreamBody.getReader()
   const stream = sseReader()
-  const state = { text: '', answer: '', reasoning: '', terminal: false, chunks: [] }
+  const state = {
+    text: '',
+    answer: '',
+    reasoning: '',
+    terminal: false,
+    chunks: [],
+    steps: new Set(),
+    nativeTools: new Set(),
+    serverLoop: false,
+    events: {},
+  }
   const itemTypes = new Map()
 
   const apply = (event) => {
@@ -87,6 +100,31 @@ async function* collectStream(upstreamBody, mapping, chunk) {
     }
     if (event.type === 'response.output_item.added' && event.item?.type) {
       itemTypes.set(event.output_index, event.item.type)
+    }
+    // Venice runs its own agent loop inside one response. When the model calls a
+    // tool natively instead of through the envelope, Venice tries to run it
+    // itself, answers "Tool not found" and lets the model go again - up to ten
+    // steps - and none of that reaches the client. After a few rounds the model
+    // is convinced its tools are broken and gives up without a result (the
+    // "done, but no answer until I ask again" sessions, 2026-11-05). Each step is
+    // one `veniceai:tool_call_generation` item; the names it tried are in
+    // `detected_tools`.
+    if (debug) {
+      state.events[event.type] = (state.events[event.type] ?? 0) + 1
+      if (event.type === 'response.output_item.done' && /server_function_call/.test(event.item?.type ?? '')) {
+        debugRaw(`${mapping.request.modelId} server item ${event.item.type}`, JSON.stringify(event.item).slice(0, 2000))
+      }
+    }
+    if (event.type === 'veniceai:tool_call_generation.in_progress') {
+      for (const tool of event.detected_tools ?? []) if (tool?.name) state.nativeTools.add(tool.name)
+    }
+    if (event.item?.type === 'veniceai:tool_call_generation' && event.item.id) {
+      state.steps.add(event.item.id)
+      if (stopServerLoop && mapping.emulatedTools && state.steps.size > SERVER_LOOP_STEPS) {
+        state.serverLoop = true
+        state.terminal = true
+        return STOP
+      }
     }
     if (event.type === 'response.output_text.delta') {
       const delta = event.delta ?? ''
@@ -112,17 +150,33 @@ async function* collectStream(upstreamBody, mapping, chunk) {
   try {
     for (;;) {
       const { value, done } = await reader.read()
+      let stop = false
       for (const event of stream.feed(value, done)) {
         const live = apply(event)
+        if (live === STOP) {
+          stop = true
+          break
+        }
         if (live) yield live
       }
-      if (done) break
+      if (done || stop) break
     }
   } finally {
     await reader.cancel().catch(() => {})
   }
   return state
 }
+
+/** Returned by `apply()` to end the stream early. */
+const STOP = Symbol('stop')
+
+/**
+ * Venice agent steps allowed in one response before the proxy stops it. One
+ * step is a normal reply; a second or third is the model recovering from one
+ * native call; past that it is looping on "Tool not found" (measured: every
+ * 10-step response gave up without a result).
+ */
+const SERVER_LOOP_STEPS = 3
 
 /**
  * Asks the judge whether a reply without tool calls may end the turn. Any
@@ -179,24 +233,41 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
 
   yield chunk({ role: 'assistant', content: '' })
 
-  let state = yield* collectStream(upstreamBody, mapping, chunk)
+  let state = yield* collectStream(upstreamBody, mapping, chunk, { stopServerLoop: mapping.emulatedTools })
   let message = null
 
   if (mapping.emulatedTools) {
     const available = [...mapping.toolNames]
-    const read = (text) => {
+    let attempt = 0
+    const read = (text, collected) => {
+      // every attempt, not only the one that is kept: discarded retries are where
+      // the odd replies hide
+      debugRaw(
+        `${body.model} attempt ${++attempt} • ${collected.steps.size} venice step(s)` +
+          `${collected.nativeTools.size ? ` • native calls ${[...collected.nativeTools].join(',')}` : ''}` +
+          `${collected.serverLoop ? ' • stopped' : ''} • ${JSON.stringify(collected.events)}`,
+        text,
+      )
+      if (collected.serverLoop) {
+        log(`  ~ venice tool loop stopped after ${collected.steps.size} steps (native calls: ${[...collected.nativeTools].join(', ') || '?'})`)
+        return serverLoopMessage()
+      }
       const parsed = parseToolReply(text)
       for (const rename of inspectCalls(parsed, mapping.toolSchemas)) log(`  ~ tool name ${rename}`)
       return parsed
     }
-    message = read(state.text)
+    message = read(state.text, state)
     const last = [...(body.messages ?? [])].reverse().find((item) => item.role !== 'system' && item.role !== 'developer')
     let judged = 0
+    let formatRetries = 0
 
     // Up to two extra attempts while the reply is unhelpful. Every trigger is
     // structural (see shouldRetry); a reply that ends the turn right after a tool
-    // result is checked by the judge instead.
-    for (let round = 0; round < 2; round++) {
+    // result is checked by the judge instead. The two budgets are separate: when
+    // they were shared, two format retries used everything up and the answer the
+    // last retry produced reached the user without the judge ever seeing it
+    // (a made-up "the tools all returned Tool not found", 2026-11-05).
+    for (;;) {
       let decision = shouldRetry({ message, lastRole: last?.role, available })
       if (decision.judge) {
         if (!judgeEnabled || judged >= 2) break
@@ -206,14 +277,18 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
         decision = judgeDecision(verdict?.verdict)
       }
       if (!decision.retry) break
+      if (!decision.reason.startsWith('judge:') && formatRetries++ >= 2) break
 
       log(`  ~ ${decision.reason}, retrying...`)
       try {
         const retryResponse = await upstreamChat(withRetryReminder(mapping.request, decision.reminder), INFERENCE_PATH, signal)
         if (!retryResponse.ok) break
-        const retryState = yield* collectStream(retryResponse.body, mapping, chunk)
-        const retryMessage = read(retryState.text)
-        if (preferAnswer(retryMessage, message)) {
+        // the last allowed retry runs to the end, so the turn always gets an answer
+        const retryState = yield* collectStream(retryResponse.body, mapping, chunk, {
+          stopServerLoop: formatRetries < 2,
+        })
+        const retryMessage = read(retryState.text, retryState)
+        if (preferAnswer(retryMessage, message, { replaceAnswer: decision.replaceAnswer })) {
           state = retryState
           message = retryMessage
           log('  ~ retry improved the reply')
@@ -238,7 +313,6 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
   let contentForUsage = state.answer
 
   if (mapping.emulatedTools) {
-    debugRaw(body.model, state.text)
     contentForUsage = message.content ?? ''
     if (message.tool_calls) {
       finish = 'tool_calls'

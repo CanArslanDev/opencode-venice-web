@@ -158,7 +158,7 @@ Measured on every reply of 2026-11-04 (9 sessions, ~190 requests): 13 replies sh
 The hardest failure is the model ending its turn halfway: it writes what it is about to do ("Testi çalıştırıp sonucu bildiriyorum.", "Devam ediyorum.", a "Remaining:" list) with no tool call. The first fix matched Turkish and English words; on the labelled set below it caught **0 of 13** real early stops and could never work for other languages, so it was removed. Two structural layers replace it:
 
 1. **`status` in the envelope.** `continue` without a tool call is retried at once. The model writes the field reliably only when its history has it too, so re-serialised assistant turns carry `continue` (calls) or `done` (no calls): `8/15 → 15/15` replies with a status.
-2. **The judge.** Any other reply without tool calls after a tool result (`done`, `ask`, or no status) is shown to a second model with the user's request, the last two tool outputs and the reply, and it answers `finished`, `needs_user`, `stopped_early` or `ignored_failure`. The last two trigger a retry with `CONTINUE_REMINDER` / `FAILURE_RETRY_REMINDER`. A judge failure or timeout keeps the reply. The same check replaces the old English failure-word list ("not found", "failed", …).
+2. **The judge.** Any other reply without tool calls after a tool result (`done`, `ask`, or no status) is shown to a second model with the user's request, the last two tool outputs and the reply, and it answers `finished`, `needs_user`, `stopped_early`, `ignored_failure` or `missing_result`. The last three trigger a retry with `CONTINUE_REMINDER` / `FAILURE_RETRY_REMINDER` / `RESULT_REMINDER`. A judge failure or timeout keeps the reply. The same check replaces the old English failure-word list ("not found", "failed", …).
 
 Judge measurement: 29 labelled turn endings from real sessions (13 early stops, 16 correct endings; 6 of them translated into German, Japanese and Spanish), reasoning disabled:
 
@@ -173,6 +173,35 @@ Judge measurement: 29 labelled turn endings from real sessions (13 early stops, 
 Over 3 more runs Qwen scored 76/87 (4 missed stops, 7 needless retries; all translated cases right in 17 of 18). Most disagreements are borderline labels (a summary that ends with "two notes remain", an honest "1 test still fails" report). A needless retry costs one upstream call: `preferAnswer()` keeps the first answer when the retry is not better.
 
 Replaying the real conversations up to the 9 points where the model stopped (twice each, tool calls not executed): the new proxy continued at **18/18**, the previous build at 15/18; no reply leaked JSON.
+
+#### Venice's own tool loop ("the tools all returned Tool not found")
+
+The most common way a long task ended without its result had nothing to do with the envelope. `/agents/ad-hoc` runs Venice's own agent loop inside one response. When the model calls a tool with its *native* function calling instead of the envelope, Venice tries to run it server-side, answers `Tool not found` (or, for `view_media`, "invalid media_id"), and lets the model try again - up to 10 steps. None of it reaches the client. After a few rounds the model is sure its tools are broken and writes "bash/read/glob all returned Tool not found, I could not read the files" with `status: done`. The user asks again and the next turn works, because the fresh request starts without that history.
+
+What the stream shows (debug mode logs it): one `veniceai:tool_call_generation` item per step (`id: tcg_agent-node:llm:<n>`), and `veniceai:tool_call_generation.in_progress` carries `detected_tools: [{"type":"Unrecognized","name":"bash"}]`. Arguments are not exposed, so the call cannot be forwarded. `veniceai:server_function_call(_output)` items appear only for Venice's own tools. Unknown request fields (`maxSteps`, `toolChoice`, `disableTools`, …) are accepted and ignored; there is no known switch for the loop.
+
+| Steps in one response | Seen (code-stats/tests-fix runs) | Outcome |
+| --- | --- | --- |
+| 0-1 | most | normal reply |
+| 2-3 | a few | the model recovered and sent a proper envelope |
+| 10 (Venice's cap) | 12 of 86 replies | gave up without the result, every time |
+
+Fix: `collectStream()` stops reading once a response starts a 4th step (`SERVER_LOOP_STEPS = 3`), and the request is sent again with `NATIVE_CALL_REMINDER` ("your tools work; the only way to call a tool is `tool_calls`"). It counts as a format retry; the last allowed retry runs to the end so the turn always gets an answer. Format retries and judge checks now have separate budgets (2 each): with a shared budget, two format retries used it up and the last reply reached the user without the judge seeing it. The judge also treats "my tools are unavailable" as `stopped_early` when the tool results it sees worked.
+
+Measured on the two tasks that triggered it (OpenCode, 6 runs each): before, 2 of 8 and 2 of 12 runs ended with a "tools are broken" answer and the result only came after "Sonucu söyle."; after, 12 of 12 delivered the result in the final message, with 10 loops stopped and retried along the way.
+
+#### "Done" without the result
+
+A second way a turn ends badly: the work is done, but the answer only says so ("İşlem tamamlandı, sonuçlar rapor.md'de", "All tests pass now") and leaves out what the user asked to be told; the user then has to ask "sonucu söyle". The first judge prompt had no verdict for this. Fed 5 such replies (Turkish and English: a pointer to a file, "tests pass" without the asked counts, a checked todo list, "analysis finished") twice each, `qwen3-5-35b-a3b` let **9 of 10** through: its reasons named the missing values, but it had to pick `finished` or `needs_user`, and neither retries.
+
+Fix: a fifth verdict, `missing_result` ("the work is done, but the reply does not state a result the user asked to be told"), `finished` now requires the asked-for result, and `needs_user` requires an actual question. `missing_result` retries with `RESULT_REMINDER`, and that retry may replace the first answer (`preferAnswer(…, { replaceAnswer: true })`; otherwise two real answers keep the first, which would throw the corrected answer away). The tool prompt also says a `done` answer states the results, not just that the work is done.
+
+| Probe (3 runs each) | Before | After |
+| --- | --- | --- |
+| no-result replies caught | 1/10 | **15/15** |
+| needless retries on complete answers (short answers, action-only requests, a real question) | 0/4 | 3/18 |
+
+The 3 needless retries are one case, "compute X and write it to a file" answered with "written to the file": the judge reads "compute" as wanting the figures. A retry there costs one call and returns the figures.
 
 ### Things that do **not** help (measured)
 

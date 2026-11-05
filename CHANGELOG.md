@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **Long tasks no longer give up on "Tool not found".** The web endpoint runs
+  Venice's own agent loop inside one response: when the model called a tool with
+  native function calling, Venice answered "Tool not found" and re-ran it, up to 10
+  times, out of sight. The model then reported that its tools were broken and
+  stopped without the result; asking again worked because the new turn started
+  clean. The proxy now counts those internal steps, stops a response past 3 and
+  retries with a reminder that the tools work and go in `tool_calls`. On the two
+  tasks that triggered it, 4 of 20 runs ended that way before and 0 of 12 after.
+  Format retries and judge checks have separate budgets now, so the last retry is
+  always judged. `VENICE_WEB_DEBUG=1` logs every attempt with its step count.
+- **A finished task now reports its result.** Long tasks could end with "done, the
+  results are in report.md" or "all tests pass" without the numbers or answers the
+  user asked for, and the user had to ask "sonucu söyle". The judge had no verdict for
+  that and let 9 of 10 such replies through. It now has `missing_result`, which
+  retries with a reminder to state the results, and that retry may replace the
+  first answer. The tool prompt asks a `done` answer to carry the results. Probe:
+  15/15 caught, 3/18 needless retries (all on "compute it into a file" requests).
 - Inference requests go through the system `curl`. Cloudflare started blocking
   Node's own HTTP client on the inference route (403 "Attention Required!"), so
   every request failed with "refresh the cookies". curl over HTTP/1.1 with the

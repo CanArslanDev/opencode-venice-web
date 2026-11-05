@@ -33,7 +33,7 @@ Return ONLY one valid JSON object, without markdown fences and without any text 
 {"content":"text for the user, or an empty string","status":"continue","tool_calls":[{"name":"exact tool name","arguments":{}}]}
 "status" is required and is one of:
 - "continue": the request needs more work from you. tool_calls must then contain the next tool call(s).
-- "done": the whole request is finished; "content" is your final answer and tool_calls is [].
+- "done": the whole request is finished; "content" is your final answer and tool_calls is []. The final answer states the results the user asked for (numbers, names, findings, answers, what changed); "it is done" or "see the file" alone is not an answer.
 - "ask": you need a decision or information that only the user can give; "content" is the question and tool_calls is [].
 To request a tool, put its name and arguments in tool_calls and STOP; the agent executes it and sends a tool result in the next user message. Never invent tool results. If a task needs the filesystem, call a tool instead of guessing. Never send an empty "content" unless you are calling a tool.
 "arguments" is always a JSON object: write file content into it as a properly escaped string (escape line breaks as \\n, escape quotes as \\"). Close every object: each tool call is {"name":...,"arguments":{...}}.
@@ -70,6 +70,23 @@ export const CONTINUE_REMINDER =
 export const FAILURE_RETRY_REMINDER =
   'the latest tool output shows a failure (an error, a failing test, a missing file or command, or a non-zero exit) that your reply does not handle. Fix it now with tool_calls and "status":"continue", or, if it cannot be fixed, say so plainly with "status":"done".'
 
+/** Sent when the judge saw finished work whose result the reply leaves out. */
+export const RESULT_REMINDER =
+  'the work is done, but your reply does not tell the user the result they asked for. Answer again with "status":"done" and put the concrete results in "content" (the numbers, names, findings or answers, and what changed); saying it is done or naming a file is not enough. Call a tool only if a value is still missing.'
+
+/**
+ * Sent when the model called tools natively and Venice's own agent loop answered
+ * "Tool not found" (see server.mjs `collectStream`). The tools are fine; only
+ * the way they were called was wrong.
+ */
+export const NATIVE_CALL_REMINDER =
+  'your tools work. Do not use built-in function calling or any native tool-call syntax: the ONLY way to call a tool is the "tool_calls" array of your JSON reply. Ignore any earlier "Tool not found" message and call the tool you need now in tool_calls with "status":"continue".'
+
+/** A reply cut off because Venice was looping on native tool calls. */
+export function serverLoopMessage() {
+  return { content: '', tool_calls: null, sawEnvelope: false, serverLoop: true }
+}
+
 /** Builds the reminder for tool calls the agent cannot execute. */
 export const invalidCallReminder = (problems, available) =>
   `your last tool call(s) cannot be executed: ${problems.join('; ')}. Send the reply again with complete, valid tool calls. Available tools: ${available.join(', ')}.`
@@ -104,6 +121,7 @@ export const EMPTY_MARKER = '(empty reply)'
  * @returns {{ retry: boolean, reason?: string, reminder?: string, judge?: boolean }}
  */
 export function shouldRetry({ message, lastRole, available = [] }) {
+  if (message.serverLoop) return { retry: true, reason: 'venice tool loop', reminder: NATIVE_CALL_REMINDER }
   if (isEmptyAnswer(message) && !message.brokenEnvelope) {
     return { retry: true, reason: 'empty reply', reminder: EMPTY_RETRY_REMINDER }
   }
@@ -148,7 +166,7 @@ export function applyFallback(message, rawText) {
  * wins. Keeping this decision explicit is what stops a retry from replacing a
  * good answer with a blank one.
  */
-export function preferAnswer(candidate, current) {
+export function preferAnswer(candidate, current, { replaceAnswer = false } = {}) {
   if (!candidate) return false
   const candidateOk = !!candidate.tool_calls && !candidate.problems?.length
   const currentOk = !!current?.tool_calls && !current?.problems?.length
@@ -162,6 +180,8 @@ export function preferAnswer(candidate, current) {
   if (!candidateText && currentText) return false
   if (candidate.brokenEnvelope !== current?.brokenEnvelope) return !candidate.brokenEnvelope
   if (candidateText && currentText && candidate.sawEnvelope && !current?.sawEnvelope) return true
+  // asked for again because the first answer left the result out
+  if (replaceAnswer && candidateText && candidate.sawEnvelope && !candidate.problems?.length) return true
   return false
 }
 
@@ -178,9 +198,10 @@ export function preferAnswer(candidate, current) {
 export const JUDGE_PROMPT = `You review one turn of an AI coding agent. The agent works for a user and can call tools (shell, read, edit, write, ...). It has just received tool results, and its latest reply calls no tool, so the turn is about to END and control goes back to the user. Decide whether ending here is right. The conversation can be in any language.
 Answer with exactly one JSON object and nothing else: {"verdict":"...","reason":"one short sentence"}
 verdict is one of:
-- "finished": the request is done, or the reply gives the user the result they asked for (an honest report that something failed or cannot be done also counts).
-- "needs_user": the agent needs a decision, information or permission that only the user can give and that the request did not already give.
-- "stopped_early": work the user asked for is still open and the agent could do it now with its tools - for example the reply announces or lists next steps, promises to run, check or fix something, says it will continue, or asks permission for something the user already asked for.
+- "finished": the request is done AND the reply gives the user what they asked to be told: the numbers, names, findings, answers or summary the request asks for (an honest report that something failed or cannot be done also counts). When the request only asks for an action (create, fix, rename, delete, compute something into a file) and does not ask to be told anything, confirming it is enough.
+- "missing_result": the work is done, but the reply does not state a result the user asked to be told - it only says the work is done, that tests pass, or where the results were saved, while the request asked to be told the values, names, counts, findings or answers themselves ("tell me ...", or a question such as which, how many, what).
+- "needs_user": the agent asks the user a real question: a decision, information or permission that only the user can give and that the request did not already give. A reply that asks nothing is never "needs_user".
+- "stopped_early": work the user asked for is still open and the agent could do it now with its tools - for example the reply announces or lists next steps, promises to run, check or fix something, says it will continue, asks permission for something the user already asked for, or claims its tools are unavailable or failing although the tool results shown here worked.
 - "ignored_failure": the latest tool output shows a failure (an error, a failing test, a missing file or command, a non-zero exit) that the reply ignores or presents as success.`
 
 const tail = (text, max) => (text.length > max ? `…${text.slice(-max)}` : text)
@@ -220,7 +241,7 @@ export function buildJudgeRequest(body, message, model) {
   }
 }
 
-export const VERDICTS = new Set(['finished', 'needs_user', 'stopped_early', 'ignored_failure'])
+export const VERDICTS = new Set(['finished', 'needs_user', 'stopped_early', 'ignored_failure', 'missing_result'])
 
 /** Reads the judge's verdict, or `null` when its reply is unusable. */
 export function parseJudgeVerdict(text) {
@@ -242,6 +263,10 @@ export function judgeDecision(verdict) {
   if (verdict === 'stopped_early') return { retry: true, reason: 'judge: stopped early', reminder: CONTINUE_REMINDER }
   if (verdict === 'ignored_failure') {
     return { retry: true, reason: 'judge: ignored a failed tool output', reminder: FAILURE_RETRY_REMINDER }
+  }
+  // the retry is another final answer, so it has to be allowed to replace the first
+  if (verdict === 'missing_result') {
+    return { retry: true, reason: 'judge: result missing', reminder: RESULT_REMINDER, replaceAnswer: true }
   }
   return { retry: false }
 }

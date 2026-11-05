@@ -16,6 +16,7 @@ import {
   BROKEN_ENVELOPE_REMINDER,
   CONTINUE_REMINDER,
   JUDGE_PROMPT,
+  RESULT_REMINDER,
   buildJudgeRequest,
   inspectCalls,
   isEmptyAnswer,
@@ -606,8 +607,39 @@ test('parseJudgeVerdict reads the verdict and rejects anything else', () => {
   assert.equal(parseJudgeVerdict(''), null)
 })
 
-test('judgeDecision: only an early stop or an ignored failure is retried', () => {
+test('judgeDecision: an early stop, an ignored failure or a missing result is retried', () => {
   assert.equal(judgeDecision('stopped_early').reminder, CONTINUE_REMINDER)
   assert.equal(judgeDecision('ignored_failure').reminder, FAILURE_RETRY_REMINDER)
   for (const verdict of ['finished', 'needs_user', undefined, null]) assert.deepEqual(judgeDecision(verdict), { retry: false })
+})
+
+test('judgeDecision: a missing result is asked for again and may replace the first answer', () => {
+  const decision = judgeDecision('missing_result')
+  assert.equal(decision.retry, true)
+  assert.equal(decision.reminder, RESULT_REMINDER)
+  assert.equal(decision.replaceAnswer, true)
+  assert.equal(judgeDecision('stopped_early').replaceAnswer, undefined)
+})
+
+test('parseJudgeVerdict accepts missing_result', () => {
+  assert.equal(parseJudgeVerdict('{"verdict":"missing_result","reason":"no numbers"}').verdict, 'missing_result')
+})
+
+test('the judge prompt separates a finished answer from a missing result', () => {
+  assert.match(JUDGE_PROMPT, /"missing_result"/)
+  assert.match(JUDGE_PROMPT, /never "needs_user"/)
+})
+
+test('the tool prompt asks the final answer to carry the result', () => {
+  assert.match(TOOL_PROMPT, /states the results the user asked for/)
+})
+
+test('preferAnswer: with replaceAnswer a real retry answer replaces the first one', () => {
+  const first = answerEnvelope('Bitti, rapor.md yazıldı.')
+  const retry = answerEnvelope('Marmara: 206.777')
+  assert.equal(preferAnswer(retry, first), false)
+  assert.equal(preferAnswer(retry, first, { replaceAnswer: true }), true)
+  // never with a blank retry, a prose retry or a call with problems
+  assert.equal(preferAnswer(emptyEnvelope(), first, { replaceAnswer: true }), false)
+  assert.equal(preferAnswer({ ...retry, sawEnvelope: false }, first, { replaceAnswer: true }), false)
 })
