@@ -53,7 +53,8 @@ function runTask(task) {
   return new Promise((resolve) => {
     const child = spawn('opencode', ['run', '--auto', '--standalone', '-m', model, '--title', `stress-${task.id}`, task.prompt], {
       cwd: dir,
-      env,
+      // OpenCode takes the project directory from PWD, not from the process cwd
+      env: { ...env, PWD: dir },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     let output = ''
