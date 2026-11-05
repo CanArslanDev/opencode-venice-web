@@ -32,6 +32,7 @@ test/smoke.mjs                end-to-end check against a running proxy
 scripts/stress/               multilingual OpenCode stress tasks with their own verification (not in npm test)
 docs/PROTOCOL.md              upstream protocol + why tools are emulated + measurements
 docs/TROUBLESHOOTING.md       user-facing problem solving
+skills/opencode-orchestrator/ Claude Code skill: Claude orchestrates `opencode run` workers (generic, no machine-specific data)
 packaging/                    launchd plist / systemd unit templates (__NODE__ __PROXY__ __LOG__)
 ```
 

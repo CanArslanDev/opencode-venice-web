@@ -189,6 +189,48 @@ launchctl kickstart -k gui/$(id -u)/ai.opencode.venice-web   # macOS: restart th
 systemctl --user restart ai.opencode.venice-web               # Linux
 ```
 
+## Claude Code skill: orchestrate OpenCode workers
+
+`skills/opencode-orchestrator/` is a [Claude Code](https://claude.com/claude-code) skill that turns Claude into the **orchestrator** of OpenCode workers. Claude plans and splits the work into small tasks, hands each one to an `opencode run` worker (for example a free `venice-web/*` model through this proxy), and then verifies every result itself (tests, type checks, diffs) before it reports. A worker's "DONE" is treated as a claim, not a fact.
+
+Install it once for your user, then start a new Claude Code session:
+
+```sh
+mkdir -p ~/.claude/skills
+ln -s "$PWD/skills/opencode-orchestrator" ~/.claude/skills/opencode-orchestrator   # updates with git pull
+# or copy it: cp -R skills/opencode-orchestrator ~/.claude/skills/
+```
+
+Use it from any git repository:
+
+```
+/opencode-orchestrator add input validation to the signup form and test it
+```
+
+Without a task it continues the backlog in `.orchestrator/STATUS.md` (or asks what to do). Claude asks for the worker model at the start of the session; set it yourself with `export ORCH_MODEL=venice-web/deepseek-v4-1-flash-free`.
+
+What the scripts guard against (each of these cost hours in real sessions):
+
+| Script | What it does |
+| --- | --- |
+| `preflight.sh` | checks that `opencode`, `perl`, `node` and `git` exist, that the installed `opencode run` accepts every flag the scripts use (an unknown flag makes it print its help and **exit 0 without running**), and that the model is listed |
+| `oc-run.sh` | one worker run: stdin closed (an open stdin pipe makes `opencode run` hang before the model is called), hard time limit, `--dir <repo>`, JSON event log; prints the session id, the number of real tool calls, tool errors and the final text |
+| `code.sh` | a coding task that must change a list of files; compares content hashes before and after and nudges the **same session** when a promised file did not change |
+| `ask.sh` | a research task that must end with a report file; nudges the same session until the file exists |
+| `gate.sh` | after every group: running workers, the repository's own checks (`.orchestrator/gate.local.sh`, else `npm test`), changed files, leftover `zz-*` temp files |
+
+Per repository, two optional files live in `.orchestrator/`: `gate.local.sh` (what proves the work there: tests, type checks, build) and `STATUS.md` (state and backlog between sessions, from `templates/STATUS.md`).
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `ORCH_MODEL` | - (required) | worker model, `provider/model` |
+| `ORCH_ROOT` | git top level | repository the workers run in |
+| `ORCH_LIMIT` | `1500` | seconds per worker run before it is killed |
+| `ORCH_RUNS` | `$TMPDIR/opencode-orchestrator/<repo>` | prompt files and JSON run logs |
+| `ORCH_AUTO` | `0` | `1` passes `--auto` (approve everything not explicitly denied); off by default, so workers stay inside the repository |
+
+The skill never commits or pushes, never reads credentials, and tells every worker the same. It needs `opencode`, `perl`, `node` and `git` on `PATH`.
+
 ---
 
 ## Related work

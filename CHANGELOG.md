@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `skills/opencode-orchestrator/`: a Claude Code skill that lets Claude plan work,
+  hand small tasks to `opencode run` workers and verify every result itself. The
+  scripts close stdin (an open pipe made workers hang before the model was called),
+  put a hard time limit on every run, check that the installed `opencode` accepts
+  every flag used (an unknown flag exits 0 without running), and nudge the same
+  session when a promised file did not change. See the README section.
 - **Long tasks no longer give up on "Tool not found".** The web endpoint runs
   Venice's own agent loop inside one response: when the model called a tool with
   native function calling, Venice answered "Tool not found" and re-ran it, up to 10
