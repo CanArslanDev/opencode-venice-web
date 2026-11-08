@@ -98,7 +98,7 @@ function readFromBrowser(name, profile) {
   const db = candidatePaths(browser, profile).find(existsSync)
   if (!db) return null
 
-  const key = pbkdf2Sync(passwordFor(browser), 'saltysalt', 1003, 16, 'sha1')
+  const key = pbkdf2Sync(passwordFor(browser), 'saltysalt', process.platform === 'darwin' ? 1003 : 1, 16, 'sha1')
   const copy = path.join(mkdtempSync(path.join(tmpdir(), 'venice-cookie-')), 'Cookies')
   copyFileSync(db, copy)
 
