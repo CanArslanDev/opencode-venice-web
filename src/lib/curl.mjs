@@ -17,6 +17,10 @@
  * streamed back from stdout. No browser, no npm dependency, a few MB per request.
  */
 import { spawn, execFileSync } from 'node:child_process'
+import { fetch as wreqFetch } from 'wreq-js'
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 
 let curlPath
 
@@ -80,16 +84,24 @@ export function parseHead(buffer) {
 }
 
 /** `fetch()` lookalike backed by curl; resolves to a Response with a streaming body. */
-export function curlFetch(url, { method = 'GET', headers, body, signal } = {}) {
+export async function curlFetch(url, { method = 'GET', headers, body, signal } = {}) {
+  if (process.env.VENICE_WEB_TRANSPORT !== 'curl') {
+    const pairs = [...new Headers(headers)]
+    const browser = process.env.VENICE_WEB_TLS_PROFILE ?? 'chrome_149'
+    const os = process.env.VENICE_WEB_TLS_OS ?? 'linux'
+    return wreqFetch(url, { method, headers: pairs, body, signal, browser, os })
+  }
   const bin = findCurl()
   if (!bin) return Promise.reject(new Error('curl is not installed (needed for the Venice inference route)'))
   if (!url.startsWith('https://')) return Promise.reject(new Error('curl transport only speaks https'))
+
+  const headerFile = path.join(mkdtempSync(path.join(tmpdir(), 'venice-h-')), 'headers')
 
   // Header order is part of what Cloudflare looks at: a user agent passed as a
   // plain `-H` line lands after `Accept` and gets the request blocked, so it goes
   // through `-A`, where curl puts it in its usual place.
   const userAgent = new Headers(headers).get('user-agent')
-  const args = ['-sS', '--http1.1', '--no-buffer', '--proto', '=https', '-D', '-', '-X', method, '-H', '@/dev/fd/3']
+  const args = ['-sS', '--http1.1', '--no-buffer', '--proto', '=https', '-D', '-', '-X', method, '-H', '@' + headerFile]
   if (userAgent) args.push('-A', userAgent)
   if (body != null) args.push('--data-binary', '@-')
   args.push(url)
@@ -130,7 +142,7 @@ export function curlFetch(url, { method = 'GET', headers, body, signal } = {}) {
     }
     signal?.addEventListener('abort', onAbort, { once: true })
 
-    child.stdio[3].end(headerLines(headers))
+    writeFileSync(headerFile, headerLines(headers))
     child.stdin.on('error', () => {})
     child.stdio[3].on('error', () => {})
     if (body != null) child.stdin.end(typeof body === 'string' ? body : Buffer.from(body))
@@ -168,6 +180,7 @@ export function curlFetch(url, { method = 'GET', headers, body, signal } = {}) {
     })
 
     child.on('close', (code) => {
+      rmSync(path.dirname(headerFile), { recursive: true, force: true })
       signal?.removeEventListener('abort', onAbort)
       if (code === 0 || code === null) {
         if (!settled) return fail(new Error('curl: no response'))

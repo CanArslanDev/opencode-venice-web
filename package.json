@@ -42,5 +42,8 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/CanArslanDev/opencode-venice-web.git"
+  },
+  "dependencies": {
+    "wreq-js": "^3.2.0"
   }
 }
