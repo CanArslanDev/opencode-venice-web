@@ -41,9 +41,9 @@ function candidatePaths(browser, profile) {
     else dirs.push(path.join(root, browser.linux))
   }
   const out = []
-  for (const dir of dirs) for (const profile of profiles(profile === 'Default' ? undefined : profile)) {
-    out.push(path.join(dir, profile, 'Cookies'))
-    out.push(path.join(dir, `${profile}-Cookies`))
+  for (const dir of dirs) for (const prof of profiles(profile === 'Default' ? undefined : profile)) {
+    out.push(path.join(dir, prof, 'Cookies'))
+    out.push(path.join(dir, `${prof}-Cookies`))
   }
   return out
 }
