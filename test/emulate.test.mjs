@@ -32,11 +32,13 @@ import {
   reasoningMode,
   repairArguments,
   salvageCalls,
+
   shouldRetry,
   textOf,
   toVeniceRequest,
   withRetryReminder,
 } from '../src/lib/emulate.mjs'
+import { SERVER_TOOLS } from '../src/lib/server.mjs'
 import { MODELS } from '../src/lib/models.mjs'
 import * as real from './fixtures/real-replies.mjs'
 
@@ -642,4 +644,11 @@ test('preferAnswer: with replaceAnswer a real retry answer replaces the first on
   // never with a blank retry, a prose retry or a call with problems
   assert.equal(preferAnswer(emptyEnvelope(), first, { replaceAnswer: true }), false)
   assert.equal(preferAnswer({ ...retry, sawEnvelope: false }, first, { replaceAnswer: true }), false)
+})
+
+test('server tool calls riding along with prose: keeps the prose as the answer when only view_media is left', () => {
+    const parsed = { content: 'Retrato cyberpunk', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'view_media', arguments: '{}' } }], sawEnvelope: true, status: 'continue' }
+    const kept = parsed.tool_calls.filter((call) => !SERVER_TOOLS.has(call.function?.name))
+    if (kept.length !== parsed.tool_calls.length && parsed.tool_calls && (parsed.content ?? '').trim()) parsed.status = 'done'
+    assert.equal(shouldRetry({ message: parsed, lastRole: 'user', available: [] }).retry, false)
 })

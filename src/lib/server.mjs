@@ -194,7 +194,7 @@ const STOP = Symbol('stop')
 const SERVER_LOOP_STEPS = 3
 
 /** Venice agent tools the proxy runs itself instead of forwarding to the client. */
-const SERVER_TOOLS = new Set(['view_media', 'edit_image'])
+export const SERVER_TOOLS = new Set(['view_media', 'edit_image'])
 
 /**
  * Runs one Venice server-tool call. Only `edit_image` does real work: the
@@ -401,6 +401,12 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
           // is what made an edit vanish whenever the model also called a client tool.
           parsed.serverCalls = asked
           parsed.tool_calls = kept.length ? [...kept, ...asked] : null
+          // An envelope that also carries prose is not "empty" just because the
+          // only calls left are server ones: `view_media` on its own used to be
+          // retried as an empty reply and the retry, with no prose, replaced a
+          // description that had already been written. The prose is the answer;
+          // keep it and let the lookup ride along.
+          if (parsed.tool_calls && (parsed.content ?? '').trim()) parsed.status = 'done'
         }
       }
       for (const rename of inspectCalls(parsed, mapping.toolSchemas)) log(`  ~ tool name ${rename}`)
@@ -579,10 +585,17 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
       // tool of its own for that, so the result is handed over as a `view_media`
       // call: OpenCode resolves the media id and renders the image. Without it
       // the turn ended as text only and the picture never arrived.
+      //
+      // Every tool call ends the turn for an OpenAI client, and a client that
+      // does not know `view_media` sees an unknown tool. The envelope therefore
+      // carries `status: done` and the prose the model wrote for the user, so
+      // whoever runs the call (OpenCode, a plain bot) still has the answer even
+      // if it cannot resolve the id.
       finish = 'tool_calls'
+      const editedEnvelope = `{"content":${JSON.stringify(message.content || 'Listo, la imagen está editada.')},"status":"done","tool_calls":[{"name":"view_media","arguments":{"media_ids":[${JSON.stringify(edited.mediaId)}]}}]}`
       log(`  <- tools: view_media(${edited.mediaId}) (edit result)`)
       yield chunk({
-        content: message.content || '',
+        content: editedEnvelope,
         tool_calls: [
           {
             index: 0,
