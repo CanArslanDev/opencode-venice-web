@@ -23,34 +23,50 @@ OpenCode ──HTTP──> 127.0.0.1:3456  ──HTTPS + your session cookie─�
 
 ## Quick start
 
+### Requirements
+
+- **Node 22 or newer.** `npm` ships with it and is used once, to install `wreq-js`.
+- **A desktop browser already signed in to venice.ai** (Brave, Chrome, Edge or Chromium) on the same machine, so the login step can read the `__client` cookie. On Linux the cookie is decrypted through `secret-tool` (gnome-keyring); without a keyring the well-known `peanuts` password is tried, which only works if the browser itself was started without one.
+- **A paid Venice plan.** The web models are free to use but the account must be Pro or above.
+- `curl` is optional: the default transport is `wreq-js`, which is what gets past Cloudflare. Set `VENICE_WEB_TRANSPORT=curl` only if you want the curl path, and then install `curl`.
+- Linux with systemd works (unit `ai.opencode.venice-web`), as does macOS with launchd.
+
+### Automated
+
 ```sh
-git clone https://github.com/CanArslanDev/opencode-venice-web.git
+git clone --branch deploy/linux-fixes https://github.com/crisazas/opencode-venice-web.git
 cd opencode-venice-web
 ./install.sh --default
 ```
 
-That installs the code to `~/.local/share/opencode-venice-web`, adds the `venice-web` provider to `~/.config/opencode/opencode.json`, starts a background service (launchd or systemd), and signs in by reading the `venice.ai` cookie from Brave/Chrome/Edge/Chromium.
+That copies the code to `~/.local/share/opencode-venice-web`, runs `npm install` there for `wreq-js`, adds the `venice-web` provider to `~/.config/opencode/opencode.json`, starts a background service (launchd or systemd) and signs in by reading the `venice.ai` cookie from your browser.
 
-Add `--with-nul-plugin` if you also use other providers from OpenCode (see [NUL bytes](#nul-bytes-and-400-invalid-request)).
+Add `--with-nul-plugin` if you also use other providers from OpenCode (see [NUL bytes](#nul-bytes-and-400-invalid-request)). Use `--no-service` to skip the service, or `--no-sync` to leave `opencode.json` alone.
 
 Then **restart OpenCode** and pick a model such as `venice-web/deepseek-v4-1-flash-free`.
 
-Or without cloning:
+Or without cloning (the branch defaults to `deploy/linux-fixes`; override with `VENICE_WEB_BRANCH`):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/CanArslanDev/opencode-venice-web/main/install.sh | sh -s -- --default
+curl -fsSL https://raw.githubusercontent.com/crisazas/opencode-venice-web/deploy/linux-fixes/install.sh | sh -s -- --default
 ```
 
 > The `raw.githubusercontent.com` shortcut only works while the repository is **public**. For a private repo, use the `git clone` flow above (or any mirror you control).
 
-Prefer doing it by hand? Three commands:
+### By hand
 
 ```sh
-npm install -g .        # or run everything from the checkout with `node src/...`
-venice-web-login        # reads the cookie from your browser
-venice-web-sync --default   # writes the OpenCode provider
-venice-web             # starts the proxy on 127.0.0.1:3456
+git clone --branch deploy/linux-fixes https://github.com/crisazas/opencode-venice-web.git
+cd opencode-venice-web
+npm install                 # wreq-js; the only dependency
+node src/login.mjs          # reads the cookie from your browser
+node src/sync.mjs --default # writes the OpenCode provider
+node src/proxy.mjs          # starts the proxy on 127.0.0.1:3456
 ```
+
+Leave the last command running. To keep it after logout, copy `packaging/ai.opencode.venice-web.service` to `~/.config/systemd/user/`, replace `__NODE__`, `__PROXY__` and `__LOG__` with absolute paths, then `systemctl --user enable --now ai.opencode.venice-web`.
+
+`npm install -g .` also works and gives you the `venice-web`, `venice-web-login`, `venice-web-sync` and `venice-web-doctor` commands, but the proxy still needs the `node_modules` next to the code it was installed from.
 
 Check everything is wired up:
 
@@ -58,6 +74,8 @@ Check everything is wired up:
 node src/doctor.mjs      # or venice-web-doctor
 curl -s 127.0.0.1:3456/health
 ```
+
+`doctor` reports each check as `ok` or `FAIL` with the fix next to it, so start there when something is off.
 
 ---
 
@@ -174,7 +192,7 @@ All environment variables are optional; the defaults are what the installer uses
 ## Security and privacy
 
 - The session file (`~/.config/opencode/venice-web/session.json`, mode `600`) holds your Clerk cookie - treat it like a login token, keep it out of git.
-- Only `clerk.venice.ai` and `outerface.venice.ai` are contacted (inference through the system `curl`; its headers go over a pipe, so the token never appears in the process list); the proxy is bound to loopback by default. Anything that can reach it can use your Venice account, so do not expose the port publicly without thinking about it.
+- Only `clerk.venice.ai` and `outerface.venice.ai` are contacted, and the proxy is bound to loopback by default. Inference goes through `wreq-js`, or through the system `curl` with `VENICE_WEB_TRANSPORT=curl`, where the headers go over a pipe so the token never appears in the process list. Anything that can reach it can use your Venice account, so do not expose the port publicly without thinking about it.
 - No password is stored (unlike password-based proxies). Logging out of venice.ai in the browser invalidates the cookie; `/out` from the browser plus a fresh login fixes it.
 - Requests leave your machine exactly as the web app would send them: same user agent, same headers, no extra telemetry.
 
@@ -266,7 +284,7 @@ The skill never commits or pushes, never reads credentials, and tells every work
 - [`weizsw/magpie-venice-web`](https://github.com/weizsw/magpie-venice-web) - the same idea as a Magpie plugin. Note that OpenCode v2 no longer loads the v1 plugin hook shape, so it does not drop into OpenCode unchanged.
 - [`Parsa-Nasiri/venice-free-ai-chat`](https://github.com/Parsa-Nasiri/venice-free-ai-chat) - anonymous access with per-IP daily caps instead of an account session.
 
-This project differs by: no runtime dependencies, cookie-only auth, an explicit tool-emulation protocol with reliability safeguards, and an OpenCode installer.
+This project differs by: cookie-only auth, Linux as well as macOS support, image attachments, an explicit tool-emulation protocol with reliability safeguards, and an OpenCode installer. Its only npm dependency is `wreq-js`, for the TLS fingerprint.
 
 ---
 

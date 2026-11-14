@@ -37,7 +37,9 @@ launchctl kickstart -k gui/$(id -u)/ai.opencode.venice-web   # macOS: restart th
 systemctl --user restart ai.opencode.venice-web               # Linux
 ```
 
-If the message says `(fetch)`, the request went through Node's own HTTP client, which Cloudflare blocks on the inference route. Install `curl` (or point `VENICE_WEB_CURL` at one) and leave `VENICE_WEB_TRANSPORT` unset. If it says `(curl)` and fresh cookies do not help, read `docs/PROTOCOL.md` §1: Venice may have changed what its Cloudflare rule looks at.
+If the message says `(fetch)`, the request went through Node's own HTTP client, which Cloudflare blocks on the inference route; leave `VENICE_WEB_TRANSPORT` unset so `wreq-js` is used. If it says `(wreq)` or `(curl)`, the transport is not the problem: fresh cookies usually are, and if they do not help read `docs/PROTOCOL.md` §1, because Venice may have changed what its Cloudflare rule looks at.
+
+If the proxy dies at start with `Cannot find package 'wreq-js'`, `npm install` was never run in the directory it starts from. Run it there (`npm install --omit=dev`) and restart the service.
 
 Logging out of venice.ai in the browser invalidates `__client` - sign in again, then rerun the login command.
 
