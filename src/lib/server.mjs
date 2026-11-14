@@ -333,6 +333,7 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
   let state = yield* collectStream(upstreamBody, mapping, chunk, { stopServerLoop: mapping.emulatedTools })
   let message = null
   let edited = null
+  let lastRequest = null
 
   // An image turn comes back as `hydrate_content`, not as an answer. The web
   // client answers it with `{ items: { <media_id>: { type: 'image', mime_type } } }`
@@ -430,6 +431,7 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
         const limit = asksEdit ? VIEW_MEDIA_ROUNDS + 2 : VIEW_MEDIA_ROUNDS + (edited ? 3 : 0)
         const ids = mapping.mediaIds.length ? mapping.mediaIds : [...(hydration?.media_ids ?? [])]
         let next = mapping.request
+        lastRequest = next
         for (const call of asked) {
           const name = call.function?.name
           const callId = call.id ?? call.function?.id ?? `${name}_0`
@@ -445,6 +447,7 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
               edited = result.image
               await rememberMedia(result.image.mediaId, result.image.mimeType, result.image.data)
               next = withImageOutput(next, result.image, result.image.mediaId)
+              lastRequest = next
             }
           }
           next = withToolResult(next, callId, name, output)
@@ -477,9 +480,12 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
         // back, the turn has its result, so no retry may replace it with an
         // empty reply.
         log(`  ~ fin de vuelta: edited=${edited ? edited.mediaId : "no"} llamadas=${message.serverCalls?.length ?? 0}`)
-        if (edited) break
         continue
       }
+      // The edit already ran and its bytes are cached. A retry would send the
+      // original turn again, run the edit a second time and, on a blank retry,
+      // replace the good reply with `(empty reply)`. So the edit ends the turn.
+      if (edited) break
       let decision = shouldRetry({ message, lastRole: last?.role, available })
       if (decision.judge) {
         if (!judgeEnabled || judged >= 2) break
@@ -489,6 +495,9 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
         decision = judgeDecision(verdict?.verdict)
       }
       if (!decision.retry) break
+      // The edit already ran and its bytes are cached: a retry would re-run the
+      // edit on a stale request and the turn would lose its result.
+      if (edited) break
       // A well-formed envelope with a real answer still gets one retry, in case
       // the model described a tool it never called. The second one never improved
       // anything and cost a full extra request per turn.
@@ -496,8 +505,11 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
       if (!decision.reason.startsWith('judge:') && formatRetries++ >= 2) break
 
       log(`  ~ ${decision.reason}, retrying...`)
+      // Once an edit exists the retry starts from the request that already holds
+      // the edited image and the result, not from the original turn.
+      const retryBase = edited ? lastRequest : mapping.request
       try {
-        const retryResponse = await upstreamChat(withRetryReminder(mapping.request, decision.reminder), INFERENCE_PATH, signal)
+        const retryResponse = await upstreamChat(withRetryReminder(retryBase, decision.reminder), INFERENCE_PATH, signal)
         if (!retryResponse.ok) break
         // the last allowed retry runs to the end, so the turn always gets an answer
         const retryState = yield* collectStream(retryResponse.body, mapping, chunk, {
