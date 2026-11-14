@@ -24,7 +24,7 @@ export const BROWSERS = {
   chromium: { mac: 'Chromium', linux: 'chromium', app: '/Applications/Chromium.app', keychain: 'Chromium Safe Storage', secret: ['application', 'chromium'], label: 'Chromium' },
 }
 
-const COOKIE_HOSTS = ['.clerk.venice.ai', 'clerk.venice.ai']
+const COOKIE_HOSTS = ['.clerk.venice.ai', 'clerk.venice.ai', '.venice.ai', 'venice.ai']
 
 const profiles = (name) => (name ? [name] : ['Default', 'Profile 1', 'Profile 2', 'Profile 3'])
 
@@ -41,9 +41,9 @@ function candidatePaths(browser, profile) {
     else dirs.push(path.join(root, browser.linux))
   }
   const out = []
-  for (const dir of dirs) for (const profile of profiles(profile === 'Default' ? undefined : profile)) {
-    out.push(path.join(dir, profile, 'Cookies'))
-    out.push(path.join(dir, `${profile}-Cookies`))
+  for (const dir of dirs) for (const prof of profiles(profile === 'Default' ? undefined : profile)) {
+    out.push(path.join(dir, prof, 'Cookies'))
+    out.push(path.join(dir, `${prof}-Cookies`))
   }
   return out
 }
@@ -98,7 +98,7 @@ function readFromBrowser(name, profile) {
   const db = candidatePaths(browser, profile).find(existsSync)
   if (!db) return null
 
-  const key = pbkdf2Sync(passwordFor(browser), 'saltysalt', 1003, 16, 'sha1')
+  const key = pbkdf2Sync(passwordFor(browser), 'saltysalt', process.platform === 'darwin' ? 1003 : 1, 16, 'sha1')
   const copy = path.join(mkdtempSync(path.join(tmpdir(), 'venice-cookie-')), 'Cookies')
   copyFileSync(db, copy)
 

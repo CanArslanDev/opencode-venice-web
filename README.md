@@ -16,40 +16,57 @@ OpenCode ──HTTP──> 127.0.0.1:3456  ──HTTPS + your session cookie─�
 - No API key, no credits, no password stored: only the browser's long-lived Clerk `__client` cookie.
 - 20 free web models (DeepSeek, Qwen, GLM, Kimi, Gemma, Aion, TEE-hosted variants).
 - Tool calling works: OpenCode's `read`/`write`/`edit`/`shell`/`glob`/`grep` tools are emulated through a JSON envelope (see [docs/PROTOCOL.md](docs/PROTOCOL.md)).
-- Zero runtime dependencies. Node 22+ and the system `curl` (preinstalled on macOS and most Linux distributions).
+- Images work: photos and screenshots are uploaded to the web media endpoint and handed back to the model, exactly like the web client does.
+- Runs on macOS and Linux. Node 22+ and the system `curl` (preinstalled on macOS and most Linux distributions); `wreq-js` is the only npm dependency.
 
 ---
 
 ## Quick start
 
+### Requirements
+
+- **Node 22 or newer.** `npm` ships with it and is used once, to install `wreq-js`.
+- **A desktop browser already signed in to venice.ai** (Brave, Chrome, Edge or Chromium) on the same machine, so the login step can read the `__client` cookie. On Linux the cookie is decrypted through `secret-tool` (gnome-keyring); without a keyring the well-known `peanuts` password is tried, which only works if the browser itself was started without one.
+- **A paid Venice plan.** The web models are free to use but the account must be Pro or above.
+- `curl` is optional: the default transport is `wreq-js`, which is what gets past Cloudflare. Set `VENICE_WEB_TRANSPORT=curl` only if you want the curl path, and then install `curl`.
+- Linux with systemd works (unit `ai.opencode.venice-web`), as does macOS with launchd.
+
+### Automated
+
 ```sh
-git clone https://github.com/CanArslanDev/opencode-venice-web.git
+git clone --branch deploy/linux-fixes https://github.com/crisazas/opencode-venice-web.git
 cd opencode-venice-web
 ./install.sh --default
 ```
 
-That installs the code to `~/.local/share/opencode-venice-web`, adds the `venice-web` provider to `~/.config/opencode/opencode.json`, starts a background service (launchd or systemd), and signs in by reading the `venice.ai` cookie from Brave/Chrome/Edge/Chromium.
+That copies the code to `~/.local/share/opencode-venice-web`, runs `npm install` there for `wreq-js`, adds the `venice-web` provider to `~/.config/opencode/opencode.json`, starts a background service (launchd or systemd) and signs in by reading the `venice.ai` cookie from your browser.
 
-Add `--with-nul-plugin` if you also use other providers from OpenCode (see [NUL bytes](#nul-bytes-and-400-invalid-request)).
+Add `--with-nul-plugin` if you also use other providers from OpenCode (see [NUL bytes](#nul-bytes-and-400-invalid-request)). Use `--no-service` to skip the service, or `--no-sync` to leave `opencode.json` alone.
 
 Then **restart OpenCode** and pick a model such as `venice-web/deepseek-v4-1-flash-free`.
 
-Or without cloning:
+Or without cloning (the branch defaults to `deploy/linux-fixes`; override with `VENICE_WEB_BRANCH`):
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/CanArslanDev/opencode-venice-web/main/install.sh | sh -s -- --default
+curl -fsSL https://raw.githubusercontent.com/crisazas/opencode-venice-web/deploy/linux-fixes/install.sh | sh -s -- --default
 ```
 
 > The `raw.githubusercontent.com` shortcut only works while the repository is **public**. For a private repo, use the `git clone` flow above (or any mirror you control).
 
-Prefer doing it by hand? Three commands:
+### By hand
 
 ```sh
-npm install -g .        # or run everything from the checkout with `node src/...`
-venice-web-login        # reads the cookie from your browser
-venice-web-sync --default   # writes the OpenCode provider
-venice-web             # starts the proxy on 127.0.0.1:3456
+git clone --branch deploy/linux-fixes https://github.com/crisazas/opencode-venice-web.git
+cd opencode-venice-web
+npm install                 # wreq-js; the only dependency
+node src/login.mjs          # reads the cookie from your browser
+node src/sync.mjs --default # writes the OpenCode provider
+node src/proxy.mjs          # starts the proxy on 127.0.0.1:3456
 ```
+
+Leave the last command running. To keep it after logout, copy `packaging/ai.opencode.venice-web.service` to `~/.config/systemd/user/`, replace `__NODE__`, `__PROXY__` and `__LOG__` with absolute paths, then `systemctl --user enable --now ai.opencode.venice-web`.
+
+`npm install -g .` also works and gives you the `venice-web`, `venice-web-login`, `venice-web-sync` and `venice-web-doctor` commands, but the proxy still needs the `node_modules` next to the code it was installed from.
 
 Check everything is wired up:
 
@@ -57,6 +74,8 @@ Check everything is wired up:
 node src/doctor.mjs      # or venice-web-doctor
 curl -s 127.0.0.1:3456/health
 ```
+
+`doctor` reports each check as `ok` or `FAIL` with the fix next to it, so start there when something is off.
 
 ---
 
@@ -68,6 +87,8 @@ curl -s 127.0.0.1:3456/health
 | Session JWT | `POST clerk.venice.ai/v1/client/sessions/<id>/tokens` | ~60 s lifetime, refreshed by the proxy, single-flight |
 | Client attestation | `POST outerface.venice.ai/api/app/user/client_attestation/mint` | short-lived token, cached 5 minutes |
 | Inference | `POST outerface.venice.ai/api/inference/chat/agents/ad-hoc` | newline-delimited SSE |
+| Image upload | `POST outerface.venice.ai/api/v2/agents/media` | multipart, returns a `media_id` |
+| Image hydration | same inference route, multipart | `hydrate_content` is answered with `items` plus a `media.<media_id>` field |
 | Tool calls | emulated | the web endpoint does not accept OpenAI `tools` |
 
 The proxy exposes:
@@ -76,7 +97,7 @@ The proxy exposes:
 | --- | --- |
 | `GET /health` | liveness + signed-in account |
 | `GET /v1/models` | the free web catalogue |
-| `POST /v1/chat/completions` | streaming and non-streaming chat, with tool emulation |
+| `POST /v1/chat/completions` | streaming and non-streaming chat, with tool emulation; user turns accept `image_url` parts (data URLs or a cached `media_id`) |
 | `POST /reload` | drop cached token/attestation (after re-login) |
 
 Full details, including the exact request/response shapes and the tool-emulation protocol, are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
@@ -99,6 +120,29 @@ Only models the web catalogue marks as free (`usesCredits: false`) are exposed -
 | TEE / E2EE hosted | `e2ee-qwen3-8-27b`, `e2ee-gpt-oss-120b-p`, `e2ee-qwen3-6-35b-a3b`, `e2ee-gemma-4-26b-a4b-uncensored-p`, `e2ee-qwen-2-5-7b-p`, `e2ee-qwen3-vl-30b-a3b-p` |
 
 The catalogue lives in [`src/lib/models.mjs`](src/lib/models.mjs); edit it and rerun `venice-web-sync` if Venice adds models. If the web catalogue ships a model you want, run `GET /v1/models` (or `venice-web-doctor`) after adding it to verify it is reachable.
+
+Not every model reads images. Vision turns need a model that does, for example `deepseek-v4-1-flash-free`.
+
+---
+
+## Images
+
+Send an image as an OpenAI content part; the proxy does the rest:
+
+```json
+{ "role": "user", "content": [
+  { "type": "text", "text": "What is the total on this receipt?" },
+  { "type": "image_url", "image_url": { "url": "data:image/png;base64,..." } }
+] }
+```
+
+What happens upstream, in order:
+
+1. Every data URL is uploaded to `POST /api/v2/agents/media` and the part is rewritten to the returned `media_id`.
+2. Venice answers the turn with `hydrate_content` instead of text. The proxy captures it and retries once as multipart: the JSON body in `request`, one file per id in `media.<media_id>`, and a `function_call_output` carrying `{ items: { <media_id>: { type: 'image', mime_type } } }`, with the pending `view_media` calls answered `ok`.
+3. The uploaded bytes are cached under `<config dir>/media/<media_id>.json`. Venice exposes no download route, so this is what lets a `media_id` be reused on a later turn.
+
+A part that already carries a `media_id` (an upload of your own) is passed through untouched when the id is cached; otherwise the turn is logged as hydrating without bytes.
 
 ---
 
@@ -127,7 +171,7 @@ All environment variables are optional; the defaults are what the installer uses
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `VENICE_WEB_CONFIG_DIR` | `~/.config/opencode/venice-web` | session file and logs |
+| `VENICE_WEB_CONFIG_DIR` | `~/.config/opencode/venice-web` | session file, logs and the uploaded-media cache |
 | `VENICE_WEB_SESSION` | `<config dir>/session.json` | session file path |
 | `VENICE_WEB_PORT` | `3456` | proxy port |
 | `VENICE_WEB_HOST` | `127.0.0.1` | proxy bind address |
@@ -148,7 +192,7 @@ All environment variables are optional; the defaults are what the installer uses
 ## Security and privacy
 
 - The session file (`~/.config/opencode/venice-web/session.json`, mode `600`) holds your Clerk cookie - treat it like a login token, keep it out of git.
-- Only `clerk.venice.ai` and `outerface.venice.ai` are contacted (inference through the system `curl`; its headers go over a pipe, so the token never appears in the process list); the proxy is bound to loopback by default. Anything that can reach it can use your Venice account, so do not expose the port publicly without thinking about it.
+- Only `clerk.venice.ai` and `outerface.venice.ai` are contacted, and the proxy is bound to loopback by default. Inference goes through `wreq-js`, or through the system `curl` with `VENICE_WEB_TRANSPORT=curl`, where the headers go over a pipe so the token never appears in the process list. Anything that can reach it can use your Venice account, so do not expose the port publicly without thinking about it.
 - No password is stored (unlike password-based proxies). Logging out of venice.ai in the browser invalidates the cookie; `/out` from the browser plus a fresh login fixes it.
 - Requests leave your machine exactly as the web app would send them: same user agent, same headers, no extra telemetry.
 
@@ -160,7 +204,8 @@ All environment variables are optional; the defaults are what the installer uses
 - **Tool calls are emulated.** The web endpoint ignores OpenAI `tools`, so the model answers with a JSON envelope that the proxy turns into `tool_calls`. This is reliable in practice (see [docs/PROTOCOL.md](docs/PROTOCOL.md) for the measured technique) but it is a prompt contract, not a native feature: `tool_choice: required` is advisory, and with tools in the request the answer arrives buffered rather than token-by-token (reasoning still streams live).
 - **No sampling controls.** `temperature`, `top_p` and `max_tokens` are not applied by this endpoint.
 - **Unlimited, not infinite.** Venice's fair-use and Cloudflare bot checks apply. A Cloudflare challenge surfaces as HTTP 401 with a "refresh the cookies" message.
-- **Web session, not API route.** Anything that needs the official API surface (embeddings, images, video, `/responses`) still has to use `api.venice.ai` with an API key. Both can coexist in OpenCode - the installer only *adds* a provider.
+- **Web session, not API route.** Anything that needs the official API surface (embeddings, video, `/responses`) still has to use `api.venice.ai` with an API key. Both can coexist in OpenCode - the installer only *adds* a provider.
+- **Images are re-encoded by Venice.** The media endpoint decodes every upload and rejects what it cannot read (`422 media_rejected`, code `unreadable`), so send real photos or clean screenshots, not degenerate synthetic captures. Only the newest user turn carries image parts: re-serialised history stays text-only, so a follow-up question about a picture must repeat it.
 
 ### NUL bytes and `400 Invalid request parameters`
 
@@ -239,7 +284,7 @@ The skill never commits or pushes, never reads credentials, and tells every work
 - [`weizsw/magpie-venice-web`](https://github.com/weizsw/magpie-venice-web) - the same idea as a Magpie plugin. Note that OpenCode v2 no longer loads the v1 plugin hook shape, so it does not drop into OpenCode unchanged.
 - [`Parsa-Nasiri/venice-free-ai-chat`](https://github.com/Parsa-Nasiri/venice-free-ai-chat) - anonymous access with per-IP daily caps instead of an account session.
 
-This project differs by: no runtime dependencies, cookie-only auth, an explicit tool-emulation protocol with reliability safeguards, and an OpenCode installer.
+This project differs by: cookie-only auth, Linux as well as macOS support, image attachments, an explicit tool-emulation protocol with reliability safeguards, and an OpenCode installer. Its only npm dependency is `wreq-js`, for the TLS fingerprint.
 
 ---
 

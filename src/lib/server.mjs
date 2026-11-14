@@ -23,13 +23,14 @@ import {
   serverLoopMessage,
   shouldRetry,
   sseReader,
+  applyMediaIds,
   toVeniceRequest,
   withRetryReminder,
 } from './emulate.mjs'
 import { MODELS } from './models.mjs'
 import { debugRaw, log, preview, warn } from './log.mjs'
 import { deepStripNulls, repairJsonControlChars } from './sanitize.mjs'
-import { INFERENCE_PATH, SignInError, loadSession, resetSessionCache, upstreamChat } from './venice.mjs'
+import { INFERENCE_PATH, SignInError, loadSession, recallMedia, resetSessionCache, upstreamChat, upstreamMediaUpload } from './venice.mjs'
 
 const json = (res, status, payload) => {
   res.writeHead(status, { 'content-type': 'application/json' })
@@ -90,6 +91,8 @@ export async function* collectStream(upstreamBody, mapping, chunk, { stopServerL
     steps: new Set(),
     nativeTools: new Set(),
     serverLoop: false,
+    hydration: null,
+
     events: {},
   }
   const itemTypes = new Map()
@@ -141,6 +144,15 @@ export async function* collectStream(upstreamBody, mapping, chunk, { stopServerL
     if (/^response\.(reasoning_text|reasoning_summary_text)\.delta$/.test(event.type)) {
       state.reasoning += event.delta ?? ''
       return chunk({ reasoning_content: event.delta ?? '' })
+    }
+    // Venice answers an image turn with `hydrate_content` instead of text: the
+    // client must send the image back in multipart before the model can look at it.
+    if (event.item?.type === 'function_call' && event.item.name === 'hydrate_content') {
+      try {
+        state.hydration = JSON.parse(event.item.arguments ?? '{}')
+      } catch {
+        state.hydration = null
+      }
     }
     if (event.type === 'response.completed') state.terminal = true
     if (event.type === 'response.incomplete') throw new Error('Venice generation was incomplete')
@@ -236,6 +248,39 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
   let state = yield* collectStream(upstreamBody, mapping, chunk, { stopServerLoop: mapping.emulatedTools })
   let message = null
 
+  // An image turn comes back as `hydrate_content`, not as an answer. The web
+  // client answers it with `{ items: { <media_id>: { type: 'image', mime_type } } }`
+  // and sends the bytes again in a multipart field named `media.<media_id>`.
+  // Without that the model keeps asking for `view_media`.
+  let hydration = null
+  for (let round = 0; state.hydration && round < 2; round++) {
+    hydration = state.hydration
+    const ids = hydration.media_ids?.length ? hydration.media_ids : mapping.mediaIds
+    const files = mediaFiles(ids, mapping.images, mapping.mediaIds)
+    // An id the client uploaded elsewhere arrives without bytes: take them from
+    // the local cache so the hydration can still be answered.
+    for (const id of ids) {
+      if (files.some((file) => file.field === `media.${id}`)) continue
+      const cached = await recallMedia(id)
+      if (cached) files.push({ field: `media.${id}`, mimeType: cached.mimeType, data: cached.data })
+    }
+    if (!files.length) {
+      warn(`  ~ hydration for ${JSON.stringify(ids)} has no bytes (id not uploaded here)`)
+      break
+    }
+    const next = hydrationRequest(mapping.request, hydration, files)
+    log(`  ~ image turn: hydrating ${JSON.stringify(ids)}`)
+    const hydrated = await upstreamChat(next, INFERENCE_PATH, signal, files)
+    if (!hydrated.ok) {
+      warn(`  ~ hydration failed: HTTP ${hydrated.status}`)
+      break
+    }
+    state = yield* collectStream(hydrated.body, mapping, chunk, { stopServerLoop: mapping.emulatedTools })
+  }
+  if (hydration) {
+    log(`  ~ hydrated image ${JSON.stringify(hydration.media_ids ?? [])}${state.text ? '' : ' (no answer)'}`)
+  }
+
   if (mapping.emulatedTools) {
     const available = [...mapping.toolNames]
     let attempt = 0
@@ -260,6 +305,7 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
     const last = [...(body.messages ?? [])].reverse().find((item) => item.role !== 'system' && item.role !== 'developer')
     let judged = 0
     let formatRetries = 0
+    let noToolRetries = 0
 
     // Up to two extra attempts while the reply is unhelpful. Every trigger is
     // structural (see shouldRetry); a reply that ends the turn right after a tool
@@ -277,6 +323,10 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
         decision = judgeDecision(verdict?.verdict)
       }
       if (!decision.retry) break
+      // A well-formed envelope with a real answer still gets one retry, in case
+      // the model described a tool it never called. The second one never improved
+      // anything and cost a full extra request per turn.
+      if (decision.reason === 'envelope without tool calls' && noToolRetries++ >= 1) break
       if (!decision.reason.startsWith('judge:') && formatRetries++ >= 2) break
 
       log(`  ~ ${decision.reason}, retrying...`)
@@ -304,6 +354,9 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
 
     // Never forward a blank assistant turn: it is invisible in the client.
     applyFallback(message, state.text)
+    // The envelope is scaffolding. A failed parse or prose before the JSON leaves
+    // it in the visible text, where it enters the history and gets imitated.
+    message.content = stripEnvelope(message.content ?? '')
   }
 
   if (!state.terminal) throw new Error('the Venice stream ended before response.completed')
@@ -334,9 +387,111 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
   })
 }
 
+/**
+ * The images to hand back for `ids`, as `{ field, mimeType, data }` where `field`
+ * is the multipart field name the web client uses (`media.<media_id>`).
+ *
+ * `mediaIds` maps the data URLs of the turn onto the ids Venice actually sent, so
+ * the order is the order of `ids`; the first image is reused when Venice asks for
+ * fewer ids than there are images.
+ */
+function mediaFiles(ids, images, mediaIds = []) {
+  return ids
+    .map((id) => {
+      const index = mediaIds.indexOf(id)
+      const url = images[index >= 0 ? index : 0]
+      const match = /^data:([^;,]+)[^,]*,(.*)$/s.exec(url ?? '')
+      if (!match) return null
+      return { field: `media.${id}`, mimeType: match[1], data: Buffer.from(match[2], 'base64') }
+    })
+    .filter(Boolean)
+}
+
+/**
+ * The request with the hydration answered: `hydrate_content` gets its item map
+ * and the pending calls their outputs.
+ *
+ * Venice sends `{ media_ids, pending_tool_calls, signature, current_iteration }`
+ * and expects the pending calls back before it continues.
+ */
+function hydrationRequest(request, hydration, files) {
+  const items = {}
+  for (const file of files) items[file.field.slice('media.'.length)] = { type: 'image', mime_type: file.mimeType }
+  const messages = [
+    ...request.messages,
+    {
+      id: randomUUID(),
+      type: 'function_call',
+      call_id: 'hydrate_content_0',
+      name: 'hydrate_content',
+      status: 'completed',
+      arguments: JSON.stringify({
+        media_ids: hydration.media_ids ?? [],
+        signature: hydration.signature,
+        pending_tool_calls: hydration.pending_tool_calls,
+        current_iteration: hydration.current_iteration ?? 1,
+      }),
+    },
+    { type: 'function_call_output', call_id: 'hydrate_content_0', output: JSON.stringify({ items }) },
+  ]
+  for (const call of hydration.pending_tool_calls ?? []) {
+    messages.push({ type: 'function_call_output', call_id: call.id, output: 'ok' })
+  }
+  return { ...request, messages }
+}
+
+function looksLikeEnvelope(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  if ('tool_calls' in value) return true
+  return 'status' in value && 'content' in value
+}
+
+// Only the tail is inspected: leaked envelopes always come last, and a JSON the
+// assistant is deliberately showing mid-answer stays untouched.
+function stripEnvelope(text) {
+  if (!text) return text
+  const trimmed = text.trimEnd()
+
+  const fenced = trimmed.match(/```[a-zA-Z]*\s*\n([\s\S]*?)```$/)
+  if (fenced) {
+    try {
+      if (looksLikeEnvelope(JSON.parse(fenced[1].trim()))) {
+        const kept = trimmed.slice(0, fenced.index).trim()
+        if (kept) return kept
+      }
+    } catch {}
+  }
+
+  const bare = trimmed.match(/(?:^|\n)(\{[\s\S]*\})$/)
+  if (bare) {
+    try {
+      if (looksLikeEnvelope(JSON.parse(bare[1].trim()))) {
+        const kept = trimmed.slice(0, bare.index).trim()
+        if (kept) return kept
+      }
+    } catch {}
+  }
+
+  return trimmed
+}
+
 async function handleChat(req, res) {
   const body = await readJson(req)
   const mapping = toVeniceRequest(body)
+
+  // Venice only resolves an image by its own `media_id`, so every inline data
+  // URL is uploaded first and the placeholder is replaced with the returned id.
+  if (mapping.uploads.length) {
+    try {
+      mapping.mediaIds = []
+      for (const upload of mapping.uploads) mapping.mediaIds.push(await upstreamMediaUpload(upload.url))
+      applyMediaIds(mapping.request, mapping.mediaIds)
+      log(`   ~ uploaded ${mapping.mediaIds.length} image(s)`)
+    } catch (error) {
+      warn(`   ~ image upload failed: ${error.message}`)
+      return openaiError(res, 502, `image upload failed: ${error.message}`)
+    }
+  }
 
   // Venice rejects null bytes ("String must not contain null bytes", HTTP 400)
   // and a nested leak in the system prompt breaks the whole session, so scrub

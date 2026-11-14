@@ -342,7 +342,7 @@ function safeJson(value) {
 /**
  * Builds the upstream request.
  *
- * @returns {{ request: object, toolNames: Set<string>, toolSchemas: Map<string, object>, emulatedTools: boolean }}
+ * @returns {{ request: object, toolNames: Set<string>, toolSchemas: Map<string, object>, emulatedTools: boolean, images: string[], imageIds: string[] }}
  */
 export function toVeniceRequest(body) {
   if (!MODELS[body.model]) {
@@ -362,6 +362,13 @@ export function toVeniceRequest(body) {
 
   const instructions = []
   const messages = []
+  // data URLs of the images of the newest user turn: Venice answers an image
+  // turn with `hydrate_content` and the bytes have to be handed back on the
+  // multipart retry (server.mjs). The real `media_id` is filled in after the
+  // upload by `toVeniceRequest` callers, see `uploads` below.
+  const images = []
+  const imageIds = []
+  const uploads = []
 
   for (const message of body.messages) {
     const text = textOf(message.content)
@@ -397,12 +404,39 @@ export function toVeniceRequest(body) {
       })
     }
 
+    // Images cannot travel as text: the web endpoint takes them as `input_image`
+    // parts next to the text. They are kept only on real user turns (history
+    // re-serialised as envelopes is text-only).
+    const parts = [{ type: 'output_text', text: content, annotations: [] }]
+    if (message.role === 'user' && Array.isArray(message.content)) {
+      for (const part of message.content) {
+        const url = part?.image_url?.url ?? (typeof part?.image_url === 'string' ? part.image_url : part?.url)
+        const known = typeof part?.media_id === 'string' && part.media_id ? part.media_id : null
+        if ((part?.type === 'image_url' || part?.type === 'input_image' || part?.type === 'image') && (url || known)) {
+          // A `media_id` the client already holds (an upload of its own) is passed
+          // through as is. Otherwise https images keep the url and data URLs are
+          // uploaded by the caller, the placeholder replaced by the returned id.
+          if (!url && known) {
+            parts.push({ type: 'input_image', media_id: known, detail: part.detail ?? 'auto' })
+            continue
+          }
+          const mediaId = url.startsWith('data:') ? `upload-${uploads.length}` : (known ?? randomUUID())
+          parts.push({ type: 'input_image', media_id: mediaId, detail: 'auto', image_url: url })
+          if (url.startsWith('data:')) {
+            images.push(url)
+            imageIds.push(mediaId)
+            uploads.push({ placeholder: mediaId, url })
+          }
+        }
+      }
+    }
+
     messages.push({
       id: randomUUID(),
       type: 'message',
       status: 'completed',
       role,
-      content: [{ type: 'output_text', text: content, annotations: [] }],
+      content: parts,
     })
   }
 
@@ -447,7 +481,30 @@ export function toVeniceRequest(body) {
     toolNames: names,
     toolSchemas: new Map(tools.map((tool) => [tool.function.name, tool.function.parameters ?? {}])),
     emulatedTools: tools.length > 0,
+    images,
+    imageIds,
+    uploads,
   }
+}
+
+/**
+ * Swaps the `upload-N` placeholders for the `media_id`s Venice returned and
+ * drops the inline data URLs, which no longer need to travel in the body.
+ */
+export function applyMediaIds(request, mediaIds) {
+  const byPlaceholder = new Map(mediaIds.map((id, index) => [`upload-${index}`, id]))
+  for (const message of request.messages) {
+    if (!Array.isArray(message.content)) continue
+    for (const part of message.content) {
+      if (part?.type !== 'input_image') continue
+      const mediaId = byPlaceholder.get(part.media_id)
+      if (mediaId) {
+        part.media_id = mediaId
+        delete part.image_url
+      }
+    }
+  }
+  return [...byPlaceholder.values()]
 }
 
 /**

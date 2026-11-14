@@ -12,16 +12,17 @@
 #   ./install.sh --uninstall     remove code, service and the provider entry
 #   ./install.sh --uninstall --purge   ... and delete the stored session
 #
-#   curl -fsSL https://raw.githubusercontent.com/CanArslanDev/opencode-venice-web/main/install.sh | sh -s -- --default
+#   curl -fsSL https://raw.githubusercontent.com/crisazas/opencode-venice-web/deploy/linux-fixes/install.sh | sh -s -- --default
 #
 # Environment:
 #   VENICE_WEB_INSTALL_DIR  where the code is copied   (default ~/.local/share/opencode-venice-web)
 #   VENICE_WEB_CONFIG_DIR   where the session lives    (default ~/.config/opencode/venice-web)
 #   VENICE_WEB_PORT         proxy port                 (default 3456)
 #   OPENCODE_CONFIG         opencode.json to patch     (default ~/.config/opencode/opencode.json)
+#   VENICE_WEB_BRANCH       branch cloned by a piped run (default deploy/linux-fixes)
 set -eu
 
-REPO_URL="https://github.com/CanArslanDev/opencode-venice-web.git"
+REPO_URL="https://github.com/crisazas/opencode-venice-web.git"
 LABEL="ai.opencode.venice-web"
 
 XDG_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -118,8 +119,10 @@ SOURCE_DIR="$SCRIPT_DIR"
 if [ ! -f "$SOURCE_DIR/src/proxy.mjs" ]; then
   have git || die "git is required when installing from a pipe"
   CLONE_DIR=$(mktemp -d)
-  say "cloning $REPO_URL"
-  git clone --depth 1 "$REPO_URL" "$CLONE_DIR" >/dev/null 2>&1 || die "clone failed"
+  # A piped script has no branch information; VENICE_WEB_BRANCH picks one.
+  CLONE_BRANCH="${VENICE_WEB_BRANCH:-deploy/linux-fixes}"
+  say "cloning $REPO_URL ($CLONE_BRANCH)"
+  git clone --depth 1 --branch "$CLONE_BRANCH" "$REPO_URL" "$CLONE_DIR" >/dev/null 2>&1 || die "clone failed"
   SOURCE_DIR="$CLONE_DIR"
 fi
 
@@ -130,6 +133,23 @@ for item in src packaging docs package.json README.md CLAUDE.md LICENSE; do
   cp -R "$SOURCE_DIR/$item" "$INSTALL_DIR/$item"
 done
 say "installed code in $INSTALL_DIR"
+
+# ------------------------------------------------------------------- deps
+
+# wreq-js is the only npm dependency (the TLS-fingerprint transport). It ships
+# prebuilt native bindings, so there is no compiler step.
+if [ -f "$INSTALL_DIR/package.json" ]; then
+  if have npm; then
+    say "installing dependencies (wreq-js)"
+    ( cd "$INSTALL_DIR" && npm install --omit=dev --no-audit --no-fund --loglevel=error ) \
+      || die "npm install failed in $INSTALL_DIR"
+    if [ ! -d "$INSTALL_DIR/node_modules/wreq-js" ]; then
+      die "wreq-js is missing after npm install; the proxy cannot reach Venice without it"
+    fi
+  else
+    die "npm is required to install wreq-js (it ships with node; check your PATH)"
+  fi
+fi
 
 # ------------------------------------------------------------------- opencode
 
@@ -157,6 +177,12 @@ if [ "$NUL_PLUGIN" = "1" ]; then
 fi
 
 # ------------------------------------------------------------------- service
+
+# Linux: the proxy shells out to curl only when VENICE_WEB_TRANSPORT=curl; the
+# default transport is wreq-js, so curl is not needed for inference.
+if [ "$(uname -s)" != "Darwin" ] && ! have curl; then
+  say "note: curl is not installed - fine for inference (wreq-js is used), but the doctor check will warn"
+fi
 
 if [ "$SERVICE" = "1" ]; then
   if [ "$(uname -s)" = "Darwin" ] && have launchctl; then
