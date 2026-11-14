@@ -7,6 +7,7 @@
 > - **Linux support:** the cookie store reads the Linux keyring, the curl transport works with `--http1.1` and a temp header file, and the service unit is named after the install script so it actually starts.
 > - **Image input:** photos and screenshots are uploaded to the web media endpoint and handed back to the model, exactly like the web client does.
 > - **Image generation:** `POST /v1/images/generations` on the free image models (`z-image-turbo`, `chroma`, `wai-illu`, `lustify-v8`, `stable-diffusion-3.5-rev2`), answered as `b64_json` or a `data:` URL.
+> - **Image editing:** `POST /v1/images/edits` on the free edit models (`firered-image-edit`, `qwen-edit-uncensored`), driven by a prompt and a reference image.
 > - **Free-only catalogue:** credit-billed chat and image models are left out so nothing silently spends your API balance.
 >
 > Upstream stays the source of the technique; the reverse-engineering notes in [docs/PROTOCOL.md](docs/PROTOCOL.md) are kept in sync here.
@@ -27,7 +28,7 @@ OpenCode ──HTTP──> 127.0.0.1:3456  ──HTTPS + your session cookie─�
 - No API key, no credits, no password stored: only the browser's long-lived Clerk `__client` cookie.
 - 20 free web models (DeepSeek, Qwen, GLM, Kimi, Gemma, Aion, TEE-hosted variants).
 - Tool calling works: OpenCode's `read`/`write`/`edit`/`shell`/`glob`/`grep` tools are emulated through a JSON envelope (see [docs/PROTOCOL.md](docs/PROTOCOL.md)).
-- Images work both ways: photos and screenshots are uploaded to the web media endpoint and handed back to the model, exactly like the web client does, and `POST /v1/images/generations` makes new ones on the free image models.
+- Images work all ways: photos and screenshots are uploaded to the web media endpoint and handed back to the model, exactly like the web client does, `POST /v1/images/generations` makes new ones on the free image models, and `POST /v1/images/edits` changes an existing one on the free edit models.
 - Runs on macOS and Linux. Node 22+ and the system `curl` (preinstalled on macOS and most Linux distributions); `wreq-js` is the only npm dependency.
 
 ---
@@ -111,6 +112,7 @@ The proxy exposes:
 | `GET /v1/models` | the free web catalogue |
 | `POST /v1/chat/completions` | streaming and non-streaming chat, with tool emulation; user turns accept `image_url` parts (data URLs or a cached `media_id`) |
 | `POST /v1/images/generations` | text to image with the free image models (OpenAI shape) |
+| `POST /v1/images/edits` | image to image with a prompt and the free edit models (OpenAI shape) |
 | `POST /reload` | drop cached token/attestation (after re-login) |
 
 Full details, including the exact request/response shapes and the tool-emulation protocol, are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
@@ -180,6 +182,26 @@ The work happens on the agent endpoint (`/api/inference/chat/agents/venice?paidI
 
 Output is a PNG. Venice's agent rewrites the prompt and picks its own framing and negative prompt, so the result is a good match for the subject, never a literal transcription. One image takes roughly 5-10 s and 1-2 MB.
 
+### Editing images
+
+`POST /v1/images/edits` takes a reference image and an instruction, and answers like the generate route (`b64_json`, or a `data:` URL with `"response_format": "url"`):
+
+```json
+{ "prompt": "turn the square red, keep the white background", "model": "firered-image-edit", "image": "data:image/png;base64,..." }
+```
+
+```bash
+B64=$(base64 -w0 photo.png)
+curl -s http://127.0.0.1:3456/v1/images/edits \
+  -H 'content-type: application/json' \
+  -d "{\"prompt\":\"add a red scarf\",\"image\":\"data:image/png;base64,$B64\"}" \
+  | jq -r '.data[0].b64_json' | base64 -d > edited.png
+```
+
+The edit models are a separate list from the generate ones, and a generate model is a `400`: `firered-image-edit` (default) holds identity and fine detail, `qwen-edit-uncensored` is the anime one and follows composition more loosely. `image` must be a base64 data URL (an https URL is not fetched), and the prompt is required. `size` is accepted and passed as an aspect instruction.
+
+The route uploads the reference to the media endpoint, sends it to the agent as an `input_image` part, and answers the agent's `hydrate_content` with the bytes so it can call its own `edit_image` tool. Parts the instruction does not mention are asked to stay unchanged, and measurements keep the background and framing while the named area changes. One edit takes roughly 8-10 s and 150-300 kB.
+
 ---
 
 ## Commands
@@ -241,6 +263,7 @@ All environment variables are optional; the defaults are what the installer uses
 - **No sampling controls.** `temperature`, `top_p` and `max_tokens` are not applied by this endpoint.
 - **Unlimited, not infinite.** Venice's fair-use and Cloudflare bot checks apply. A Cloudflare challenge surfaces as HTTP 401 with a "refresh the cookies" message.
 - **Web session, not API route.** Anything that needs the official API surface (embeddings, video, `/responses`) still has to use `api.venice.ai` with an API key. Both can coexist in OpenCode - the installer only *adds* a provider.
+- **Image editing spends no credits but is not free of limits.** `paidImagesMode=block` keeps the agent on the free edit models, and the edit model the prompt does not name is chosen by the agent. Failures surface as `502 image edit failed: ...`. There is no mask support: you describe the change in the prompt.
 - **Image generation spends no credits but is not free of limits.** `paidImagesMode=block` keeps the agent on the free models, and a model the prompt does not name is chosen by the agent (`chroma` in every measurement). Venice's fair-use limits apply per account, and a slow or refused generation surfaces as `502 image generation failed: ...` with the upstream reason.
 - **Images are re-encoded by Venice.** The media endpoint decodes every upload and rejects what it cannot read (`422 media_rejected`, code `unreadable`), so send real photos or clean screenshots, not degenerate synthetic captures. Only the newest user turn carries image parts: re-serialised history stays text-only, so a follow-up question about a picture must repeat it.
 

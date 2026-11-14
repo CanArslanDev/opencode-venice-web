@@ -327,11 +327,47 @@ export { INFERENCE_PATH }
 /**
  * Asks the agent endpoint for one image. The reply is an SSE stream that ends in
  * `veniceai:image_generation.done`; `collectImage()` (image.mjs) reads it.
+ *
+ * `reference` is a `media_id` the agent must look at before editing; it travels
+ * as an `input_image` part and needs the turn resent with `files` (multipart,
+ * `media.<media_id>`) once the agent answers `hydrate_content`.
  */
-export async function upstreamImage(prompt, signal) {
+export async function upstreamImage(prompt, signal, { reference, files } = {}) {
+  const content = []
+  if (reference) content.push({ type: 'input_image', media_id: reference, detail: 'auto' })
+  content.push({ type: 'output_text', text: prompt, annotations: [] })
   const body = {
-    input: { messages: [{ id: randomUUID(), type: 'message', status: 'completed', role: 'user', content: [{ type: 'output_text', text: prompt, annotations: [] }] }] },
+    input: { messages: [{ id: randomUUID(), type: 'message', status: 'completed', role: 'user', content }] },
     clientTools: [],
   }
-  return upstreamChat(body, AGENT_IMAGE_PATH, signal)
+  return upstreamChat(body, AGENT_IMAGE_PATH, signal, files)
+}
+
+/**
+ * The image turn with the hydration answered: `hydrate_content` gets its item
+ * map back and its pending calls an output, so the agent can go on and edit.
+ * Same shape as the chat hydration in server.mjs.
+ */
+export function hydratedImageBody(body, hydration, items) {
+  const messages = [
+    ...body.input.messages,
+    {
+      id: randomUUID(),
+      type: 'function_call',
+      call_id: 'hydrate_content_0',
+      name: 'hydrate_content',
+      status: 'completed',
+      arguments: JSON.stringify({
+        media_ids: hydration.media_ids ?? [],
+        signature: hydration.signature,
+        pending_tool_calls: hydration.pending_tool_calls,
+        current_iteration: hydration.current_iteration ?? 1,
+      }),
+    },
+    { type: 'function_call_output', call_id: 'hydrate_content_0', output: JSON.stringify({ items }) },
+  ]
+  for (const call of hydration.pending_tool_calls ?? []) {
+    messages.push({ type: 'function_call_output', call_id: call.id, output: 'ok' })
+  }
+  return { ...body, input: { ...body.input, messages } }
 }

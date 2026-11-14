@@ -25,6 +25,19 @@ export const IMAGE_MODELS = {
 
 export const DEFAULT_IMAGE_MODEL = 'z-image-turbo'
 
+/**
+ * Image *editing* models. The generate models above are not in this list: the
+ * agent's `edit_image` tool has its own, and only these two are free.
+ * `firered-image-edit` keeps identity and fine detail; `qwen-edit-uncensored` is
+ * the anime one and follows composition more loosely.
+ */
+export const EDIT_MODELS = {
+  'firered-image-edit': { name: 'FireRed Image Edit (web)' },
+  'qwen-edit-uncensored': { name: 'Qwen Edit Uncensored (web, anime)' },
+}
+
+export const DEFAULT_EDIT_MODEL = 'firered-image-edit'
+
 export const IMAGE_SIZES = {
   '256x256': [256, 256],
   '512x512': [512, 512],
@@ -54,15 +67,29 @@ export function buildPrompt(prompt, model, size) {
   return parts.filter(Boolean).join('\n')
 }
 
-/**
- * Reads one image out of the agent stream: the media id, the mime type and the
+/** Builds the edit prompt: the instruction, the model, and what to keep. */
+export function buildEditPrompt(prompt, model, size) {
+  const parts = [String(prompt ?? '').trim()]
+  if (EDIT_MODELS[model]) parts.push(`Use the edit model ${model}.`)
+  const aspect = size ? aspectOf(size) : null
+  if (aspect) parts.push(`Aspect ratio ${aspect}.`)
+  parts.push('Keep the parts of the reference the instruction does not mention unchanged.')
+  return parts.filter(Boolean).join('\n')
+}
+
+/**: the media id, the mime type and the
  * bytes. The model also answers with prose, which is dropped.
+ *
+ * `hydration` is filled when the agent asks for `hydrate_content` instead of
+ * answering: the caller must resend the turn with the bytes before an image
+ * arrives. It throws `image.hydration` as `hydration` on the result object.
  */
 export async function collectImage(body) {
   const reader = body.getReader()
   const stream = sseReader()
   const image = { mediaId: null, mimeType: null, data: null }
   let requests = null
+  let hydration = null
   try {
     for (;;) {
       const { value, done } = await reader.read()
@@ -71,6 +98,13 @@ export async function collectImage(body) {
           throw new Error(event.message ?? event.response?.error?.message ?? 'Venice image generation failed')
         }
         const item = event.item
+        if (item?.type === 'function_call' && item.name === 'hydrate_content') {
+          try {
+            hydration = JSON.parse(item.arguments ?? '{}')
+          } catch {
+            hydration = null
+          }
+        }
         if (item?.type === 'veniceai:image_generation') {
           if (item.id) image.mediaId = item.id
           if (item.requests) requests = item.requests
@@ -86,11 +120,17 @@ export async function collectImage(body) {
   } finally {
     await reader.cancel().catch(() => {})
   }
-  if (!image.data?.length) {
-    throw new Error(`the agent returned no image${requests ? `: ${JSON.stringify(requests).slice(0, 300)}` : ''}`)
-  }
   image.mimeType ??= 'image/png'
-  return { ...image, request: requests?.[0] ?? null }
+  return { ...image, request: requests?.[0] ?? null, hydration, hasBytes: Boolean(image.data?.length) }
+}
+
+/** The error `collectImage` leaves behind when the agent asked to hydrate instead. */
+export class HydrationNeeded extends Error {
+  constructor(hydration) {
+    super(`the agent asked for hydrate_content: ${JSON.stringify(hydration?.media_ids ?? [])}`)
+    this.name = 'HydrationNeeded'
+    this.hydration = hydration
+  }
 }
 
 /** Throws unless the model is a free image model, or `null` for the default. */
@@ -98,6 +138,14 @@ export function checkModel(model) {
   if (!model) return DEFAULT_IMAGE_MODEL
   if (!IMAGE_MODELS[model]) throw new Error(`unknown image model: ${model}. Known: ${Object.keys(IMAGE_MODELS).join(', ')}`)
   return model
+}
+
+/** Throws unless the model is a free *edit* model, or `null` for the default. */
+export function checkEditModel(model) {
+  if (!model) return DEFAULT_EDIT_MODEL
+  if (EDIT_MODELS[model]) return model
+  if (IMAGE_MODELS[model]) throw new Error(`${model} generates images but cannot edit one. Known edit models: ${Object.keys(EDIT_MODELS).join(', ')}`)
+  throw new Error(`unknown edit model: ${model}. Known: ${Object.keys(EDIT_MODELS).join(', ')}`)
 }
 
 export { MODELS }

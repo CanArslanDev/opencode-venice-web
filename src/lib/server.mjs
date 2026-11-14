@@ -30,8 +30,8 @@ import {
 import { MODELS } from './models.mjs'
 import { debugRaw, log, preview, warn } from './log.mjs'
 import { deepStripNulls, repairJsonControlChars } from './sanitize.mjs'
-import { INFERENCE_PATH, SignInError, loadSession, recallMedia, rememberMedia, resetSessionCache, upstreamChat, upstreamImage, upstreamMediaUpload } from './venice.mjs'
-import { IMAGE_SIZES, buildPrompt, checkModel, collectImage } from './image.mjs'
+import { AGENT_IMAGE_PATH, INFERENCE_PATH, SignInError, hydratedImageBody, loadSession, recallMedia, rememberMedia, resetSessionCache, upstreamChat, upstreamImage, upstreamMediaUpload } from './venice.mjs'
+import { IMAGE_SIZES, buildEditPrompt, buildPrompt, checkEditModel, checkModel, collectImage } from './image.mjs'
 
 const json = (res, status, payload) => {
   res.writeHead(status, { 'content-type': 'application/json' })
@@ -522,6 +522,84 @@ async function handleImages(req, res) {
   return json(res, 200, { created, data })
 }
 
+/** Reads the `image` field of an edit request as a data URL. */
+function readImageField(value) {
+  const url = typeof value === 'string' ? value : (value?.url ?? (typeof value?.b64_json === 'string' ? `data:image/png;base64,${value.b64_json}` : null))
+  if (!url) throw new Error('image is required, as a data URL (or a { b64_json } object)')
+  if (!/^data:[^;,]+[^,]*;base64,/i.test(url)) throw new Error('image must be a base64 data URL; https URLs are not fetched')
+  return url
+}
+
+/**
+ * OpenAI edit route: `POST /v1/images/edits`. The reference is uploaded to the
+ * web media endpoint, handed to the agent as an `input_image` part, and the
+ * agent's `hydrate_content` is answered with the bytes before it calls its own
+ * `edit_image` tool. Generate models are rejected: only the edit list works here.
+ */
+async function handleEdits(req, res) {
+  const body = await readJson(req)
+  if (!body.prompt || typeof body.prompt !== 'string') return openaiError(res, 400, 'prompt is required', 'invalid_request_error')
+  let model
+  try {
+    model = checkEditModel(body.model)
+  } catch (error) {
+    return openaiError(res, 400, error.message, 'invalid_request_error')
+  }
+  let dataUrl
+  try {
+    dataUrl = readImageField(body.image)
+  } catch (error) {
+    return openaiError(res, 400, error.message, 'invalid_request_error')
+  }
+  if (body.size && !IMAGE_SIZES[body.size]) {
+    return openaiError(res, 400, `unknown size: ${body.size}. Known: ${Object.keys(IMAGE_SIZES).join(', ')}`, 'invalid_request_error')
+  }
+  const mimeType = /^data:([^;,]+)/i.exec(dataUrl)[1]
+  const bytes = Buffer.from(dataUrl.slice(dataUrl.indexOf(',') + 1), 'base64')
+  const prompt = buildEditPrompt(body.prompt, model, body.size)
+  log(`-> edit ${model} • ${mimeType} ${bytes.length} bytes • ${preview(body.prompt, 90)}`)
+
+  const abort = new AbortController()
+  req.on('aborted', () => abort.abort())
+  try {
+    const reference = await upstreamMediaUpload(dataUrl)
+    log(`   ~ reference ${reference}`)
+    const files = [{ field: `media.${reference}`, mimeType, data: bytes }]
+    let upstream = await upstreamImage(prompt, abort.signal, { reference })
+    if (!upstream.ok) {
+      const text = await upstream.text().catch(() => '')
+      return openaiError(res, upstream.status, `${apiBase} responded HTTP ${upstream.status}: ${text.slice(0, 300)}`)
+    }
+    let image = await collectImage(upstream.body)
+
+    // The agent looks at the reference before editing: answer the hydration once.
+    if (!image.hasBytes && image.hydration) {
+      log(`  ~ edit: hydrating ${JSON.stringify(image.hydration.media_ids ?? [reference])}`)
+      const items = { [reference]: { type: 'image', mime_type: mimeType } }
+      const next = hydratedImageBody(
+        { input: { messages: [{ id: randomUUID(), type: 'message', status: 'completed', role: 'user', content: [{ type: 'input_image', media_id: reference, detail: 'auto' }, { type: 'output_text', text: prompt, annotations: [] }] }] } },
+        image.hydration,
+        items,
+      )
+      upstream = await upstreamChat(next, AGENT_IMAGE_PATH, abort.signal, files)
+      if (!upstream.ok) {
+        const text = await upstream.text().catch(() => '')
+        return openaiError(res, upstream.status, `${apiBase} responded HTTP ${upstream.status}: ${text.slice(0, 300)}`)
+      }
+      image = await collectImage(upstream.body)
+    }
+    if (!image.hasBytes) return openaiError(res, 502, 'the agent returned no image')
+
+    await rememberMedia(image.mediaId, image.mimeType, image.data)
+    log(`   ~ edit ${image.mediaId} • ${image.request?.resource_id ?? model} • ${image.data.length} bytes`)
+    const item = { b64_json: image.data.toString('base64') }
+    if (body.response_format === 'url') item.url = `data:${image.mimeType};base64,${item.b64_json}`
+    return json(res, 200, { created: Math.floor(Date.now() / 1000), data: [item] })
+  } catch (error) {
+    return openaiError(res, 502, `image edit failed: ${error.message}`)
+  }
+}
+
 async function handleChat(req, res) {
   const body = await readJson(req)
   const mapping = toVeniceRequest(body)
@@ -657,6 +735,10 @@ export function createServer() {
 
       if (req.method === 'POST' && url.pathname.endsWith('/images/generations')) {
         return await handleImages(req, res)
+      }
+
+      if (req.method === 'POST' && url.pathname.endsWith('/images/edits')) {
+        return await handleEdits(req, res)
       }
 
       if (req.method === 'POST' && url.pathname === '/reload') {
