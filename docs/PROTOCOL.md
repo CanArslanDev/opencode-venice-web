@@ -125,6 +125,7 @@ A small model asked for a custom format is *usually* compliant, but not always. 
 | **Calls are checked against the tool's own schema** (`inspectCalls()`): an unknown tool or a missing required argument is sent back to the model instead of to the agent | `edit` reached OpenCode without `newString` twice; `view_media` was called 12 times |
 | **`status` decides, not words** (§4.7): `continue` without a tool call is retried; any other answer after a tool result goes to the judge | the word lists missed 13 of 13 real early stops (§4.7) |
 | **Invented tool names are normalised**: `bash`, `cat`, `ls` and friends are mapped onto the available tool via `normalizeToolName()` | the model otherwise calls a tool that does not exist and the turn dies |
+| **`view_media` is answered by the proxy, not by the client** (§4.8): the call is dropped from the reply and the turn is resent with its result | it is Venice's own agent tool, so OpenCode rejected it with "No tool named view_media" and the turn ended without an answer |
 | **A blank reply never wins**: `preferAnswer()` guards the retry, and `applyFallback()` uses the raw text then an `(empty reply)` marker | an empty assistant message has no parts at all, so the client shows nothing and the session looks frozen |
 
 Additional hardening in `extractEnvelopes()`:
@@ -202,6 +203,14 @@ Fix: a fifth verdict, `missing_result` ("the work is done, but the reply does no
 | needless retries on complete answers (short answers, action-only requests, a real question) | 0/4 | 3/18 |
 
 The 3 needless retries are one case, "compute X and write it to a file" answered with "written to the file": the judge reads "compute" as wanting the figures. A retry there costs one call and returns the figures.
+
+### 4.8 `view_media`
+
+A turn that carries an image makes the model call `view_media`, a *Venice server tool*. The call came back in the envelope and was forwarded to the client, which has no such tool: OpenCode answered "No tool named \`view_media\`" and the retry then produced an empty reply.
+
+The proxy now drops `view_media` from the reply. When nothing of the client's is left, the turn is resent with the call's result (`{"tool_result":{"tool_call_id":…,"content":"image(s) available as media_id: …"}}`, `withToolResult()`), so the model answers from what it saw. Measured on a colour question: "Red" in three runs of three, no `view_media` in any reply, no retries.
+
+A `view_media` mixed with real client calls keeps the client calls and only drops the extra one; the client then gets a normal tool call, which is the pre-existing behaviour.
 
 ### Things that do **not** help (measured)
 

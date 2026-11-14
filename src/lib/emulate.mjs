@@ -514,6 +514,31 @@ export function applyMediaIds(request, mediaIds) {
  * the same text appended to the system prompt (measured 4/4 vs 1/4 when the
  * format reminder was tuned the same way).
  */
+export function withToolResult(request, callId, name, output) {
+  return {
+    ...request,
+    messages: [
+      ...request.messages,
+      {
+        id: randomUUID(),
+        type: 'message',
+        status: 'completed',
+        role: 'user',
+        content: [
+          {
+            type: 'output_text',
+            text: JSON.stringify({
+              tool_result: { tool_call_id: callId, content: output },
+              note: `the result of your ${name} call; the image is already in the conversation`,
+            }),
+            annotations: [],
+          },
+        ],
+      },
+    ],
+  }
+}
+
 export function withRetryReminder(request, reminder = RETRY_REMINDER) {
   return {
     ...request,

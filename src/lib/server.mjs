@@ -26,6 +26,7 @@ import {
   applyMediaIds,
   toVeniceRequest,
   withRetryReminder,
+  withToolResult,
 } from './emulate.mjs'
 import { MODELS } from './models.mjs'
 import { debugRaw, log, preview, warn } from './log.mjs'
@@ -299,6 +300,21 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
         return serverLoopMessage()
       }
       const parsed = parseToolReply(text)
+      // `view_media` is Venice's own agent tool, not one of the client's: the
+      // model calls it whenever the turn carries an image, and OpenCode rejects
+      // it ("No tool named view_media"). The bytes are already hydrated here, so
+      // the call is answered locally instead of being handed to the client.
+      if (parsed.tool_calls) {
+        const kept = parsed.tool_calls.filter((call) => call.function?.name !== 'view_media')
+        if (kept.length !== parsed.tool_calls.length) {
+          const asked = parsed.tool_calls.filter((call) => call.function?.name === 'view_media')
+          log(`  ~ view_media answered locally (${asked.length} call(s))`)
+          parsed.tool_calls = kept.length ? kept : null
+          // Nothing of the client's is left: resend the turn with the result of
+          // the call so the model can go on with what it saw.
+          if (!kept.length) parsed.viewMedia = asked
+        }
+      }
       for (const rename of inspectCalls(parsed, mapping.toolSchemas)) log(`  ~ tool name ${rename}`)
       return parsed
     }
@@ -315,6 +331,20 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
     // last retry produced reached the user without the judge ever seeing it
     // (a made-up "the tools all returned Tool not found", 2026-11-05).
     for (;;) {
+      // The model only asked for `view_media`: hand it the result and let it
+      // answer, which is what the web client gets from the agent.
+      if (message.viewMedia?.length) {
+        const asked = message.viewMedia
+        const ids = mapping.mediaIds.length ? mapping.mediaIds : [...(hydration?.media_ids ?? [])]
+        const output = ids.length ? `image(s) available as media_id: ${ids.join(', ')}` : 'the image is in the conversation'
+        let next = mapping.request
+        for (const call of asked) next = withToolResult(next, call.id ?? call.function?.id ?? 'view_media_0', 'view_media', output)
+        const viewResponse = await upstreamChat(next, INFERENCE_PATH, signal)
+        if (!viewResponse.ok) break
+        state = yield* collectStream(viewResponse.body, mapping, chunk, { stopServerLoop: true })
+        message = read(state.text, state)
+        continue
+      }
       let decision = shouldRetry({ message, lastRole: last?.role, available })
       if (decision.judge) {
         if (!judgeEnabled || judged >= 2) break
