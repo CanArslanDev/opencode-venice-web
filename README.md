@@ -79,7 +79,7 @@ The proxy exposes:
 | --- | --- |
 | `GET /health` | liveness + signed-in account |
 | `GET /v1/models` | the free web catalogue |
-| `POST /v1/chat/completions` | streaming and non-streaming chat, with tool emulation |
+| `POST /v1/chat/completions` | streaming and non-streaming chat, with tool emulation; user turns accept `image_url` parts (data URLs or a cached `media_id`) |
 | `POST /reload` | drop cached token/attestation (after re-login) |
 
 Full details, including the exact request/response shapes and the tool-emulation protocol, are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
