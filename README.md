@@ -1,6 +1,6 @@
 # opencode-venice-web (fork)
 
-> **Fork of [opencode-venice-web](https://github.com/original/opencode-venice-web) that runs on Linux and does images both ways.**
+> **Fork of [opencode-venice-web](https://github.com/CanArslanDev/opencode-venice-web) that runs on Linux and does images both ways.**
 >
 > What this fork adds on top of the original:
 >
