@@ -1,4 +1,15 @@
-# opencode-venice-web
+# opencode-venice-web (fork)
+
+> **Fork of [opencode-venice-web](https://github.com/original/opencode-venice-web) that runs on Linux and does images both ways.**
+>
+> What this fork adds on top of the original:
+>
+> - **Linux support:** the cookie store reads the Linux keyring, the curl transport works with `--http1.1` and a temp header file, and the service unit is named after the install script so it actually starts.
+> - **Image input:** photos and screenshots are uploaded to the web media endpoint and handed back to the model, exactly like the web client does.
+> - **Image generation:** `POST /v1/images/generations` on the free image models (`z-image-turbo`, `chroma`, `wai-illu`, `lustify-v8`, `stable-diffusion-3.5-rev2`), answered as `b64_json` or a `data:` URL.
+> - **Free-only catalogue:** credit-billed chat and image models are left out so nothing silently spends your API balance.
+>
+> Upstream stays the source of the technique; the reverse-engineering notes in [docs/PROTOCOL.md](docs/PROTOCOL.md) are kept in sync here.
 
 **Use your venice.ai *web* subscription - the unlimited one - from OpenCode (or any OpenAI-compatible agent), without spending a cent of API credits.**
 
@@ -34,7 +45,7 @@ OpenCode ──HTTP──> 127.0.0.1:3456  ──HTTPS + your session cookie─�
 ### Automated
 
 ```sh
-git clone --branch deploy/linux-fixes https://github.com/crisazas/opencode-venice-web.git
+git clone https://github.com/crisazas/opencode-venice-web.git
 cd opencode-venice-web
 ./install.sh --default
 ```
@@ -56,7 +67,7 @@ curl -fsSL https://raw.githubusercontent.com/crisazas/opencode-venice-web/deploy
 ### By hand
 
 ```sh
-git clone --branch deploy/linux-fixes https://github.com/crisazas/opencode-venice-web.git
+git clone https://github.com/crisazas/opencode-venice-web.git
 cd opencode-venice-web
 npm install                 # wreq-js; the only dependency
 node src/login.mjs          # reads the cookie from your browser
@@ -287,7 +298,7 @@ What the scripts guard against (each of these cost hours in real sessions):
 | `preflight.sh` | checks that `opencode`, `perl`, `node` and `git` exist, that the installed `opencode run` accepts every flag the scripts use (an unknown flag makes it print its help and **exit 0 without running**), and that the model is listed |
 | `oc-run.sh` | one worker run: stdin closed (an open stdin pipe makes `opencode run` hang before the model is called), hard time limit, `--dir <repo>`, JSON event log; prints the session id, the number of real tool calls, tool errors and the final text |
 | `code.sh` | a coding task that must change a list of files; compares content hashes before and after and nudges the **same session** when a promised file did not change |
-| `ask.sh` | a research task that must end with a report file; nudges the same session until the file exists |
+| `ask.sh` | a research task that must end with a reporeport file; nudges the same session until the file exists |
 | `gate.sh` | after every group: running workers, the repository's own checks (`.orchestrator/gate.local.sh`, else `npm test`), changed files, leftover `zz-*` temp files |
 
 Per repository, two optional files live in `.orchestrator/`: `gate.local.sh` (what proves the work there: tests, type checks, build) and `STATUS.md` (state and backlog between sessions, from `templates/STATUS.md`).
