@@ -98,6 +98,7 @@ The proxy exposes:
 | `GET /health` | liveness + signed-in account |
 | `GET /v1/models` | the free web catalogue |
 | `POST /v1/chat/completions` | streaming and non-streaming chat, with tool emulation; user turns accept `image_url` parts (data URLs or a cached `media_id`) |
+| `POST /v1/images/generations` | text to image with the free image models (OpenAI shape) |
 | `POST /reload` | drop cached token/attestation (after re-login) |
 
 Full details, including the exact request/response shapes and the tool-emulation protocol, are in [docs/PROTOCOL.md](docs/PROTOCOL.md).
@@ -143,6 +144,18 @@ What happens upstream, in order:
 3. The uploaded bytes are cached under `<config dir>/media/<media_id>.json`. Venice exposes no download route, so this is what lets a `media_id` be reused on a later turn.
 
 A part that already carries a `media_id` (an upload of your own) is passed through untouched when the id is cached; otherwise the turn is logged as hydrating without bytes.
+
+### Generating images
+
+`POST /v1/images/generations` takes the OpenAI body and answers `b64_json` (or a `data:` URL with `"response_format": "url"`):
+
+```json
+{ "prompt": "a lighthouse at dusk, watercolour", "model": "z-image-turbo", "size": "1024x1024", "n": 1 }
+```
+
+Free image models only, the same `usesCredits: false` rule as the chat catalogue: `z-image-turbo` (default), `chroma`, `wai-illu`, `lustify-v8`, `stable-diffusion-3.5-rev2`. `wai-illu` and `lustify-v8` expect Danbooru-style anime prompts. Sizes: the squares from `256x256` to `1024x1024` plus `1024x1792` and `1792x1024`; `n` is capped at 4.
+
+The work happens on the agent endpoint (`/api/inference/chat/agents/venice?paidImagesMode=block`), which runs the image server-side and streams it as base64 chunks. That route ignores a model field, so the requested model is appended to the prompt as an instruction (the agent otherwise picks `chroma`). The bytes are also written to `<config dir>/media/<media_id>.json`, so the returned id can be reused as an `image_url` part on a later chat turn.
 
 ---
 
@@ -205,6 +218,7 @@ All environment variables are optional; the defaults are what the installer uses
 - **No sampling controls.** `temperature`, `top_p` and `max_tokens` are not applied by this endpoint.
 - **Unlimited, not infinite.** Venice's fair-use and Cloudflare bot checks apply. A Cloudflare challenge surfaces as HTTP 401 with a "refresh the cookies" message.
 - **Web session, not API route.** Anything that needs the official API surface (embeddings, video, `/responses`) still has to use `api.venice.ai` with an API key. Both can coexist in OpenCode - the installer only *adds* a provider.
+- **Image generation spends no credits but is not free of limits.** `paidImagesMode=block` keeps the agent on the free models; the agent's own prompt rewriting and model choice are its own, so the result is never exactly the prompt.
 - **Images are re-encoded by Venice.** The media endpoint decodes every upload and rejects what it cannot read (`422 media_rejected`, code `unreadable`), so send real photos or clean screenshots, not degenerate synthetic captures. Only the newest user turn carries image parts: re-serialised history stays text-only, so a follow-up question about a picture must repeat it.
 
 ### NUL bytes and `400 Invalid request parameters`

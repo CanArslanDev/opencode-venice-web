@@ -30,7 +30,8 @@ import {
 import { MODELS } from './models.mjs'
 import { debugRaw, log, preview, warn } from './log.mjs'
 import { deepStripNulls, repairJsonControlChars } from './sanitize.mjs'
-import { INFERENCE_PATH, SignInError, loadSession, recallMedia, resetSessionCache, upstreamChat, upstreamMediaUpload } from './venice.mjs'
+import { INFERENCE_PATH, SignInError, loadSession, recallMedia, rememberMedia, resetSessionCache, upstreamChat, upstreamImage, upstreamMediaUpload } from './venice.mjs'
+import { IMAGE_SIZES, buildPrompt, checkModel, collectImage } from './image.mjs'
 
 const json = (res, status, payload) => {
   res.writeHead(status, { 'content-type': 'application/json' })
@@ -475,6 +476,52 @@ function stripEnvelope(text) {
   return trimmed
 }
 
+/**
+ * OpenAI image route: `POST /v1/images/generations`. The picture is generated on
+ * the agent endpoint and answered as a base64 `b64_json` (plus a `url` when the
+ * caller asks for one, pointing at the copy cached under the media directory).
+ */
+async function handleImages(req, res) {
+  const body = await readJson(req)
+  if (!body.prompt || typeof body.prompt !== 'string') return openaiError(res, 400, 'prompt is required', 'invalid_request_error')
+  let model
+  try {
+    model = checkModel(body.model)
+  } catch (error) {
+    return openaiError(res, 400, error.message, 'invalid_request_error')
+  }
+  if (body.size && !IMAGE_SIZES[body.size]) {
+    return openaiError(res, 400, `unknown size: ${body.size}. Known: ${Object.keys(IMAGE_SIZES).join(', ')}`, 'invalid_request_error')
+  }
+  const count = Math.min(Math.max(Number(body.n) || 1, 1), 4)
+  const prompt = buildPrompt(body.prompt, model, body.size)
+  log(`-> image ${model} • n=${count}${body.size ? ` • ${body.size}` : ''} • ${preview(body.prompt, 90)}`)
+
+  const abort = new AbortController()
+  req.on('aborted', () => abort.abort())
+  const created = Math.floor(Date.now() / 1000)
+  const data = []
+  try {
+    for (let index = 0; index < count; index++) {
+      const upstream = await upstreamImage(prompt, abort.signal)
+      if (!upstream.ok) {
+        const text = await upstream.text().catch(() => '')
+        return openaiError(res, upstream.status, `${apiBase} responded HTTP ${upstream.status}: ${text.slice(0, 300)}`)
+      }
+      const image = await collectImage(upstream.body)
+      // Keep the bytes locally: the media id alone cannot be downloaded again.
+      await rememberMedia(image.mediaId, image.mimeType, image.data)
+      log(`   ~ image ${index + 1}/${count} • ${image.mediaId} • ${image.request?.resource_id ?? model} • ${image.data.length} bytes`)
+      const item = { b64_json: image.data.toString('base64') }
+      if (body.response_format === 'url') item.url = `data:${image.mimeType};base64,${item.b64_json}`
+      data.push(item)
+    }
+  } catch (error) {
+    return openaiError(res, 502, `image generation failed: ${error.message}`)
+  }
+  return json(res, 200, { created, data })
+}
+
 async function handleChat(req, res) {
   const body = await readJson(req)
   const mapping = toVeniceRequest(body)
@@ -606,6 +653,10 @@ export function createServer() {
 
       if (req.method === 'POST' && url.pathname.endsWith('/chat/completions')) {
         return await handleChat(req, res)
+      }
+
+      if (req.method === 'POST' && url.pathname.endsWith('/images/generations')) {
+        return await handleImages(req, res)
       }
 
       if (req.method === 'POST' && url.pathname === '/reload') {

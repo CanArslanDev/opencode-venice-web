@@ -25,6 +25,12 @@ import { curlFetch, findCurl, isCloudflareBlock } from './curl.mjs'
 
 const INFERENCE_PATH = '/api/inference/chat/agents/ad-hoc'
 const MEDIA_PATH = '/api/v2/agents/media'
+// The agent endpoint runs image generation server-side: the reply carries a
+// `veniceai:image_generation` item with the bytes chunked in base64, so no
+// client tool is involved. `paidImagesMode=block` keeps it on the free models.
+export const AGENT_IMAGE_PATH = '/api/inference/chat/agents/venice?paidImagesMode=block'
+/** Query that makes the web client call its own agent route (image mode). */
+export const IMAGE_MODE_QUERY = '?paidImagesMode=block'
 
 let state = null
 let tokenFlight = null
@@ -317,3 +323,15 @@ export async function probeAccount() {
 }
 
 export { INFERENCE_PATH }
+
+/**
+ * Asks the agent endpoint for one image. The reply is an SSE stream that ends in
+ * `veniceai:image_generation.done`; `collectImage()` (image.mjs) reads it.
+ */
+export async function upstreamImage(prompt, signal) {
+  const body = {
+    input: { messages: [{ id: randomUUID(), type: 'message', status: 'completed', role: 'user', content: [{ type: 'output_text', text: prompt, annotations: [] }] }] },
+    clientTools: [],
+  }
+  return upstreamChat(body, AGENT_IMAGE_PATH, signal)
+}
