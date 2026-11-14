@@ -150,7 +150,11 @@ export const EMPTY_MARKER = '(empty reply)'
  */
 export function shouldRetry({ message, lastRole, available = [] }) {
   if (message.serverLoop) return { retry: true, reason: 'venice tool loop', reminder: NATIVE_CALL_REMINDER }
+  // A server call (view_media/edit_image) is answered by the proxy and never
+  // reaches the client, so an envelope whose only call was a server one looks
+  // like a blank answer here and was retried forever. `serverCalls` marks it.
   if (isEmptyAnswer(message) && !message.brokenEnvelope) {
+    if (message.serverCalls?.length) return { retry: false }
     return { retry: true, reason: 'empty reply', reminder: EMPTY_RETRY_REMINDER }
   }
   if (message.brokenEnvelope && !message.tool_calls) {

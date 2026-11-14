@@ -652,3 +652,8 @@ test('server tool calls riding along with prose: keeps the prose as the answer w
     if (kept.length !== parsed.tool_calls.length && parsed.tool_calls && (parsed.content ?? '').trim()) parsed.status = 'done'
     assert.equal(shouldRetry({ message: parsed, lastRole: 'user', available: [] }).retry, false)
 })
+
+test('shouldRetry: a lone server call is not an empty reply', () => {
+  const solo = { content: '', tool_calls: null, serverCalls: [{ function: { name: 'view_media' } }], sawEnvelope: true, status: 'continue' }
+  assert.equal(shouldRetry({ message: solo, lastRole: 'user', available: [] }).retry, false)
+})
