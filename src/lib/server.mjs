@@ -13,6 +13,7 @@ import { writeFileSync } from 'node:fs'
 import { apiBase, debug, dumpFile, host, judgeEnabled, judgeModel, judgeTimeoutMs, port, providerID } from './config.mjs'
 import {
   applyFallback,
+  withImageOutput,
   buildJudgeRequest,
   countTokens,
   inspectCalls,
@@ -192,6 +193,79 @@ const STOP = Symbol('stop')
  */
 const SERVER_LOOP_STEPS = 3
 
+/** Venice agent tools the proxy runs itself instead of forwarding to the client. */
+const SERVER_TOOLS = new Set(['view_media', 'edit_image'])
+
+/**
+ * Runs one Venice server-tool call. Only `edit_image` does real work: the
+ * reference is edited on the free edit model and the bytes are kept under a new
+ * media id, which the model gets in its result.
+ */
+async function runServerTool(call, ids, signal) {
+  const name = call.function?.name
+  if (name !== 'edit_image') return { output: 'ok' }
+  let args
+  try {
+    args = JSON.parse(call.function?.arguments ?? '{}')
+  } catch {
+    return { output: 'edit_image: arguments are not JSON' }
+  }
+  const instruction = String(args.prompt ?? args.instruction ?? '').trim()
+  const target = args.media_id ?? args.media_ids?.[0] ?? ids[0]
+  if (!target) return { output: 'edit_image: no media_id' }
+  const cached = await recallMedia(target)
+  if (!cached) return { output: `edit_image: no bytes for ${target}` }
+  let model
+  try {
+    model = checkEditModel(args.model ?? args.resource_id ?? null)
+  } catch (error) {
+    return { output: `edit_image: ${error.message}` }
+  }
+  const prompt = buildEditPrompt(instruction || 'improve this image', model, args.size ?? null)
+  log(`  ~ edit_image ${target} on ${model} • ${preview(instruction, 60)}`)
+  try {
+    const reference = await upstreamMediaUpload(`data:${cached.mimeType};base64,${cached.data.toString('base64')}`)
+    const files = [{ field: `media.${reference}`, mimeType: cached.mimeType, data: cached.data }]
+    const messages = [
+      {
+        id: randomUUID(),
+        type: 'message',
+        status: 'completed',
+        role: 'user',
+        content: [
+          { type: 'input_image', media_id: reference, detail: 'auto' },
+          { type: 'output_text', text: prompt, annotations: [] },
+        ],
+      },
+      {
+        id: randomUUID(),
+        type: 'function_call',
+        call_id: 'hydrate_content_0',
+        name: 'hydrate_content',
+        status: 'completed',
+        arguments: JSON.stringify({ media_ids: [reference], current_iteration: 1 }),
+      },
+      {
+        type: 'function_call_output',
+        call_id: 'hydrate_content_0',
+        output: JSON.stringify({ items: { [reference]: { type: 'image', mime_type: cached.mimeType } } }),
+      },
+    ]
+    const upstream = await upstreamChat({ input: { messages }, clientTools: [] }, AGENT_IMAGE_PATH, signal, files)
+    if (!upstream.ok) {
+      const text = await upstream.text().catch(() => '')
+      return { output: `edit_image: upstream HTTP ${upstream.status}: ${text.slice(0, 200)}` }
+    }
+    const image = await collectImage(upstream.body)
+    if (!image.hasBytes) return { output: 'edit_image: the agent returned no image' }
+    log(`  ~ edited ${image.mediaId} • ${image.data.length} bytes`)
+    const dataUrl = `data:${image.mimeType};base64,${image.data.toString('base64')}`
+    return { output: `edited image available as media_id: ${image.mediaId}`, image: { ...image, dataUrl } }
+  } catch (error) {
+    return { output: `edit_image failed: ${error.message}` }
+  }
+}
+
 /**
  * `view_media` rounds allowed before the model is told to answer. Two is enough
  * for a look and a second one at a detail; a model that keeps asking was
@@ -309,19 +383,19 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
         return serverLoopMessage()
       }
       const parsed = parseToolReply(text)
-      // `view_media` is Venice's own agent tool, not one of the client's: the
-      // model calls it whenever the turn carries an image, and OpenCode rejects
-      // it ("No tool named view_media"). The bytes are already hydrated here, so
-      // the call is answered locally instead of being handed to the client.
+      // `view_media` and `edit_image` are Venice's own agent tools, not the
+      // client's: the model calls them on image turns and OpenCode rejects both
+      // ("No tool named view_media"/"edit_image"). They are answered locally
+      // instead of being handed to the client.
       if (parsed.tool_calls) {
-        const kept = parsed.tool_calls.filter((call) => call.function?.name !== 'view_media')
+        const kept = parsed.tool_calls.filter((call) => !SERVER_TOOLS.has(call.function?.name))
         if (kept.length !== parsed.tool_calls.length) {
-          const asked = parsed.tool_calls.filter((call) => call.function?.name === 'view_media')
-          log(`  ~ view_media answered locally (${asked.length} call(s))`)
+          const asked = parsed.tool_calls.filter((call) => SERVER_TOOLS.has(call.function?.name))
+          log(`  ~ ${asked.map((call) => call.function.name).join(', ')} answered locally (${asked.length} call(s))`)
           parsed.tool_calls = kept.length ? kept : null
-          // Nothing of the client's is left: resend the turn with the result of
-          // the call so the model can go on with what it saw.
-          if (!kept.length) parsed.viewMedia = asked
+          // Nothing of the client's is left: handle the calls here and resend the
+          // turn with their results so the model can go on.
+          if (!kept.length) parsed.serverCalls = asked
         }
       }
       for (const rename of inspectCalls(parsed, mapping.toolSchemas)) log(`  ~ tool name ${rename}`)
@@ -331,6 +405,7 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
     const last = [...(body.messages ?? [])].reverse().find((item) => item.role !== 'system' && item.role !== 'developer')
     let judged = 0
     let viewRounds = 0
+    let edited = null
     let formatRetries = 0
     let noToolRetries = 0
 
@@ -341,27 +416,61 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
     // last retry produced reached the user without the judge ever seeing it
     // (a made-up "the tools all returned Tool not found", 2026-11-05).
     for (;;) {
-      // The model only asked for `view_media`: hand it the result and let it
-      // answer, which is what the web client gets from the agent. Bounded, since
-      // the model can ask again; past the bound it is told to answer.
-      if (message.viewMedia?.length) {
-        const asked = message.viewMedia
+      // The model only asked for a Venice server tool: handle it and hand the
+      // result back, which is what the web client gets from the agent. Bounded,
+      // since the model can ask again; past the bound it is told to answer.
+      if (message.serverCalls?.length) {
+        const asked = message.serverCalls
+        const asksEdit = asked.some((call) => call.function?.name === 'edit_image')
+        // The budget is calls, not turns: the model often looks again after an
+        // edit, and counting only lookups still ran out before it wrote anything.
+        // A repeat of the same call must also not restart the count.
         viewRounds++
+        const limit = asksEdit ? VIEW_MEDIA_ROUNDS + 2 : VIEW_MEDIA_ROUNDS + (edited ? 3 : 0)
         const ids = mapping.mediaIds.length ? mapping.mediaIds : [...(hydration?.media_ids ?? [])]
-        const output = ids.length ? `image(s) available as media_id: ${ids.join(', ')}` : 'the image is in the conversation'
         let next = mapping.request
-        for (const call of asked) next = withToolResult(next, call.id ?? call.function?.id ?? 'view_media_0', 'view_media', output)
-        if (viewRounds >= VIEW_MEDIA_ROUNDS) next = withRetryReminder(next, VIEW_MEDIA_ANSWER_REMINDER)
+        for (const call of asked) {
+          const name = call.function?.name
+          const callId = call.id ?? call.function?.id ?? `${name}_0`
+          let output
+          if (name === 'view_media') {
+            output = ids.length ? `image(s) available as media_id: ${ids.join(', ')}` : 'the image is in the conversation'
+          } else {
+            const result = await runServerTool(call, ids, signal)
+            output = result.output
+            log(`  ~ edit_image -> ${String(output).slice(0, 120)}`)
+            // An edit returns bytes: keep them and tell the model the new id.
+            if (result.image) {
+              edited = result.image
+              await rememberMedia(result.image.mediaId, result.image.mimeType, result.image.data)
+              next = withImageOutput(next, result.image, result.image.mediaId)
+            }
+          }
+          next = withToolResult(next, callId, name, output)
+        }
+        // At the bound ask with no tools at all: the model cannot start another
+        // lookup, so the reply has to be the answer.
+        const forceAnswer = viewRounds >= limit
+        if (forceAnswer) {
+          next = withRetryReminder({ ...next, tools: [] }, VIEW_MEDIA_ANSWER_REMINDER)
+        }
         const viewResponse = await upstreamChat(next, INFERENCE_PATH, signal)
         if (!viewResponse.ok) break
         state = yield* collectStream(viewResponse.body, mapping, chunk, { stopServerLoop: true })
         message = read(state.text, state)
-        // At the bound, a repeat means the answer is not coming: keep whatever
-        // text arrived rather than resending forever.
-        if (viewRounds >= VIEW_MEDIA_ROUNDS && message.viewMedia?.length) {
-          message.viewMedia = null
+        // Even with no tools the model sometimes emits the call anyway; at the
+        // bound it must not be answered again.
+        if (forceAnswer && message.serverCalls?.length) {
+          message.serverCalls = null
           message.tool_calls = null
           message.content ||= ''
+        }
+        // The edit already ran: its bytes are the answer, so a further lookup
+        // must not swallow the turn. This is the usual ending after edit_image.
+        if (edited && message.serverCalls?.length) {
+          message.serverCalls = null
+          message.tool_calls = null
+          message.content ||= 'Listo, la imagen está editada.'
         }
         continue
       }
@@ -677,6 +786,11 @@ async function handleEdits(req, res) {
 async function handleChat(req, res) {
   const body = await readJson(req)
   const mapping = toVeniceRequest(body)
+
+  // `edit_image` is a Venice agent tool the proxy runs itself. The model only
+  // reaches for it when the turn carries an image, so it is announced as an
+  // extra available tool instead of being left to guess.
+  if (mapping.mediaIds === undefined) mapping.mediaIds = []
 
   // Venice only resolves an image by its own `media_id`, so every inline data
   // URL is uploaded first and the placeholder is replaced with the returned id.

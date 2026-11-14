@@ -28,7 +28,35 @@ import { repairJsonControlChars } from './sanitize.mjs'
  * not enough, by a second model (the judge), so it works the same in every
  * language.
  */
-export const TOOL_PROMPT = `You are connected to an external agent that executes tools on the user's computer. These tools ARE called directly by name in \`tool_calls\` (not inside \`execute\`); they are NOT Venice server tools.
+/** Venice agent tools the proxy answers itself; announced only on image turns. */
+export const SERVER_TOOL_DEFS = [
+  {
+    type: 'function',
+    function: {
+      name: 'view_media',
+      description: 'Look at an image already attached to the conversation, by its media_id.',
+      parameters: { type: 'object', properties: { media_ids: { type: 'array', items: { type: 'string' } } }, required: ['media_ids'] },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'edit_image',
+      description: 'Edit an attached image with an instruction. Returns the edited image as a new media_id.',
+      parameters: {
+        type: 'object',
+        properties: {
+          media_id: { type: 'string', description: 'id of the image to edit' },
+          prompt: { type: 'string', description: 'the change to make, in words' },
+          model: { type: 'string', description: 'edit model; firered-image-edit keeps detail best' },
+        },
+        required: ['media_id', 'prompt'],
+      },
+    },
+  },
+]
+
+const TOOL_PROMPT = `You are connected to an external agent that executes tools on the user's computer. These tools ARE called directly by name in \`tool_calls\` (not inside \`execute\`); they are NOT Venice server tools.
 Return ONLY one valid JSON object, without markdown fences and without any text outside JSON, with this exact shape:
 {"content":"text for the user, or an empty string","status":"continue","tool_calls":[{"name":"exact tool name","arguments":{}}]}
 "status" is required and is one of:
@@ -359,6 +387,18 @@ export function toVeniceRequest(body) {
     if (tool?.type !== 'function' || !tool.function?.name) throw new Error('only function tools are supported')
     names.add(tool.function.name)
   }
+  // Venice's own agent tools (view_media, edit_image) run inside the proxy, but
+  // the model still has to be told they exist: left out, it looks at the image
+  // and then claims it has no way to edit it.
+  const extra = []
+  if (body.messages.some((message) => Array.isArray(message.content) && message.content.some((part) => part?.type === 'image_url' || part?.type === 'input_image'))) {
+    for (const tool of SERVER_TOOL_DEFS) {
+      if (names.has(tool.function.name)) continue
+      names.add(tool.function.name)
+      extra.push(tool)
+    }
+  }
+  const announced = [...tools, ...extra]
 
   const instructions = []
   const messages = []
@@ -453,9 +493,9 @@ export function toVeniceRequest(body) {
   let choice = body.tool_choice ?? 'auto'
   if (typeof choice === 'object') choice = choice.function?.name ?? 'auto'
 
-  if (tools.length) {
+  if (announced.length) {
     instructions.push(
-      `${TOOL_PROMPT}\nTool choice: ${JSON.stringify(choice)}.\nAvailable tools:\n${JSON.stringify(tools.map((tool) => tool.function))}`,
+      `${TOOL_PROMPT}\nTool choice: ${JSON.stringify(choice)}.\nAvailable tools:\n${JSON.stringify(announced.map((tool) => tool.function))}`,
     )
     const last = messages[messages.length - 1]
     const afterToolResult = typeof last?.content?.[0]?.text === 'string' && last.content[0].text.startsWith('{"tool_result"')
@@ -479,7 +519,7 @@ export function toVeniceRequest(body) {
       ...reasoningMode(body),
     },
     toolNames: names,
-    toolSchemas: new Map(tools.map((tool) => [tool.function.name, tool.function.parameters ?? {}])),
+    toolSchemas: new Map(announced.map((tool) => [tool.function.name, tool.function.parameters ?? {}])),
     emulatedTools: tools.length > 0,
     images,
     imageIds,
@@ -531,6 +571,36 @@ export function withToolResult(request, callId, name, output) {
               tool_result: { tool_call_id: callId, content: output },
               note: `the result of your ${name} call; the image is already in the conversation`,
             }),
+            annotations: [],
+          },
+        ],
+      },
+    ],
+  }
+}
+
+/**
+ * Same request, with a server-tool image appended as a user message: the model
+ * gets the new `media_id` and the bytes are handed back with the turn.
+ */
+export function withImageOutput(request, image, mediaId) {
+  return {
+    ...request,
+    images: [...(request.images ?? []), image.dataUrl],
+    messages: [
+      ...request.messages,
+      {
+        id: randomUUID(),
+        type: 'message',
+        status: 'completed',
+        role: 'user',
+        content: [
+          { type: 'input_image', media_id: mediaId, detail: 'auto' },
+          {
+            type: 'output_text',
+            // The model looks the result up instead of answering unless it is
+            // told plainly that this IS the edited image and it must reply.
+            text: `(edited image ${mediaId}: this is the result of edit_image, already applied. Do not call view_media again: reply to the user now, briefly.)`,
             annotations: [],
           },
         ],

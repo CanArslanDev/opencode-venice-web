@@ -212,6 +212,10 @@ The proxy now drops `view_media` from the reply. When nothing of the client's is
 
 A `view_media` mixed with real client calls keeps the client calls and only drops the extra one; the client then gets a normal tool call, which is the pre-existing behaviour.
 
+The rounds are bounded at two. Without the bound a model that kept asking was resent in a loop, the loop ended empty and the client got `(empty reply)` - the answer was in the log, the chat showed nothing. Past the bound the model gets a reminder to answer and the loop stops even if it asks again.
+
+`edit_image` is handled the same way and is announced to the model (`SERVER_TOOL_DEFS`) whenever the turn carries an image; without the announcement it looked at the picture and answered that it had no way to edit. After a successful edit, a further `view_media` is dropped and the turn ends, so the bytes reach the client instead of being swallowed by another lookup. Three runs of three answered with the edit confirmed.
+
 ### Things that do **not** help (measured)
 
 * Sending `execute`/`search` to the model: OpenCode's Code-Mode wrappers confuse tool naming (`tools.shell` inside `execute` fails with *Unknown tool*), so they are filtered out when real tools exist. `1/4 → 3/4` when removed.
