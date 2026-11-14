@@ -332,6 +332,7 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
 
   let state = yield* collectStream(upstreamBody, mapping, chunk, { stopServerLoop: mapping.emulatedTools })
   let message = null
+  let edited = null
 
   // An image turn comes back as `hydrate_content`, not as an answer. The web
   // client answers it with `{ items: { <media_id>: { type: 'image', mime_type } } }`
@@ -405,7 +406,7 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
     const last = [...(body.messages ?? [])].reverse().find((item) => item.role !== 'system' && item.role !== 'developer')
     let judged = 0
     let viewRounds = 0
-    let edited = null
+
     let formatRetries = 0
     let noToolRetries = 0
 
@@ -472,6 +473,11 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
           message.tool_calls = null
           message.content ||= 'Listo, la imagen está editada.'
         }
+        // The edit already ran and its bytes are cached: whatever prose came
+        // back, the turn has its result, so no retry may replace it with an
+        // empty reply.
+        log(`  ~ fin de vuelta: edited=${edited ? edited.mediaId : "no"} llamadas=${message.serverCalls?.length ?? 0}`)
+        if (edited) break
         continue
       }
       let decision = shouldRetry({ message, lastRole: last?.role, available })
@@ -533,6 +539,24 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
       yield chunk({
         content: message.content || '',
         tool_calls: message.tool_calls.map((call, index) => ({ index, ...call })),
+      })
+    } else if (edited) {
+      // The edit already ran here and its bytes are cached. The client has no
+      // tool of its own for that, so the result is handed over as a `view_media`
+      // call: OpenCode resolves the media id and renders the image. Without it
+      // the turn ended as text only and the picture never arrived.
+      finish = 'tool_calls'
+      log(`  <- tools: view_media(${edited.mediaId}) (edit result)`)
+      yield chunk({
+        content: message.content || '',
+        tool_calls: [
+          {
+            index: 0,
+            id: `call_${randomUUID().replaceAll('-', '')}`,
+            type: 'function',
+            function: { name: 'view_media', arguments: JSON.stringify({ media_ids: [edited.mediaId] }) },
+          },
+        ],
       })
     } else {
       log(`  <- no tools${message.status ? ` • status ${message.status}` : ''} • text: ${preview(message.content ?? '', 110)}`)
