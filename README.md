@@ -16,7 +16,8 @@ OpenCode ──HTTP──> 127.0.0.1:3456  ──HTTPS + your session cookie─�
 - No API key, no credits, no password stored: only the browser's long-lived Clerk `__client` cookie.
 - 20 free web models (DeepSeek, Qwen, GLM, Kimi, Gemma, Aion, TEE-hosted variants).
 - Tool calling works: OpenCode's `read`/`write`/`edit`/`shell`/`glob`/`grep` tools are emulated through a JSON envelope (see [docs/PROTOCOL.md](docs/PROTOCOL.md)).
-- Zero runtime dependencies. Node 22+ and the system `curl` (preinstalled on macOS and most Linux distributions).
+- Images work: photos and screenshots are uploaded to the web media endpoint and handed back to the model, exactly like the web client does.
+- Runs on macOS and Linux. Node 22+ and the system `curl` (preinstalled on macOS and most Linux distributions); `wreq-js` is the only npm dependency.
 
 ---
 
@@ -68,6 +69,8 @@ curl -s 127.0.0.1:3456/health
 | Session JWT | `POST clerk.venice.ai/v1/client/sessions/<id>/tokens` | ~60 s lifetime, refreshed by the proxy, single-flight |
 | Client attestation | `POST outerface.venice.ai/api/app/user/client_attestation/mint` | short-lived token, cached 5 minutes |
 | Inference | `POST outerface.venice.ai/api/inference/chat/agents/ad-hoc` | newline-delimited SSE |
+| Image upload | `POST outerface.venice.ai/api/v2/agents/media` | multipart, returns a `media_id` |
+| Image hydration | same inference route, multipart | `hydrate_content` is answered with `items` plus a `media.<media_id>` field |
 | Tool calls | emulated | the web endpoint does not accept OpenAI `tools` |
 
 The proxy exposes:
@@ -100,6 +103,29 @@ Only models the web catalogue marks as free (`usesCredits: false`) are exposed -
 
 The catalogue lives in [`src/lib/models.mjs`](src/lib/models.mjs); edit it and rerun `venice-web-sync` if Venice adds models. If the web catalogue ships a model you want, run `GET /v1/models` (or `venice-web-doctor`) after adding it to verify it is reachable.
 
+Not every model reads images. Vision turns need a model that does, for example `deepseek-v4-1-flash-free`.
+
+---
+
+## Images
+
+Send an image as an OpenAI content part; the proxy does the rest:
+
+```json
+{ "role": "user", "content": [
+  { "type": "text", "text": "What is the total on this receipt?" },
+  { "type": "image_url", "image_url": { "url": "data:image/png;base64,..." } }
+] }
+```
+
+What happens upstream, in order:
+
+1. Every data URL is uploaded to `POST /api/v2/agents/media` and the part is rewritten to the returned `media_id`.
+2. Venice answers the turn with `hydrate_content` instead of text. The proxy captures it and retries once as multipart: the JSON body in `request`, one file per id in `media.<media_id>`, and a `function_call_output` carrying `{ items: { <media_id>: { type: 'image', mime_type } } }`, with the pending `view_media` calls answered `ok`.
+3. The uploaded bytes are cached under `<config dir>/media/<media_id>.json`. Venice exposes no download route, so this is what lets a `media_id` be reused on a later turn.
+
+A part that already carries a `media_id` (an upload of your own) is passed through untouched when the id is cached; otherwise the turn is logged as hydrating without bytes.
+
 ---
 
 ## Commands
@@ -127,7 +153,7 @@ All environment variables are optional; the defaults are what the installer uses
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `VENICE_WEB_CONFIG_DIR` | `~/.config/opencode/venice-web` | session file and logs |
+| `VENICE_WEB_CONFIG_DIR` | `~/.config/opencode/venice-web` | session file, logs and the uploaded-media cache |
 | `VENICE_WEB_SESSION` | `<config dir>/session.json` | session file path |
 | `VENICE_WEB_PORT` | `3456` | proxy port |
 | `VENICE_WEB_HOST` | `127.0.0.1` | proxy bind address |
@@ -160,7 +186,8 @@ All environment variables are optional; the defaults are what the installer uses
 - **Tool calls are emulated.** The web endpoint ignores OpenAI `tools`, so the model answers with a JSON envelope that the proxy turns into `tool_calls`. This is reliable in practice (see [docs/PROTOCOL.md](docs/PROTOCOL.md) for the measured technique) but it is a prompt contract, not a native feature: `tool_choice: required` is advisory, and with tools in the request the answer arrives buffered rather than token-by-token (reasoning still streams live).
 - **No sampling controls.** `temperature`, `top_p` and `max_tokens` are not applied by this endpoint.
 - **Unlimited, not infinite.** Venice's fair-use and Cloudflare bot checks apply. A Cloudflare challenge surfaces as HTTP 401 with a "refresh the cookies" message.
-- **Web session, not API route.** Anything that needs the official API surface (embeddings, images, video, `/responses`) still has to use `api.venice.ai` with an API key. Both can coexist in OpenCode - the installer only *adds* a provider.
+- **Web session, not API route.** Anything that needs the official API surface (embeddings, video, `/responses`) still has to use `api.venice.ai` with an API key. Both can coexist in OpenCode - the installer only *adds* a provider.
+- **Images are re-encoded by Venice.** The media endpoint decodes every upload and rejects what it cannot read (`422 media_rejected`, code `unreadable`), so send real photos or clean screenshots, not degenerate synthetic captures. Only the newest user turn carries image parts: re-serialised history stays text-only, so a follow-up question about a picture must repeat it.
 
 ### NUL bytes and `400 Invalid request parameters`
 
