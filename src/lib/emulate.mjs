@@ -56,7 +56,7 @@ export const SERVER_TOOL_DEFS = [
   },
 ]
 
-const TOOL_PROMPT = `You are connected to an external agent that executes tools on the user's computer. These tools ARE called directly by name in \`tool_calls\` (not inside \`execute\`); they are NOT Venice server tools.
+export const TOOL_PROMPT = `You are connected to an external agent that executes tools on the user's computer. These tools ARE called directly by name in \`tool_calls\` (not inside \`execute\`); they are NOT Venice server tools.
 Return ONLY one valid JSON object, without markdown fences and without any text outside JSON, with this exact shape:
 {"content":"text for the user, or an empty string","status":"continue","tool_calls":[{"name":"exact tool name","arguments":{}}]}
 "status" is required and is one of:
@@ -391,14 +391,6 @@ export function toVeniceRequest(body) {
   // the model still has to be told they exist: left out, it looks at the image
   // and then claims it has no way to edit it.
   const extra = []
-  if (body.messages.some((message) => Array.isArray(message.content) && message.content.some((part) => part?.type === 'image_url' || part?.type === 'input_image'))) {
-    for (const tool of SERVER_TOOL_DEFS) {
-      if (names.has(tool.function.name)) continue
-      names.add(tool.function.name)
-      extra.push(tool)
-    }
-  }
-  const announced = [...tools, ...extra]
 
   const instructions = []
   const messages = []
@@ -492,6 +484,21 @@ export function toVeniceRequest(body) {
 
   let choice = body.tool_choice ?? 'auto'
   if (typeof choice === 'object') choice = choice.function?.name ?? 'auto'
+
+  // Venice's own agent tools (view_media, edit_image) run inside the proxy, but
+  // the model still has to be told they exist: left out, it looks at the image
+  // and then claims it has no way to edit it. `textOf()` renders images as the
+  // literal `[image]`, so the text of the newest user turn is the signal.
+  const lastUser = [...messages].reverse().find((message) => message.role === 'user')
+  const carriesImage = (lastUser?.content ?? []).some((part) => part?.type === 'input_image') || textOf(body.messages.at(-1)?.content).includes('[image]')
+  if (carriesImage) {
+    for (const tool of SERVER_TOOL_DEFS) {
+      if (names.has(tool.function.name)) continue
+      names.add(tool.function.name)
+      extra.push(tool)
+    }
+  }
+  const announced = [...tools, ...extra]
 
   if (announced.length) {
     instructions.push(
