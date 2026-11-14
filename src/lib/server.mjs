@@ -480,11 +480,12 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
         // back, the turn has its result, so no retry may replace it with an
         // empty reply.
         log(`  ~ fin de vuelta: edited=${edited ? edited.mediaId : "no"} llamadas=${message.serverCalls?.length ?? 0}`)
+        // The edit is the answer: end the turn here, before any retry path.
+        if (edited) break
         continue
       }
-      // The edit already ran and its bytes are cached. A retry would send the
-      // original turn again, run the edit a second time and, on a blank retry,
-      // replace the good reply with `(empty reply)`. So the edit ends the turn.
+      // The edit already ran and its bytes are cached: the turn has its result,
+      // so nothing may retry it again.
       if (edited) break
       let decision = shouldRetry({ message, lastRole: last?.role, available })
       if (decision.judge) {
@@ -494,10 +495,10 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
         if (verdict) log(`  ~ judge: ${verdict.verdict}${verdict.reason ? ` (${preview(verdict.reason, 100)})` : ''}`)
         decision = judgeDecision(verdict?.verdict)
       }
-      if (!decision.retry) break
       // The edit already ran and its bytes are cached: a retry would re-run the
       // edit on a stale request and the turn would lose its result.
       if (edited) break
+      if (!decision.retry) break
       // A well-formed envelope with a real answer still gets one retry, in case
       // the model described a tool it never called. The second one never improved
       // anything and cost a full extra request per turn.
