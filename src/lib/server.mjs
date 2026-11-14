@@ -394,10 +394,13 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
         if (kept.length !== parsed.tool_calls.length) {
           const asked = parsed.tool_calls.filter((call) => SERVER_TOOLS.has(call.function?.name))
           log(`  ~ ${asked.map((call) => call.function.name).join(', ')} answered locally (${asked.length} call(s))`)
-          parsed.tool_calls = kept.length ? kept : null
-          // Nothing of the client's is left: handle the calls here and resend the
-          // turn with their results so the model can go on.
-          if (!kept.length) parsed.serverCalls = asked
+          // The client has no `view_media`/`edit_image` of its own. When only server
+          // calls are left they are handled here and the turn is resent with their
+          // results. When client calls remain, the server calls ride along as extra
+          // `tool_calls` and are run on the way back, before the resend; dropping them
+          // is what made an edit vanish whenever the model also called a client tool.
+          parsed.serverCalls = asked
+          parsed.tool_calls = kept.length ? [...kept, ...asked] : null
         }
       }
       for (const rename of inspectCalls(parsed, mapping.toolSchemas)) log(`  ~ tool name ${rename}`)
@@ -423,6 +426,9 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
       // since the model can ask again; past the bound it is told to answer.
       if (message.serverCalls?.length) {
         const asked = message.serverCalls
+        // Client calls still pending on this turn: they are handed to the client
+        // after the server calls have run, so they are kept across the resend.
+        const pendingClient = (message.tool_calls ?? []).filter((call) => !SERVER_TOOLS.has(call.function?.name))
         const asksEdit = asked.some((call) => call.function?.name === 'edit_image')
         // The budget is calls, not turns: the model often looks again after an
         // edit, and counting only lookups still ran out before it wrote anything.
@@ -452,6 +458,21 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
           }
           next = withToolResult(next, callId, name, output)
         }
+        // The server calls are done: the client calls that came with them are the
+        // turn now, and the resent request carries their results so the model can
+        // go on once the client has answered.
+        if (pendingClient.length) {
+          message.tool_calls = pendingClient
+          message.serverCalls = null
+        }
+        // The edit already carries its result: its bytes are the answer, so the
+        // turn ends here instead of being resent for prose. Resending re-runs the
+        // model over the new image, which is where the blank replies came from.
+        if (edited) {
+          message.content ||= 'Listo, la imagen está editada.'
+          log(`  ~ fin de vuelta: edited=${edited.mediaId} llamadas=0`)
+          break
+        }
         // At the bound ask with no tools at all: the model cannot start another
         // lookup, so the reply has to be the answer.
         const forceAnswer = viewRounds >= limit
@@ -463,10 +484,10 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
         state = yield* collectStream(viewResponse.body, mapping, chunk, { stopServerLoop: true })
         message = read(state.text, state)
         // Even with no tools the model sometimes emits the call anyway; at the
-        // bound it must not be answered again.
+        // bound it must not be answered again. The pending client calls are kept.
         if (forceAnswer && message.serverCalls?.length) {
           message.serverCalls = null
-          message.tool_calls = null
+          message.tool_calls = pendingClient.length ? pendingClient : null
           message.content ||= ''
         }
         // The edit already ran: its bytes are the answer, so a further lookup
