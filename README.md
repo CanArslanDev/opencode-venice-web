@@ -16,7 +16,7 @@ OpenCode ──HTTP──> 127.0.0.1:3456  ──HTTPS + your session cookie─�
 - No API key, no credits, no password stored: only the browser's long-lived Clerk `__client` cookie.
 - 20 free web models (DeepSeek, Qwen, GLM, Kimi, Gemma, Aion, TEE-hosted variants).
 - Tool calling works: OpenCode's `read`/`write`/`edit`/`shell`/`glob`/`grep` tools are emulated through a JSON envelope (see [docs/PROTOCOL.md](docs/PROTOCOL.md)).
-- Images work: photos and screenshots are uploaded to the web media endpoint and handed back to the model, exactly like the web client does.
+- Images work both ways: photos and screenshots are uploaded to the web media endpoint and handed back to the model, exactly like the web client does, and `POST /v1/images/generations` makes new ones on the free image models.
 - Runs on macOS and Linux. Node 22+ and the system `curl` (preinstalled on macOS and most Linux distributions); `wreq-js` is the only npm dependency.
 
 ---
@@ -87,6 +87,7 @@ curl -s 127.0.0.1:3456/health
 | Session JWT | `POST clerk.venice.ai/v1/client/sessions/<id>/tokens` | ~60 s lifetime, refreshed by the proxy, single-flight |
 | Client attestation | `POST outerface.venice.ai/api/app/user/client_attestation/mint` | short-lived token, cached 5 minutes |
 | Inference | `POST outerface.venice.ai/api/inference/chat/agents/ad-hoc` | newline-delimited SSE |
+| Image generation | `POST outerface.venice.ai/api/inference/chat/agents/venice?paidImagesMode=block` | the image runs server-side, streamed as base64 chunks |
 | Image upload | `POST outerface.venice.ai/api/v2/agents/media` | multipart, returns a `media_id` |
 | Image hydration | same inference route, multipart | `hydrate_content` is answered with `items` plus a `media.<media_id>` field |
 | Tool calls | emulated | the web endpoint does not accept OpenAI `tools` |
@@ -124,6 +125,8 @@ The catalogue lives in [`src/lib/models.mjs`](src/lib/models.mjs); edit it and r
 
 Not every model reads images. Vision turns need a model that does, for example `deepseek-v4-1-flash-free`.
 
+Image *generation* is a separate list with the same free-only rule: `z-image-turbo` (default), `chroma`, `wai-illu`, `lustify-v8` and `stable-diffusion-3.5-rev2`. It lives in [`src/lib/image.mjs`](src/lib/image.mjs).
+
 ---
 
 ## Images
@@ -153,9 +156,18 @@ A part that already carries a `media_id` (an upload of your own) is passed throu
 { "prompt": "a lighthouse at dusk, watercolour", "model": "z-image-turbo", "size": "1024x1024", "n": 1 }
 ```
 
-Free image models only, the same `usesCredits: false` rule as the chat catalogue: `z-image-turbo` (default), `chroma`, `wai-illu`, `lustify-v8`, `stable-diffusion-3.5-rev2`. `wai-illu` and `lustify-v8` expect Danbooru-style anime prompts. Sizes: the squares from `256x256` to `1024x1024` plus `1024x1792` and `1792x1024`; `n` is capped at 4.
+```bash
+curl -s http://127.0.0.1:3456/v1/images/generations \
+  -H 'content-type: application/json' \
+  -d '{"prompt":"a lighthouse at dusk, watercolour"}' \
+  | jq -r '.data[0].b64_json' | base64 -d > lighthouse.png
+```
+
+Free image models only, the same `usesCredits: false` rule as the chat catalogue: `z-image-turbo` (default), `chroma`, `wai-illu`, `lustify-v8`, `stable-diffusion-3.5-rev2`. `wai-illu` and `lustify-v8` expect Danbooru-style anime prompts. Sizes: the squares from `256x256` to `1024x1024` plus `1024x1792` and `1792x1024`; `n` is capped at 4. An unknown model or size is a `400` that lists what is accepted, and a missing prompt is a `400` too.
 
 The work happens on the agent endpoint (`/api/inference/chat/agents/venice?paidImagesMode=block`), which runs the image server-side and streams it as base64 chunks. That route ignores a model field, so the requested model is appended to the prompt as an instruction (the agent otherwise picks `chroma`). The bytes are also written to `<config dir>/media/<media_id>.json`, so the returned id can be reused as an `image_url` part on a later chat turn.
+
+Output is a PNG. Venice's agent rewrites the prompt and picks its own framing and negative prompt, so the result is a good match for the subject, never a literal transcription. One image takes roughly 5-10 s and 1-2 MB.
 
 ---
 
@@ -218,7 +230,7 @@ All environment variables are optional; the defaults are what the installer uses
 - **No sampling controls.** `temperature`, `top_p` and `max_tokens` are not applied by this endpoint.
 - **Unlimited, not infinite.** Venice's fair-use and Cloudflare bot checks apply. A Cloudflare challenge surfaces as HTTP 401 with a "refresh the cookies" message.
 - **Web session, not API route.** Anything that needs the official API surface (embeddings, video, `/responses`) still has to use `api.venice.ai` with an API key. Both can coexist in OpenCode - the installer only *adds* a provider.
-- **Image generation spends no credits but is not free of limits.** `paidImagesMode=block` keeps the agent on the free models; the agent's own prompt rewriting and model choice are its own, so the result is never exactly the prompt.
+- **Image generation spends no credits but is not free of limits.** `paidImagesMode=block` keeps the agent on the free models, and a model the prompt does not name is chosen by the agent (`chroma` in every measurement). Venice's fair-use limits apply per account, and a slow or refused generation surfaces as `502 image generation failed: ...` with the upstream reason.
 - **Images are re-encoded by Venice.** The media endpoint decodes every upload and rejects what it cannot read (`422 media_rejected`, code `unreadable`), so send real photos or clean screenshots, not degenerate synthetic captures. Only the newest user turn carries image parts: re-serialised history stays text-only, so a follow-up question about a picture must repeat it.
 
 ### NUL bytes and `400 Invalid request parameters`
