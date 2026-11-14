@@ -193,6 +193,15 @@ const STOP = Symbol('stop')
 const SERVER_LOOP_STEPS = 3
 
 /**
+ * `view_media` rounds allowed before the model is told to answer. Two is enough
+ * for a look and a second one at a detail; a model that keeps asking was
+ * previously resent forever and the turn ended on `(empty reply)`.
+ */
+const VIEW_MEDIA_ROUNDS = 2
+const VIEW_MEDIA_ANSWER_REMINDER =
+  'the image is already in the conversation. Do not call view_media again: answer the request now with what you saw.'
+
+/**
  * Asks the judge whether a reply without tool calls may end the turn. Any
  * failure (network, timeout, an unreadable verdict) returns `null`, which keeps
  * the reply: the judge can only add a retry, never block an answer.
@@ -321,6 +330,7 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
     message = read(state.text, state)
     const last = [...(body.messages ?? [])].reverse().find((item) => item.role !== 'system' && item.role !== 'developer')
     let judged = 0
+    let viewRounds = 0
     let formatRetries = 0
     let noToolRetries = 0
 
@@ -332,17 +342,27 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
     // (a made-up "the tools all returned Tool not found", 2026-11-05).
     for (;;) {
       // The model only asked for `view_media`: hand it the result and let it
-      // answer, which is what the web client gets from the agent.
+      // answer, which is what the web client gets from the agent. Bounded, since
+      // the model can ask again; past the bound it is told to answer.
       if (message.viewMedia?.length) {
         const asked = message.viewMedia
+        viewRounds++
         const ids = mapping.mediaIds.length ? mapping.mediaIds : [...(hydration?.media_ids ?? [])]
         const output = ids.length ? `image(s) available as media_id: ${ids.join(', ')}` : 'the image is in the conversation'
         let next = mapping.request
         for (const call of asked) next = withToolResult(next, call.id ?? call.function?.id ?? 'view_media_0', 'view_media', output)
+        if (viewRounds >= VIEW_MEDIA_ROUNDS) next = withRetryReminder(next, VIEW_MEDIA_ANSWER_REMINDER)
         const viewResponse = await upstreamChat(next, INFERENCE_PATH, signal)
         if (!viewResponse.ok) break
         state = yield* collectStream(viewResponse.body, mapping, chunk, { stopServerLoop: true })
         message = read(state.text, state)
+        // At the bound, a repeat means the answer is not coming: keep whatever
+        // text arrived rather than resending forever.
+        if (viewRounds >= VIEW_MEDIA_ROUNDS && message.viewMedia?.length) {
+          message.viewMedia = null
+          message.tool_calls = null
+          message.content ||= ''
+        }
         continue
       }
       let decision = shouldRetry({ message, lastRole: last?.role, available })
