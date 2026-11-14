@@ -200,7 +200,9 @@ curl -s http://127.0.0.1:3456/v1/images/edits \
 
 The edit models are a separate list from the generate ones, and a generate model is a `400`: `firered-image-edit` (default) holds identity and fine detail, `qwen-edit-uncensored` is the anime one and follows composition more loosely. `image` must be a base64 data URL (an https URL is not fetched), and the prompt is required. `size` is accepted and passed as an aspect instruction.
 
-The route uploads the reference to the media endpoint, sends it to the agent as an `input_image` part, and answers the agent's `hydrate_content` with the bytes so it can call its own `edit_image` tool. Parts the instruction does not mention are asked to stay unchanged, and measurements keep the background and framing while the named area changes. One edit takes roughly 8-10 s and 150-300 kB.
+The route uploads the reference to the media endpoint, sends it to the agent as an `input_image` part with the hydration pre-answered, so it calls its own `edit_image` tool on the first turn instead of asking for the bytes first. Parts the instruction does not mention are asked to stay unchanged, and measurements keep the background and framing while the named area changes. One edit takes roughly 6-9 s and 150-300 kB.
+
+Two things the route does to stay usable under Venice's limits: the upload retries a `429` with a growing wait and reuses a recent `media_id` for the same bytes, and the hydration is answered up front so an edit costs one agent turn instead of two.
 
 ---
 

@@ -7,7 +7,7 @@
  * keeps the cookie rotation that Clerk performs while it happens.
  */
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import path from 'node:path'
 import {
   apiBase,
@@ -25,6 +25,13 @@ import { curlFetch, findCurl, isCloudflareBlock } from './curl.mjs'
 
 const INFERENCE_PATH = '/api/inference/chat/agents/ad-hoc'
 const MEDIA_PATH = '/api/v2/agents/media'
+// The media endpoint answers 429 after a couple of uploads in a row; retry with
+// a growing wait and reuse a recent id for bytes already uploaded.
+const MEDIA_UPLOAD_ATTEMPTS = 5
+const MEDIA_BACKOFF_MS = 700
+const mediaCacheTtlMs = 10 * 60 * 1000
+const mediaCache = new Map()
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 // The agent endpoint runs image generation server-side: the reply carries a
 // `veniceai:image_generation` item with the bytes chunked in base64, so no
 // client tool is involved. `paidImagesMode=block` keeps it on the free models.
@@ -289,30 +296,43 @@ export async function recallMedia(mediaId) {
 export async function upstreamMediaUpload(dataUrl) {
   const match = /^data:([^;,]+)[^,]*,(.*)$/s.exec(dataUrl ?? '')
   if (!match) throw new Error('the image is not a data URL')
+  const bytes = Buffer.from(match[2], 'base64')
 
-  for (let attempt = 0; attempt < 2; attempt++) {
+  // The media endpoint rate-limits hard: a few uploads in a row and every
+  // further one answers 429. Back off and retry, and keep the id when the same
+  // bytes were uploaded a moment ago, so a repeat of one image costs no call.
+  const fingerprint = createHash('sha256').update(match[1]).update(bytes).digest('hex')
+  const cached = mediaCache.get(fingerprint)
+  if (cached && Date.now() - cached.at < mediaCacheTtlMs) return cached.mediaId
+
+  let lastError = null
+  for (let attempt = 0; attempt < MEDIA_UPLOAD_ATTEMPTS; attempt++) {
+    if (attempt) await delay(Math.min(MEDIA_BACKOFF_MS * 2 ** (attempt - 1), 8000))
     const access = await mintToken({ force: attempt > 0 })
     const form = new FormData()
-    form.append('file', new Blob([Buffer.from(match[2], 'base64')], { type: match[1] }), 'image')
+    form.append('file', new Blob([bytes], { type: match[1] }), 'image')
     const response = await veneziaFetch(apiBase + MEDIA_PATH, {
       method: 'POST',
       headers: { authorization: `Bearer ${access}` },
       body: form,
     })
-    if (response.status === 401 && attempt === 0) {
+    if (response.status === 401 && attempt < MEDIA_UPLOAD_ATTEMPTS - 1) {
       await response.body?.cancel()
       continue
     }
     if (!response.ok) {
       const text = await response.text().catch(() => '')
-      throw new Error(`HTTP ${response.status}: ${text.slice(0, 200)}`)
+      lastError = new Error(`HTTP ${response.status}: ${text.slice(0, 200)}`)
+      if (response.status === 429 || response.status >= 500) continue
+      throw lastError
     }
     const payload = await response.json()
     if (!payload?.mediaId) throw new Error('the media endpoint returned no mediaId')
-    await rememberMedia(payload.mediaId, match[1], Buffer.from(match[2], 'base64'))
+    await rememberMedia(payload.mediaId, match[1], bytes)
+    mediaCache.set(fingerprint, { mediaId: payload.mediaId, at: Date.now() })
     return payload.mediaId
   }
-  throw new Error('the media endpoint kept answering 401')
+  throw lastError ?? new Error('the media endpoint kept failing')
 }
 
 /** Small health probe used by `doctor` and `/health`. */

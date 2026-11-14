@@ -565,22 +565,46 @@ async function handleEdits(req, res) {
     const reference = await upstreamMediaUpload(dataUrl)
     log(`   ~ reference ${reference}`)
     const files = [{ field: `media.${reference}`, mimeType, data: bytes }]
-    let upstream = await upstreamImage(prompt, abort.signal, { reference })
+    // One turn: the hydration is pre-answered so the agent does not have to ask
+    // for it, which saves a whole round trip (and the ~25k tokens it costs).
+    const messages = [
+      {
+        id: randomUUID(),
+        type: 'message',
+        status: 'completed',
+        role: 'user',
+        content: [
+          { type: 'input_image', media_id: reference, detail: 'auto' },
+          { type: 'output_text', text: prompt, annotations: [] },
+        ],
+      },
+      {
+        id: randomUUID(),
+        type: 'function_call',
+        call_id: 'hydrate_content_0',
+        name: 'hydrate_content',
+        status: 'completed',
+        arguments: JSON.stringify({ media_ids: [reference], current_iteration: 1 }),
+      },
+      {
+        type: 'function_call_output',
+        call_id: 'hydrate_content_0',
+        output: JSON.stringify({ items: { [reference]: { type: 'image', mime_type: mimeType } } }),
+      },
+    ]
+    let upstream = await upstreamChat({ input: { messages }, clientTools: [] }, AGENT_IMAGE_PATH, abort.signal, files)
     if (!upstream.ok) {
       const text = await upstream.text().catch(() => '')
       return openaiError(res, upstream.status, `${apiBase} responded HTTP ${upstream.status}: ${text.slice(0, 300)}`)
     }
     let image = await collectImage(upstream.body)
 
-    // The agent looks at the reference before editing: answer the hydration once.
+    // The agent still asks for the hydration now and then: answer it once more
+    // with the same shape rather than failing the request.
     if (!image.hasBytes && image.hydration) {
-      log(`  ~ edit: hydrating ${JSON.stringify(image.hydration.media_ids ?? [reference])}`)
+      log(`  ~ edit: hydrating again ${JSON.stringify(image.hydration.media_ids ?? [reference])}`)
       const items = { [reference]: { type: 'image', mime_type: mimeType } }
-      const next = hydratedImageBody(
-        { input: { messages: [{ id: randomUUID(), type: 'message', status: 'completed', role: 'user', content: [{ type: 'input_image', media_id: reference, detail: 'auto' }, { type: 'output_text', text: prompt, annotations: [] }] }] } },
-        image.hydration,
-        items,
-      )
+      const next = hydratedImageBody({ input: { messages } }, image.hydration, items)
       upstream = await upstreamChat(next, AGENT_IMAGE_PATH, abort.signal, files)
       if (!upstream.ok) {
         const text = await upstream.text().catch(() => '')

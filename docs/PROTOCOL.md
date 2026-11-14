@@ -280,6 +280,10 @@ A data URL in `image_url` is **not** enough: the model reports "there's no media
 
 Measured on a 1024x1024 flat square, with `paidImagesMode=block`: both free models answered 200 with a PNG, the named area changed and the background stayed white (centre `152,222,177` → `187,34,37`, border `254,254,254`).
 
+The hydration does not have to be asked for first: sending the `hydrate_content` `function_call` and its `function_call_output` with `{ items: { <id>: { type: 'image', mime_type } } }` in the *first* turn works, the agent edits straight away and one round trip (~25k tokens, the agent's whole system context) is saved. The proxy does that and only falls back to answering a fresh `hydrate_content` if the agent asks anyway.
+
+`POST /api/v2/agents/media` rate-limits by account: a handful of uploads in a row and every further one is `429 {"error":"Rate limit exceeded"}`, so an upload must be retried with backoff and identical bytes reused from a short-lived id cache.
+
 ## 6. Free-model catalogue
 
 `src/lib/models.mjs` mirrors the web catalogue entries flagged `usesCredits: false`. The web app fetches that list from `GET /api/app/models` and `GET /api/v2/agents/configuration_options` with the same session; both are useful if you want to regenerate the list automatically (the proxy currently ships a static copy so it works offline and with a dead session).
