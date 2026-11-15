@@ -108,8 +108,27 @@ an object, `grep` gives matches over the *conversation*), so a delegated tool
 only fits when the client accepts a server-shaped result. That is true for
 `webfetch` and `grep` in OpenCode: both are read-only lookups.
 
+## Result of the second measurement (naming the server tool)
+
+A delegated tool leaves the prompt, so the model kept calling the emulated
+neighbour: a URL went to `read` instead of `web_scrape`. One line of the system
+prompt now names the server tool. Three runs each, through the proxy:
+
+| tools offered | result |
+| --- | --- |
+| `webfetch` alone | 3/3 the server ran `web_scrape`, the answer carried the title, `finish_reason: stop`, no tool call reached the client |
+| `webfetch` + `read` | the model still called `read` with `{path: "https://example.com"}`, `finish_reason: tool_calls` |
+
+So the line helps when nothing competes, and does not settle the ambiguity with
+`read`. The tool list itself is the stronger signal and the model reads `read` as
+the way to open things.
+
 ## What is left
 
+- Settle `read` against `webfetch`. Options, cheapest first: drop `read` from the
+turn when a URL is in the message; rename the delegated tool in the prompt to
+  something file-shaped is not possible (the server picks by `type`); teach the
+  proxy to answer a `read` whose `path` starts with `http` by delegating it.
 - Watch a mixed turn: one delegated tool plus one emulated one. `emulatedTools`
   stays true there, so `SERVER_LOOP_STEPS` still bounds the server loop.
 - Decide on `calculator` for a bare-expression `bash`: it needs a check of the
