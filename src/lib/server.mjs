@@ -18,6 +18,7 @@ import {
   withImageOutput,
   buildJudgeRequest,
   countTokens,
+  delegatedCallTarget,
   inspectCalls,
   judgeDecision,
   parseJudgeVerdict,
@@ -492,6 +493,30 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
           // "not empty", it does not make the picture.
           const editAsked = asked.some((call) => call.function?.name === 'edit_image')
           if (parsed.tool_calls && (parsed.content ?? '').trim() && !editAsked) parsed.status = 'done'
+        }
+      }
+      // A `read` carrying a URL is answered by Venice instead: the server has
+      // `web_scrape`, and asking the client to read a path it cannot open was
+      // the wrong tool for a fetch (see emulate.mjs `delegatedCallTarget`).
+      if (parsed.tool_calls) {
+        const toServer = parsed.tool_calls.filter((call) => delegatedCallTarget(call, delegateTools))
+        if (toServer.length) {
+          for (const call of toServer) {
+            const server = delegatedCallTarget(call, delegateTools)
+            let args
+            try {
+              args = JSON.parse(call.function.arguments ?? '{}')
+            } catch {
+              args = {}
+            }
+            // the server reads a URL, whatever the client called the argument
+            call.function.arguments = JSON.stringify({ url: args.url ?? args.path })
+            call.function.name = server
+            log(`  ~ ${call.function.name} handed to the server (client asked for a URL)`)
+          }
+          parsed.serverCalls = [...(parsed.serverCalls ?? []), ...toServer]
+          const rest = parsed.tool_calls.filter((call) => !toServer.includes(call))
+          parsed.tool_calls = rest.length ? rest : null
         }
       }
       for (const rename of inspectCalls(parsed, mapping.toolSchemas)) log(`  ~ tool name ${rename}`)

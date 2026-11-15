@@ -123,6 +123,18 @@ So the line helps when nothing competes, and does not settle the ambiguity with
 `read`. The tool list itself is the stronger signal and the model reads `read` as
 the way to open things.
 
+## Result of the third measurement (rewriting the call)
+
+A `read` whose `path` is a URL is turned into a `web_scrape` call by the proxy
+(`delegatedCallTarget`), with the URL moved from `path` to `url`. The client never
+sees the call. Through the proxy, with `read` alone, with `read` + `webfetch`, and
+three runs each: the answer carried the title every time, `finish_reason: stop`,
+no tool call returned to the client. The rewrite is unconditional on the shape of
+the argument, so a `read` of `/tmp/a.txt` stays with the client.
+
+That settles the ambiguity without asking the model: the call is recognised
+whatever name it used.
+
 ## What is left
 
 - Settle `read` against `webfetch`. Options, cheapest first: drop `read` from the

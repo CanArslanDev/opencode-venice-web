@@ -216,6 +216,10 @@ The rounds are bounded at two. Without the bound a model that kept asking was re
 
 `edit_image` is handled the same way and is announced to the model (`SERVER_TOOL_DEFS`) whenever the turn carries an image; without the announcement it looked at the picture and answered that it had no way to edit. After a successful edit, a further `view_media` is dropped and the turn ends, so the bytes reach the client instead of being swallowed by another lookup. Three runs of three answered with the edit confirmed.
 
+`SERVER_TOOLS` (what the proxy intercepts) is derived from `SERVER_TOOL_DEFS` (what the model is told), so renaming a server tool in one place can no longer leave the other behind. A test pins the two lists together.
+
+**An edit result is not a tool call.** The turn used to end on a `view_media` call with `finish_reason: tool_calls`, which put the client in front of a tool it does not have, with empty content. It now ends on `stop` and the reply carries the picture as a markdown image of `GET /v1/media/<media_id>` (`mediaUrl()`), a local route that serves the cached bytes with their own content type. A client without the server tool still gets a renderable image, and one that runs it is not left waiting for a call it cannot resolve. The turn also caches the bytes of every uploaded data URL under the upstream id, which is what a later turn that only carries that id hydrates from.
+
 ### Things that do **not** help (measured)
 
 * Sending `execute`/`search` to the model: OpenCode's Code-Mode wrappers confuse tool naming (`tools.shell` inside `execute` fails with *Unknown tool*), so they are filtered out when real tools exist. `1/4 → 3/4` when removed.

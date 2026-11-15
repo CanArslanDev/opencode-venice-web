@@ -75,4 +75,4 @@ export const judgeTimeoutMs = Number(process.env.VENICE_WEB_JUDGE_TIMEOUT ?? 45_
  * counterpart belong here: `webfetch` -> `web_scrape`, `grep` -> `context_grep`.
  * `VENICE_WEB_DELEGATE=0` turns it off.
  */
-export const delegateTools = process.env.VENICE_WEB_DELEGATE === '0' ? [] : ['webfetch', 'grep']
+export const delegateTools = process.env.VENICE_WEB_DELEGATE === '0' ? [] : ['webfetch', 'grep', 'read']

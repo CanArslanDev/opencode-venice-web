@@ -19,6 +19,7 @@ import {
   RESULT_REMINDER,
   SERVER_TOOL_DEFS,
   buildJudgeRequest,
+  delegatedCallTarget,
   inspectCalls,
   isEmptyAnswer,
   judgeDecision,
@@ -713,6 +714,16 @@ test('delegate only touches the names it lists', () => {
   // `grep` is not offered, so nothing is delegated and webfetch stays emulated
   assert.deepEqual(mapping.request.tools, [])
   assert.deepEqual([...mapping.toolNames], ['webfetch', 'read'])
+})
+
+test('a read carrying a URL is handed to the server as web_scrape', () => {
+  const call = (args) => ({ function: { name: 'read', arguments: JSON.stringify(args) } })
+  assert.equal(delegatedCallTarget(call({ path: 'https://example.com' }), ['webfetch', 'read']), 'web_scrape')
+  assert.equal(delegatedCallTarget(call({ path: 'http://example.com' }), ['webfetch', 'read']), 'web_scrape')
+  assert.equal(delegatedCallTarget(call({ path: '/tmp/a.txt' }), ['webfetch', 'read']), undefined)
+  // not delegated this turn, or not a convertible name
+  assert.equal(delegatedCallTarget(call({ path: 'https://example.com' }), []), undefined)
+  assert.equal(delegatedCallTarget({ function: { name: 'edit', arguments: '{}' } }, ['read']), undefined)
 })
 
 test('without delegate nothing is handed to the server', () => {

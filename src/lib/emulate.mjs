@@ -395,11 +395,34 @@ const SERVER_TOOL_NAMES = new Set(SERVER_TOOL_DEFS.map((tool) => tool.function.n
 export const DELEGATED_TOOLS = new Map([
   ['webfetch', 'web_scrape'],
   ['grep', 'context_grep'],
+  // conditional: only a `read` whose path is a URL (see delegatedCallTarget)
+  ['read', 'web_scrape'],
 ])
 
 /** The server tool that replaces `name`, or `undefined` when there is none. */
 export function delegatedServerTool(name) {
   return DELEGATED_TOOLS.get(name)
+}
+
+/**
+ * A `read` whose `path` is a URL is a fetch, and the server has `web_scrape` for
+ * it. Measured: with `webfetch` also offered the model still reached for `read`
+ * and passed the URL, so the prompt alone does not settle it. Returns the server
+ * tool the call should become, or `undefined`.
+ */
+export function delegatedCallTarget(call, delegate = []) {
+  const name = call?.function?.name
+  if (!name || !delegate.includes(name)) return undefined
+  const server = DELEGATED_TOOLS.get(name)
+  if (!server) return undefined
+  if (name !== 'read') return server
+  let args
+  try {
+    args = JSON.parse(call.function.arguments ?? '{}')
+  } catch {
+    return undefined
+  }
+  return /^https?:\/\//.test(String(args?.path ?? '')) ? server : undefined
 }
 
 export function textOf(content) {

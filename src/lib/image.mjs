@@ -97,6 +97,12 @@ export async function collectImage(body) {
         if (event.type === 'error' || event.type === 'response.failed') {
           throw new Error(event.message ?? event.response?.error?.message ?? 'Venice image generation failed')
         }
+        // The per-image failure carries the only useful reason
+        // (`upstream error (status 422): unprocessable_source_image`); the
+        // `failed` item that follows has none.
+        if (event.type === 'veniceai:image_generation.content_failed') {
+          throw new Error(`image model failed: ${event.error ?? 'unknown error'}`)
+        }
         const item = event.item
         if (item?.type === 'function_call' && item.name === 'hydrate_content') {
           try {
@@ -108,7 +114,10 @@ export async function collectImage(body) {
         if (item?.type === 'veniceai:image_generation') {
           if (item.id) image.mediaId = item.id
           if (item.requests) requests = item.requests
-          if (item.status === 'failed') throw new Error(`image model failed: ${JSON.stringify(item.requests ?? null).slice(0, 300)}`)
+          // `requests` is empty on most failures, so the whole item is quoted:
+          // the reason travels in `error`/`message` there, and a bare `null`
+          // told nothing.
+          if (item.status === 'failed') throw new Error(`image model failed: ${JSON.stringify(item.error ?? item.requests ?? item).slice(0, 400)}`)
         }
         if (item?.type === 'veniceai:output_image' && item.format && !image.mimeType) image.mimeType = `image/${item.format === 'jpg' ? 'jpeg' : item.format}`
         if (typeof event.image_chunk_b64 === 'string') {
