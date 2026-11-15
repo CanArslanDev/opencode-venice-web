@@ -17,6 +17,7 @@ import {
   CONTINUE_REMINDER,
   JUDGE_PROMPT,
   RESULT_REMINDER,
+  SERVER_TOOL_DEFS,
   buildJudgeRequest,
   inspectCalls,
   isEmptyAnswer,
@@ -38,7 +39,7 @@ import {
   toVeniceRequest,
   withRetryReminder,
 } from '../src/lib/emulate.mjs'
-import { SERVER_TOOLS } from '../src/lib/server.mjs'
+import { SERVER_TOOLS, mediaUrl } from '../src/lib/server.mjs'
 import { MODELS } from '../src/lib/models.mjs'
 import * as real from './fixtures/real-replies.mjs'
 
@@ -651,6 +652,81 @@ test('server tool calls riding along with prose: keeps the prose as the answer w
     const kept = parsed.tool_calls.filter((call) => !SERVER_TOOLS.has(call.function?.name))
     if (kept.length !== parsed.tool_calls.length && parsed.tool_calls && (parsed.content ?? '').trim()) parsed.status = 'done'
     assert.equal(shouldRetry({ message: parsed, lastRole: 'user', available: [] }).retry, false)
+})
+
+test('SERVER_TOOLS is derived from the announced definitions', () => {
+  assert.deepEqual([...SERVER_TOOLS].sort(), SERVER_TOOL_DEFS.map((tool) => tool.function.name).sort())
+  for (const name of SERVER_TOOLS) assert.ok(SERVER_TOOL_DEFS.some((tool) => tool.function.name === name))
+})
+
+test('a file part that only carries a media_id becomes a reference, not an [image] placeholder', () => {
+  const mapping = toVeniceRequest({
+    model: Object.keys(MODELS)[0],
+    tools: [tool('read')],
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'esto es lo que me envió' }, { type: 'file', media_id: 'abc' }] }],
+  })
+  const user = mapping.request.messages.find((message) => message.role === 'user')
+  assert.equal(user.content[0].text, 'esto es lo que me envió\n[image: abc]')
+  assert.equal(user.content.length, 1)
+  // the reference is what makes the turn an image turn, so the server tools are offered
+  assert.ok(mapping.toolNames.has('edit_image'))
+  assert.ok(mapping.toolNames.has('view_media'))
+})
+
+test('skipServer drops the client copy of a server tool so it is answered locally', () => {
+  const img = [{ type: 'text', text: 'edita' }, { type: 'image_url', image_url: 'data:image/png;base64,AA==' }]
+  const mapping = toVeniceRequest(
+    { model: Object.keys(MODELS)[0], tools: [tool('read'), tool('view_media')], messages: [{ role: 'user', content: img }] },
+    { skipServer: true },
+  )
+  assert.deepEqual([...mapping.toolNames], ['read', 'view_media', 'edit_image'])
+  // the definition announced is the proxy's own, exactly once
+  const instructions = mapping.request.systemPrompt.instructions
+  assert.equal((instructions.match(/"name":"view_media"/g) ?? []).length, 1)
+  assert.match(instructions, /Look at an image already attached/)
+})
+
+test('without skipServer a client tool keeps its name and its definition', () => {
+  const mapping = toVeniceRequest({ model: Object.keys(MODELS)[0], tools: [tool('view_media')], messages: [{ role: 'user', content: 'hola' }] })
+  assert.deepEqual([...mapping.toolNames], ['view_media'])
+  assert.equal(mapping.skipServer, false)
+})
+
+test('delegate hands a convertible tool to Venice as its own server tool', () => {
+  const mapping = toVeniceRequest(
+    { model: Object.keys(MODELS)[0], tools: [tool('webfetch'), tool('grep'), tool('read')], messages: [{ role: 'user', content: 'hola' }] },
+    { delegate: ['webfetch', 'grep'] },
+  )
+  // the two names travel as server tool types, not in the prompt
+  assert.deepEqual(mapping.request.tools, [{ type: 'web_scrape' }, { type: 'context_grep' }])
+  assert.deepEqual([...mapping.toolNames], ['read'])
+  const instructions = mapping.request.systemPrompt.instructions
+  assert.doesNotMatch(instructions, /"name":"webfetch"/)
+  assert.match(instructions, /"name":"read"/)
+})
+
+test('delegate only touches the names it lists', () => {
+  const mapping = toVeniceRequest(
+    { model: Object.keys(MODELS)[0], tools: [tool('webfetch'), tool('read')], messages: [{ role: 'user', content: 'hola' }] },
+    { delegate: ['grep'] },
+  )
+  // `grep` is not offered, so nothing is delegated and webfetch stays emulated
+  assert.deepEqual(mapping.request.tools, [])
+  assert.deepEqual([...mapping.toolNames], ['webfetch', 'read'])
+})
+
+test('without delegate nothing is handed to the server', () => {
+  const mapping = toVeniceRequest({ model: Object.keys(MODELS)[0], tools: [tool('webfetch')], messages: [{ role: 'user', content: 'hola' }] })
+  assert.deepEqual(mapping.request.tools, [])
+  assert.deepEqual([...mapping.toolNames], ['webfetch'])
+})
+
+test('an edit result is handed over as a media url, not as a view_media call', () => {
+  assert.equal(mediaUrl('ven_abc'), '/v1/media/ven_abc')
+  assert.equal(mediaUrl('a/b c'), '/v1/media/a%2Fb%20c')
+  // a client without the server tool still gets a renderable markdown image
+  const body = `Listo\n\n![imagen editada](${mediaUrl('ven_abc')})`
+  assert.match(body, /!\[imagen editada\]\(\/v1\/media\/ven_abc\)/)
 })
 
 test('shouldRetry: a lone server call is not an empty reply', () => {

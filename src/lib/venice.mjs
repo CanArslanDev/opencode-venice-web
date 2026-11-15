@@ -225,8 +225,9 @@ export async function upstreamChat(body, route = INFERENCE_PATH, signal, files =
     const headers = {
       authorization: `Bearer ${access}`,
       'content-type': 'application/json',
-      // no `accept: text/event-stream`: Cloudflare blocks the route with it, and
-      // the backend streams SSE without it anyway
+      // The browser sends this; the backend streams SSE without it too, and the
+      // 2026-11-15 probe was ambiguous, so it stays unless it starts failing.
+      accept: 'text/event-stream',
       'x-venice-middleface-version': middlefaceVersion,
       'x-venice-request-timestamp-ms': String(Date.now()),
     }

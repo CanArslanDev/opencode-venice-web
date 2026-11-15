@@ -32,7 +32,7 @@ export const apiBase = 'https://outerface.venice.ai'
 export const clerkVersion = process.env.VENICE_WEB_CLERK_VERSION ?? '?__clerk_api_version=2026-05-12&_clerk_js_version=6.39.0'
 
 /** Version header the web client sends to the inference backend. */
-export const middlefaceVersion = process.env.VENICE_WEB_MIDDLEFACE ?? '0.1.1128'
+export const middlefaceVersion = process.env.VENICE_WEB_MIDDLEFACE ?? '0.1.1249'
 
 /** Hard cap for one upstream generation. */
 export const requestTimeoutMs = Number(process.env.VENICE_WEB_TIMEOUT ?? 15 * 60 * 1000)
@@ -68,3 +68,11 @@ export const transport = process.env.VENICE_WEB_TRANSPORT ?? 'auto'
 export const judgeEnabled = process.env.VENICE_WEB_JUDGE !== '0'
 export const judgeModel = process.env.VENICE_WEB_JUDGE_MODEL ?? 'qwen3-5-35b-a3b'
 export const judgeTimeoutMs = Number(process.env.VENICE_WEB_JUDGE_TIMEOUT ?? 45_000)
+
+/**
+ * Tools that are handed to Venice as its own server tools instead of being
+ * emulated (docs/ADAPTING.md). Only the names with a measured server
+ * counterpart belong here: `webfetch` -> `web_scrape`, `grep` -> `context_grep`.
+ * `VENICE_WEB_DELEGATE=0` turns it off.
+ */
+export const delegateTools = process.env.VENICE_WEB_DELEGATE === '0' ? [] : ['webfetch', 'grep']

@@ -10,8 +10,10 @@
  */
 import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
-import { apiBase, debug, dumpFile, host, judgeEnabled, judgeModel, judgeTimeoutMs, port, providerID } from './config.mjs'
+import { Readable } from 'node:stream'
+import { apiBase, debug, delegateTools, dumpFile, host, judgeEnabled, judgeModel, judgeTimeoutMs, port, providerID } from './config.mjs'
 import {
+  SERVER_TOOL_DEFS,
   applyFallback,
   withImageOutput,
   buildJudgeRequest,
@@ -102,7 +104,11 @@ export async function* collectStream(upstreamBody, mapping, chunk, { stopServerL
 
   const apply = (event) => {
     if (event.type === 'error' || event.type === 'response.failed') {
-      throw new Error(event.message ?? event.response?.error?.message ?? 'Venice generation failed')
+      // The reason rides inside the event and was being dropped: a bare
+      // "Stream error" left no way to tell a rejected upload from a real failure.
+      const motivo = event.message ?? event.error?.message ?? event.response?.error?.message
+      const detalle = motivo ?? JSON.stringify(event).slice(0, 300)
+      throw new Error(detalle ? `Venice generation failed: ${detalle}` : 'Venice generation failed')
     }
     if (event.type === 'response.output_item.added' && event.item?.type) {
       itemTypes.set(event.output_index, event.item.type)
@@ -193,8 +199,20 @@ const STOP = Symbol('stop')
  */
 const SERVER_LOOP_STEPS = 3
 
-/** Venice agent tools the proxy runs itself instead of forwarding to the client. */
-export const SERVER_TOOLS = new Set(['view_media', 'edit_image'])
+/**
+ * Venice agent tools the proxy runs itself instead of forwarding to the client.
+ *
+ * Derived from `SERVER_TOOL_DEFS` so the filter and the announcement cannot
+ * drift apart: a name renamed in one place used to leave the other behind.
+ */
+export const SERVER_TOOLS = new Set(SERVER_TOOL_DEFS.map((tool) => tool.function.name))
+
+/**
+ * URL the bytes of a media id are served from (see `handleMedia`). Relative on
+ * purpose: the client already knows the base it called, and an absolute one
+ * would pin the port of this process.
+ */
+export const mediaUrl = (mediaId) => `/v1/media/${encodeURIComponent(mediaId)}`
 
 /**
  * Runs one Venice server-tool call. Only `edit_image` does real work: the
@@ -272,8 +290,28 @@ async function runServerTool(call, ids, signal) {
  * previously resent forever and the turn ended on `(empty reply)`.
  */
 const VIEW_MEDIA_ROUNDS = 2
+
+/**
+ * Ids of a `hydrate_content` call. A real event carries `media_ids` as a JSON
+ * string inside its arguments; a forced hydration is built by hand, so both
+ * forms are read here instead of assuming one.
+ */
+function idsDeHidratacion(valor) {
+  if (Array.isArray(valor)) return valor
+  if (typeof valor !== 'string' || !valor.trim()) return []
+  try {
+    const leido = JSON.parse(valor)
+    return Array.isArray(leido) ? leido : []
+  } catch {
+    return []
+  }
+}
+
 const VIEW_MEDIA_ANSWER_REMINDER =
   'the image is already in the conversation. Do not call view_media again: answer the request now with what you saw.'
+/** Shown when the turn asked for an edit and the model keeps looking instead. */
+const EDIT_ANSWER_REMINDER =
+  'the image is already in the conversation and you have seen it. Do not call view_media again: call edit_image now with the change the user asked for.'
 
 /**
  * Asks the judge whether a reply without tool calls may end the turn. Any
@@ -339,10 +377,29 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
   // client answers it with `{ items: { <media_id>: { type: 'image', mime_type } } }`
   // and sends the bytes again in a multipart field named `media.<media_id>`.
   // Without that the model keeps asking for `view_media`.
-  let hydration = null
-  for (let round = 0; state.hydration && round < 2; round++) {
-    hydration = state.hydration
-    const ids = hydration.media_ids?.length ? hydration.media_ids : mapping.mediaIds
+  // A turn that carries an image must be hydrated before its text means
+  // anything. The model sometimes answers "no veo la imagen" without asking
+  // for `hydrate_content` first (measured: 5 of 8 identical vision turns), and
+  // that text was delivered as the answer. When there is something to upload
+  // and nothing was hydrated, the turn is hydrated anyway.
+  // `media_ids` arrives already stringified in the arguments, so a forced
+  // hydration must carry it the same way or the upstream parse fails with
+  // `invalid type: string ..., expected a sequence` (HTTP 500).
+  let hydration = state.hydration
+  let soloMirada = false
+  let filesDeHidratacion = []
+  const idsDeTurno = mapping.mediaIds.length ? mapping.mediaIds : []
+  if (!hydration && idsDeTurno.length) {
+    hydration = { media_ids: idsDeTurno, forzada: true }
+    // The step was answered blind: "no veo la imagen", a guess, or a bare
+    // lookup. Its text is dropped so the hydrated step's answer is the turn's.
+    state.text = ''
+    log(`  ~ image turn answered without hydration: hydrating anyway`)
+  }
+  for (let round = 0; hydration && round < 2; round++) {
+    state.hydration = hydration
+    const pedidas = idsDeHidratacion(hydration.media_ids)
+    const ids = pedidas.length ? pedidas : mapping.mediaIds
     const files = mediaFiles(ids, mapping.images, mapping.mediaIds)
     // An id the client uploaded elsewhere arrives without bytes: take them from
     // the local cache so the hydration can still be answered.
@@ -352,23 +409,44 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
       if (cached) files.push({ field: `media.${id}`, mimeType: cached.mimeType, data: cached.data })
     }
     if (!files.length) {
+      // The client keeps an attachment by id and sends the bytes on the next
+      // turn, so the first one cannot be hydrated. `hydrate_content` asks for an
+      // id the model never saw and answers about its absence; `[image: <id>]` is
+      // what it actually has. Past the hydration the reference is noted as
+      // "already in the conversation" and the model gets on with the turn.
       warn(`  ~ hydration for ${JSON.stringify(ids)} has no bytes (id not uploaded here)`)
+      state.text = state.text ? `${state.text}\n\n[image: ${ids.join(', ')}]` : `[image: ${ids.join(', ')}]`
       break
     }
-    const next = hydrationRequest(mapping.request, hydration, files)
-    log(`  ~ image turn: hydrating ${JSON.stringify(ids)}`)
-    const hydrated = await upstreamChat(next, INFERENCE_PATH, signal, files)
+    filesDeHidratacion = files
+    const next = hydrationRequest(mapping.request, hydration, files, { forzada: hydration.forzada })
+    log(`  ~ image turn: hydrating ${JSON.stringify(ids)} forzada=${!!hydration.forzada}`)
+    // `handleEdits` proves the agent endpoint accepts this exact shape; the
+    // chat endpoint answers the forced hydration with a bare `stream_error`.
+    const ruta = hydration.forzada ? AGENT_IMAGE_PATH : INFERENCE_PATH
+    const hydrated = await upstreamChat(next, ruta, signal, files)
     if (!hydrated.ok) {
-      warn(`  ~ hydration failed: HTTP ${hydrated.status}`)
+      const cuerpoError = await hydrated.text().catch(() => '')
+      warn(`  ~ hydration failed: HTTP ${hydrated.status}: ${cuerpoError.slice(0, 200)}`)
       break
     }
     state = yield* collectStream(hydrated.body, mapping, chunk, { stopServerLoop: mapping.emulatedTools })
+    log(`  ~ hydrated step: text=${JSON.stringify(state.text.slice(0, 160))} hydration=${state.hydration ? 'si' : 'no'} terminal=${state.terminal}`)
+    // A step that only asks to look again is not an answer: it used to leave the
+    // turn on `(empty reply)`. It is not resent here (the bytes were just handed
+    // over, another hydration would loop); the answer reminder goes below.
+    if (soloPideMirar(state.text)) {
+      log('  ~ hydrated step only asked to look again')
+      soloMirada = true
+      break
+    }
   }
   if (hydration) {
     log(`  ~ hydrated image ${JSON.stringify(hydration.media_ids ?? [])}${state.text ? '' : ' (no answer)'}`)
   }
 
   if (mapping.emulatedTools) {
+    log(`  ~ depuracion: emulatedTools=${mapping.emulatedTools} hydration=${hydration ? 'si' : 'no'} texto=${JSON.stringify((state.text || '').slice(0, 80))}`)
     const available = [...mapping.toolNames]
     let attempt = 0
     const read = (text, collected) => {
@@ -389,8 +467,12 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
       // client's: the model calls them on image turns and OpenCode rejects both
       // ("No tool named view_media"/"edit_image"). They are answered locally
       // instead of being handed to the client.
+      // `hydrate_content` is the agent's own call too: the model sometimes
+      // repeats it on the hydration step, and left as a client call it reached
+      // OpenCode as an unknown tool and the turn closed blank.
       if (parsed.tool_calls) {
-        const kept = parsed.tool_calls.filter((call) => !SERVER_TOOLS.has(call.function?.name))
+        const propias = (call) => SERVER_TOOLS.has(call.function?.name) || call.function?.name === 'hydrate_content'
+        const kept = parsed.tool_calls.filter((call) => !propias(call))
         if (kept.length !== parsed.tool_calls.length) {
           const asked = parsed.tool_calls.filter((call) => SERVER_TOOLS.has(call.function?.name))
           log(`  ~ ${asked.map((call) => call.function.name).join(', ')} answered locally (${asked.length} call(s))`)
@@ -406,16 +488,27 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
           // retried as an empty reply and the retry, with no prose, replaced a
           // description that had already been written. The prose is the answer;
           // keep it and let the lookup ride along.
-          if (parsed.tool_calls && (parsed.content ?? '').trim()) parsed.status = 'done'
+          // An edit asked here must still run: prose only makes the turn
+          // "not empty", it does not make the picture.
+          const editAsked = asked.some((call) => call.function?.name === 'edit_image')
+          if (parsed.tool_calls && (parsed.content ?? '').trim() && !editAsked) parsed.status = 'done'
         }
       }
       for (const rename of inspectCalls(parsed, mapping.toolSchemas)) log(`  ~ tool name ${rename}`)
       return parsed
     }
     message = read(state.text, state)
+    log(`  ~ recien leido: serverCalls=${JSON.stringify((message.serverCalls ?? []).map((c) => c.function?.name))} toolCalls=${JSON.stringify((message.tool_calls ?? []).map((c) => c.function?.name))} status=${message.status}`)
     const last = [...(body.messages ?? [])].reverse().find((item) => item.role !== 'system' && item.role !== 'developer')
     let judged = 0
     let viewRounds = 0
+    // The turn itself asks for an edit ("cambia el fondo", "ponle..."): when it
+    // does, a lookup is only a step towards it. Measured: on those turns the
+    // model sometimes answers `view_media` five times in a row, the round budget
+    // ran out and the turn closed as `(empty reply)` with nothing edited.
+    const wantsEdit = /\b(edita|edit|editar|cambia|cambiar|modifica|modificar|ponle|añade|anade|quita|reemplaza|sustituye|transforma|retoca|replace|change|modify|add|remove|remove|turn (it|the image) into)\b/i.test(
+      typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content ?? ''),
+    )
 
     let formatRetries = 0
     let noToolRetries = 0
@@ -430,8 +523,14 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
       // The model only asked for a Venice server tool: handle it and hand the
       // result back, which is what the web client gets from the agent. Bounded,
       // since the model can ask again; past the bound it is told to answer.
+      log(`  ~ estado: serverCalls=${JSON.stringify((message.serverCalls ?? []).map((c) => c.function?.name))} toolCalls=${JSON.stringify((message.tool_calls ?? []).map((c) => c.function?.name))} status=${message.status} contenido=${JSON.stringify((message.content ?? '').slice(0, 40))}`)
       if (message.serverCalls?.length) {
         const asked = message.serverCalls
+        // An edit asked in this envelope is the answer in the making: a `continue`
+        // status with no prose must not be read as an empty reply and retried
+        // before the call runs (measured: the retry asked to look again and the
+        // edit was lost).
+        if (asked.some((call) => call.function?.name === 'edit_image')) message.status = 'continue'
         // Client calls still pending on this turn: they are handed to the client
         // after the server calls have run, so they are kept across the resend.
         const pendingClient = (message.tool_calls ?? []).filter((call) => !SERVER_TOOLS.has(call.function?.name))
@@ -439,18 +538,28 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
         // The budget is calls, not turns: the model often looks again after an
         // edit, and counting only lookups still ran out before it wrote anything.
         // A repeat of the same call must also not restart the count.
+        // Past the bound the turn is resent with `tools: []`. That only means
+        // "no tools" when tools were emulated: without them the request goes to
+        // Venice as is and its own agent tools stay on, the model asks again and
+        // the turn closed as `(empty reply)`.
+        const toolsBound = mapping.emulatedTools
         viewRounds++
         const limit = asksEdit ? VIEW_MEDIA_ROUNDS + 2 : VIEW_MEDIA_ROUNDS + (edited ? 3 : 0)
         const ids = mapping.mediaIds.length ? mapping.mediaIds : [...(hydration?.media_ids ?? [])]
         let next = mapping.request
         lastRequest = next
-        for (const call of asked) {
+        // The edit goes first when both kinds ride in the same envelope: a lookup
+        // before it adds nothing (the model already has the image) and an edit
+        // left for later was the one lost to the empty-reply path.
+        const ordered = [...asked].sort((a, b) => Number(b.function?.name === 'edit_image') - Number(a.function?.name === 'edit_image'))
+        for (const call of ordered) {
           const name = call.function?.name
           const callId = call.id ?? call.function?.id ?? `${name}_0`
           let output
           if (name === 'view_media') {
             output = ids.length ? `image(s) available as media_id: ${ids.join(', ')}` : 'the image is in the conversation'
           } else {
+            log(`  ~ edit_image args ${String(call.function?.arguments ?? '').slice(0, 200)} • ids ${JSON.stringify(ids)}`)
             const result = await runServerTool(call, ids, signal)
             output = result.output
             log(`  ~ edit_image -> ${String(output).slice(0, 120)}`)
@@ -464,26 +573,78 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
           }
           next = withToolResult(next, callId, name, output)
         }
+        // The edit is done and its bytes are cached: the turn is finished, so it
+        // leaves here instead of looping again. A second pass resent the turn,
+        // the model answered with another edit lookup and the retry path closed
+        // the turn as `(empty reply)`.
+        //
+        // A turn that asked for an edit always runs it, even when a `view_media`
+        // came first in the same envelope: the loop above only executes the list
+        // it was given, so a lost edit left the turn with the lookup's prose and
+        // nothing else.
+        if (edited) {
+          message.tool_calls = null
+          message.serverCalls = null
+          message.status = 'done'
+          // `sawEnvelope` keeps `shouldRetry` from calling this an empty reply:
+          // the prose is optional here, the bytes are the answer.
+          message.sawEnvelope = true
+          message.content ||= 'Listo, la imagen está editada.'
+          log(`  ~ fin de vuelta: edited=${edited.mediaId}`)
+          break
+        }
         // The server calls are done: the client calls that came with them are the
         // turn now, and the resent request carries their results so the model can
         // go on once the client has answered.
+        // They are kept for the rest of the loop: a `view_media` answered after
+        // them used to wipe the list, and the turn closed with "no veo la imagen"
+        // prose and the client's call lost.
         if (pendingClient.length) {
           message.tool_calls = pendingClient
           message.serverCalls = null
+        } else if (message.tool_calls?.length) {
+          message.tool_calls = null
         }
+        // The server side is done with this turn: `shouldRetry` must not read the
+        // leftover `continue` status as a pending step (it retried a lone
+        // `view_media` as an empty reply and dropped the prose).
+        message.serverCallsRan = true
         // The edit already carries its result: its bytes are the answer, so the
         // turn ends here instead of being resent for prose. Resending re-runs the
         // model over the new image, which is where the blank replies came from.
+        // The calls are cleared so nothing downstream treats the turn as pending.
         if (edited) {
+          message.tool_calls = null
+          message.serverCalls = null
+          message.status = 'done'
           message.content ||= 'Listo, la imagen está editada.'
           log(`  ~ fin de vuelta: edited=${edited.mediaId} llamadas=0`)
           break
         }
+        // A lookup is not an answer: the turn would reach the client as a call to
+        // a tool the client does not have, with no text at all. It is resent at
+        // once so the model closes with prose, and the call is not handed on.
+        message.tool_calls = null
+        message.serverCalls = null
         // At the bound ask with no tools at all: the model cannot start another
         // lookup, so the reply has to be the answer.
-        const forceAnswer = viewRounds >= limit
+        const forceAnswer = toolsBound && viewRounds >= limit
+        // A lookup is never the answer, not even when the model wrote "voy a
+        // verla" first: it was left as the whole turn (the image was never
+        // looked at, and an edit asked in the same breath was lost). With prose
+        // it is still resent once, to let the model go on from what it saw.
+        // Past the bound there is nothing left to answer, so the prose stays.
+        if ((message.content ?? '').trim() && forceAnswer) {
+          // The lookup was answered: what is left is the prose, so the turn ends
+          // here and no retry may replace it (a stale `continue` status used to
+          // do exactly that).
+          message.serverCallsRan = true
+          break
+        }
+        // A lookup on an edit turn is not the end either: the reminder asks for
+        // the `edit_image` the user wanted, not for prose about the picture.
         if (forceAnswer) {
-          next = withRetryReminder({ ...next, tools: [] }, VIEW_MEDIA_ANSWER_REMINDER)
+          next = withRetryReminder({ ...next, tools: [] }, wantsEdit ? EDIT_ANSWER_REMINDER : VIEW_MEDIA_ANSWER_REMINDER)
         }
         const viewResponse = await upstreamChat(next, INFERENCE_PATH, signal)
         if (!viewResponse.ok) break
@@ -491,30 +652,42 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
         message = read(state.text, state)
         // Even with no tools the model sometimes emits the call anyway; at the
         // bound it must not be answered again. The pending client calls are kept.
-        if (forceAnswer && message.serverCalls?.length) {
-          message.serverCalls = null
-          message.tool_calls = pendingClient.length ? pendingClient : null
-          message.content ||= ''
+        // An `edit_image` is the exception: the bound is about lookups, and the
+        // edit the turn was asked for must still run. It is put back as the only
+        // pending server call and the loop above executes it.
+        if (message.serverCalls?.length) {
+          const edits = message.serverCalls.filter((call) => call.function?.name === 'edit_image')
+          const looked = message.serverCalls.filter((call) => call.function?.name !== 'edit_image')
+          if (forceAnswer || !edits.length) {
+            message.serverCalls = edits.length ? edits : null
+            message.tool_calls = edits.length ? null : (pendingClient.length ? pendingClient : null)
+            message.content ||= ''
+          }
         }
-        // The edit already ran: its bytes are the answer, so a further lookup
-        // must not swallow the turn. This is the usual ending after edit_image.
-        if (edited && message.serverCalls?.length) {
+        // Whatever the resend said, an edit already has its bytes: they are the
+        // answer, so the turn closes here and no retry may replace it.
+        if (edited) {
           message.serverCalls = null
           message.tool_calls = null
           message.content ||= 'Listo, la imagen está editada.'
+          log(`  ~ fin de vuelta: edited=${edited.mediaId} llamadas=0`)
+          break
         }
-        // The edit already ran and its bytes are cached: whatever prose came
-        // back, the turn has its result, so no retry may replace it with an
-        // empty reply.
-        log(`  ~ fin de vuelta: edited=${edited ? edited.mediaId : "no"} llamadas=${message.serverCalls?.length ?? 0}`)
-        // The edit is the answer: end the turn here, before any retry path.
-        if (edited) break
         continue
       }
       // The edit already ran and its bytes are cached: the turn has its result,
       // so nothing may retry it again.
       if (edited) break
       let decision = shouldRetry({ message, lastRole: last?.role, available })
+      // The hydration step only asked to look again: the bytes are already in the
+      // turn, so it is resent with the answer reminder instead of ending blank.
+      if (soloMirada) {
+        soloMirada = false
+        decision = { retry: true, reason: 'asked to look again after hydrating', reminder: VIEW_MEDIA_ANSWER_REMINDER }
+        // One extra chance for this case: the generic retry budget was spent by
+        // earlier attempts and the turn closed blank with the image on screen.
+        formatRetries = Math.min(formatRetries, 1)
+      }
       if (decision.judge) {
         if (!judgeEnabled || judged >= 2) break
         judged++
@@ -537,13 +710,35 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
       // the edited image and the result, not from the original turn.
       const retryBase = edited ? lastRequest : mapping.request
       try {
-        const retryResponse = await upstreamChat(withRetryReminder(retryBase, decision.reminder), INFERENCE_PATH, signal)
+        // A turn that already carries the image keeps its bytes: the retry is
+        // resent as multipart, otherwise Venice sees a `media_id` with nothing
+        // attached and the model answers "no veo la imagen" again.
+        const archivosReintento = hydration ? filesDeHidratacion : []
+        const retryResponse = await upstreamChat(withRetryReminder(retryBase, decision.reminder), INFERENCE_PATH, signal, archivosReintento)
         if (!retryResponse.ok) break
         // the last allowed retry runs to the end, so the turn always gets an answer
         const retryState = yield* collectStream(retryResponse.body, mapping, chunk, {
           stopServerLoop: formatRetries < 2,
         })
         const retryMessage = read(retryState.text, retryState)
+        // A retry that asks for the edit again is not a better *answer*: the
+        // fields compared here do not count server calls, so the edit was
+        // discarded as "no improvement" and the turn closed blank. An edit asked
+        // on the retry is executed by the loop instead.
+        if (retryMessage.serverCalls?.some((call) => call.function?.name === 'edit_image')) {
+          state = retryState
+          message = retryMessage
+          log('  ~ retry asked for the edit, running it')
+          continue
+        }
+        // A retry that announces another lookup is still not an answer: it is
+        // marked so the loop asks once more instead of keeping the announcement.
+        if (retryMessage.serverCalls?.length) {
+          state = retryState
+          message = retryMessage
+          log('  ~ retry asked to look again, running it')
+          continue
+        }
         if (preferAnswer(retryMessage, message, { replaceAnswer: decision.replaceAnswer })) {
           state = retryState
           message = retryMessage
@@ -558,14 +753,21 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
       }
     }
 
-    // Never forward a blank assistant turn: it is invisible in the client.
-    applyFallback(message, state.text)
+    // Never forward a blank assistant turn: it is invisible in the client. An
+    // edit is the exception: its bytes are the answer, so the `(empty reply)`
+    // marker must not stand in for them.
+    if (!edited) applyFallback(message, state.text)
     // The envelope is scaffolding. A failed parse or prose before the JSON leaves
     // it in the visible text, where it enters the history and gets imitated.
     message.content = stripEnvelope(message.content ?? '')
   }
 
   if (!state.terminal) throw new Error('the Venice stream ended before response.completed')
+
+  // An image turn is answered by `hydrate_content` first: the bytes are handed
+  // back and the model goes on in the same request. The text of that first step
+  // is the hydration call itself, so it is only forwarded once hydration is done
+  // and the client is about to get the final answer.
   for (const buffered of state.chunks) yield buffered
 
   let finish = 'stop'
@@ -582,29 +784,14 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
       })
     } else if (edited) {
       // The edit already ran here and its bytes are cached. The client has no
-      // tool of its own for that, so the result is handed over as a `view_media`
-      // call: OpenCode resolves the media id and renders the image. Without it
-      // the turn ended as text only and the picture never arrived.
-      //
-      // Every tool call ends the turn for an OpenAI client, and a client that
-      // does not know `view_media` sees an unknown tool. The envelope therefore
-      // carries `status: done` and the prose the model wrote for the user, so
-      // whoever runs the call (OpenCode, a plain bot) still has the answer even
-      // if it cannot resolve the id.
-      finish = 'tool_calls'
-      const editedEnvelope = `{"content":${JSON.stringify(message.content || 'Listo, la imagen está editada.')},"status":"done","tool_calls":[{"name":"view_media","arguments":{"media_ids":[${JSON.stringify(edited.mediaId)}]}}]}`
-      log(`  <- tools: view_media(${edited.mediaId}) (edit result)`)
-      yield chunk({
-        content: editedEnvelope,
-        tool_calls: [
-          {
-            index: 0,
-            id: `call_${randomUUID().replaceAll('-', '')}`,
-            type: 'function',
-            function: { name: 'view_media', arguments: JSON.stringify({ media_ids: [edited.mediaId] }) },
-          },
-        ],
-      })
+      // tool of its own for that and `view_media` is a server tool, so the call
+      // is NOT handed over: the picture goes out as a markdown image of the
+      // local media route, which any OpenAI client renders, and the turn keeps
+      // `finish_reason: stop`.
+      const url = mediaUrl(edited.mediaId)
+      const prose = message.content || 'Listo, la imagen está editada.'
+      log(`  <- edited image ${edited.mediaId} as ${url}`)
+      yield chunk({ content: `${prose}\n\n![imagen editada](${url})` })
     } else {
       log(`  <- no tools${message.status ? ` • status ${message.status}` : ''} • text: ${preview(message.content ?? '', 110)}`)
       yield chunk({ content: message.content ?? '' })
@@ -645,11 +832,47 @@ function mediaFiles(ids, images, mediaIds = []) {
  * Venice sends `{ media_ids, pending_tool_calls, signature, current_iteration }`
  * and expects the pending calls back before it continues.
  */
-function hydrationRequest(request, hydration, files) {
+function conMediaIds(messages, files) {
+  // The turn's image parts are replaced by `input_image` + the uploaded id, the
+  // shape the web client sends and `handleEdits` proves the upstream accepts.
+  // The text parts stay in place, in order.
+  const ids = files.map((file) => file.field.slice('media.'.length))
+  let siguiente = 0
+  return messages.map((message) => {
+    if (!Array.isArray(message?.content)) return message
+    // `input_image` goes first, then the text: the order `handleEdits` uses and
+    // the one the upstream accepts on a hydration.
+    const imagenes = []
+    const textos = []
+    for (const part of message.content) {
+      if (!part) continue
+      const esImagen = part.type === 'image_url' || part.type === 'input_image' || part.type === 'image'
+      if (!esImagen) {
+        textos.push(part)
+        continue
+      }
+      const id = ids[siguiente]
+      siguiente++
+      if (id) imagenes.push({ type: 'input_image', media_id: id, detail: part.detail ?? 'auto' })
+    }
+    const content = [...imagenes, ...textos]
+    // The client leaves a bare `[image]` marker in the text for an inline image;
+    // the `input_image` part replaces it.
+    for (const part of content) {
+      if (part?.type === 'output_text' && part.text) part.text = part.text.replace(/\n?\[image\]/g, '')
+    }
+    return { ...message, content }
+  })
+}
+
+function hydrationRequest(request, hydration, files, { forzada = false } = {}) {
   const items = {}
   for (const file of files) items[file.field.slice('media.'.length)] = { type: 'image', mime_type: file.mimeType }
+  // The agent endpoint (`AGENT_IMAGE_PATH`, used for a forced hydration) wraps
+  // the messages in `input`; the chat endpoint carries them at the top level.
+  const base = forzada ? (request.input?.messages ?? request.messages) : request.messages
   const messages = [
-    ...request.messages,
+    ...(forzada ? conMediaIds(base, files) : base),
     {
       id: randomUUID(),
       type: 'function_call',
@@ -657,7 +880,11 @@ function hydrationRequest(request, hydration, files) {
       name: 'hydrate_content',
       status: 'completed',
       arguments: JSON.stringify({
-        media_ids: hydration.media_ids ?? [],
+        // On the agent endpoint the ids go as an array (that is the shape
+        // `handleEdits` sends and the one it accepts); the real chat event has
+        // them already stringified inside its arguments, so they are passed on
+        // untouched there.
+        media_ids: hydration.forzada ? idsDeHidratacion(hydration.media_ids) : hydration.media_ids,
         signature: hydration.signature,
         pending_tool_calls: hydration.pending_tool_calls,
         current_iteration: hydration.current_iteration ?? 1,
@@ -668,7 +895,29 @@ function hydrationRequest(request, hydration, files) {
   for (const call of hydration.pending_tool_calls ?? []) {
     messages.push({ type: 'function_call_output', call_id: call.id, output: 'ok' })
   }
-  return { ...request, messages }
+  // The agent endpoint takes the messages inside `input`; the chat endpoint at
+  // the top level. The forced hydration goes to the agent endpoint.
+  if (!forzada) return { ...request, messages }
+  const { messages: _descartadas, ...resto } = request
+  return { ...resto, input: { ...(request.input ?? {}), messages } }
+}
+
+/**
+ * True when a step's text is nothing but a `view_media` call (no prose): the
+ * model asks to see the picture again instead of answering. Answered steps are
+ * resent with `VIEW_MEDIA_ANSWER_REMINDER`; a hydration step is not, since the
+ * bytes were just handed over and hydrating again would loop.
+ */
+function soloPideMirar(texto) {
+  if (!texto || !texto.trim()) return false
+  // The step may come wrapped in a ```json fence, so it is parsed by the same
+  // reader the rest of the proxy uses instead of a bare JSON.parse.
+  const leido = parseToolReply(texto)
+  if (!leido.tool_calls?.length) return false
+  if ((leido.content ?? '').trim()) return false
+  // `hydrate_content` counts too: the model repeats it after the bytes were
+  // already handed over, and left alone the turn closed blank.
+  return leido.tool_calls.every((call) => ['view_media', 'hydrate_content'].includes(call?.function?.name))
 }
 
 function looksLikeEnvelope(value) {
@@ -752,7 +1001,36 @@ async function handleImages(req, res) {
   return json(res, 200, { created, data })
 }
 
+/**
+ * Reads an edit request body whatever shape the client sent it in: JSON, a plain
+ * form (what `curl -d` sends), or multipart (`curl -F`, `FormData`). The route
+ * used `readJson` alone, so every non-JSON body died in the parser.
+ */
+async function readFormOrJson(req) {
+  const chunks = []
+  for await (const chunk of req) chunks.push(chunk)
+  const raw = Buffer.concat(chunks)
+  if (debug) log(`  ~ cuerpo edicion: ${raw.length} bytes, tipo ${String(req.headers['content-type'] ?? '')}`)
+  const type = String(req.headers['content-type'] ?? '').toLowerCase()
+  if (type.includes('multipart/form-data')) {
+    const form = await new Response(raw, { headers: { 'content-type': req.headers['content-type'] } }).formData()
+    const body = {}
+    for (const [key, value] of form.entries()) body[key] = value
+    return body
+  }
+  if (type.includes('application/x-www-form-urlencoded')) return Object.fromEntries(new URLSearchParams(raw.toString('utf8')))
+  // The stream is already drained above, so `readJson(req)` read zero chunks and
+  // every JSON edit body died as "prompt is required". It is parsed from `raw`.
+  if (!raw.length) return {}
+  return readJson(Readable.from([raw]))
+}
+
 /** Reads the `image` field of an edit request as a data URL. */
+async function fileAsDataUrl(file) {
+  const mimeType = file.type || 'image/png'
+  return `data:${mimeType};base64,${Buffer.from(await file.arrayBuffer()).toString('base64')}`
+}
+
 function readImageField(value) {
   const url = typeof value === 'string' ? value : (value?.url ?? (typeof value?.b64_json === 'string' ? `data:image/png;base64,${value.b64_json}` : null))
   if (!url) throw new Error('image is required, as a data URL (or a { b64_json } object)')
@@ -767,7 +1045,7 @@ function readImageField(value) {
  * `edit_image` tool. Generate models are rejected: only the edit list works here.
  */
 async function handleEdits(req, res) {
-  const body = await readJson(req)
+  const body = await readFormOrJson(req)
   if (!body.prompt || typeof body.prompt !== 'string') return openaiError(res, 400, 'prompt is required', 'invalid_request_error')
   let model
   try {
@@ -777,7 +1055,8 @@ async function handleEdits(req, res) {
   }
   let dataUrl
   try {
-    dataUrl = readImageField(body.image)
+    // A multipart upload arrives as a file part, so it is read as bytes first.
+    dataUrl = readImageField(typeof body.image === 'object' && typeof body.image?.arrayBuffer === 'function' ? await fileAsDataUrl(body.image) : body.image)
   } catch (error) {
     return openaiError(res, 400, error.message, 'invalid_request_error')
   }
@@ -854,22 +1133,69 @@ async function handleEdits(req, res) {
   }
 }
 
+/**
+ * Serves the bytes of a media id. The chat turn hands an edited image over as
+ * this URL instead of a `view_media` call, which the client has no tool for.
+ * Only ids this process cached are served, so the path cannot walk anywhere.
+ */
+async function handleMedia(mediaId, res) {
+  const cached = await recallMedia(mediaId)
+  if (!cached) return openaiError(res, 404, `no media ${mediaId}`, 'not_found')
+  res.writeHead(200, {
+    'content-type': cached.mimeType,
+    'content-length': cached.data.length,
+    'cache-control': 'private, max-age=3600',
+  })
+  res.end(cached.data)
+}
+
+/**
+ * Whether the newest user turn carries an image part (data URL, remote URL or a
+ * bare `media_id`). Only that turn decides it: the model must not be offered the
+ * server tools on turns that merely talk about an image.
+ */
+function carriesImage(body) {
+  const messages = Array.isArray(body.messages) ? body.messages : []
+  const last = [...messages].reverse().find((message) => message?.role === 'user')
+  if (!Array.isArray(last?.content)) return false
+  return last.content.some((part) => {
+    if (!part) return false
+    if (part.type === 'image_url' || part.type === 'input_image' || part.type === 'image') return true
+    if (typeof part.image_url === 'string' ? part.image_url : part.image_url?.url) return true
+    return typeof part.media_id === 'string' && part.media_id.length > 0
+  })
+}
+
 async function handleChat(req, res) {
   const body = await readJson(req)
-  const mapping = toVeniceRequest(body)
-
-  // `edit_image` is a Venice agent tool the proxy runs itself. The model only
-  // reaches for it when the turn carries an image, so it is announced as an
-  // extra available tool instead of being left to guess.
-  if (mapping.mediaIds === undefined) mapping.mediaIds = []
+  // A turn with an image gets `view_media`/`edit_image` announced by the proxy
+  // and answered here, so the client's own copies are left out (see
+  // `skipServer`). They are only known after the request is built.
+  //
+  // The test is a real image part in the newest user turn, not the substring
+  // "image" anywhere in the history: once the agent had written the word, every
+  // later turn counted as an image turn, its own tools were stripped (leaving
+  // only `view_media`/`edit_image`) and the model looped on lookups until the
+  // turn closed as `(empty reply)`.
+  const mapping = toVeniceRequest(body, { skipServer: carriesImage(body), delegate: delegateTools })
 
   // Venice only resolves an image by its own `media_id`, so every inline data
   // URL is uploaded first and the placeholder is replaced with the returned id.
+  // (The hydration turn is answered from the bytes in the request itself; the
+  // cache below covers a later turn that only carries the id.)
+  mapping.mediaIds = []
   if (mapping.uploads.length) {
     try {
-      mapping.mediaIds = []
       for (const upload of mapping.uploads) mapping.mediaIds.push(await upstreamMediaUpload(upload.url))
       applyMediaIds(mapping.request, mapping.mediaIds)
+      // The cache keeps the bytes under the upstream id, so a later turn that
+      // only carries the id can hydrate it again (see `recallMedia`).
+      for (const [index, upload] of mapping.uploads.entries()) {
+        const match = /^data:([^;,]+)[^,]*,(.*)$/s.exec(upload.url ?? '')
+        if (match && mapping.mediaIds[index]) {
+          await rememberMedia(mapping.mediaIds[index], match[1], Buffer.from(match[2], 'base64'))
+        }
+      }
       log(`   ~ uploaded ${mapping.mediaIds.length} image(s)`)
     } catch (error) {
       warn(`   ~ image upload failed: ${error.message}`)
@@ -914,6 +1240,8 @@ async function handleChat(req, res) {
     return openaiError(res, upstream.status, `${apiBase} responded HTTP ${upstream.status}: ${text.slice(0, 400)}`)
   }
 
+  // `handleChat` recibe el cuerpo ya subido: las imagenes viajan como
+  // `media_id` de Venice y sus bytes quedan en la cache para hidratar.
   const chunks = openaiChunks(body, mapping, upstream.body, abort.signal)
 
   if (body.stream === false) {
@@ -986,6 +1314,10 @@ export function createServer() {
 
       if (req.method === 'GET' && (url.pathname === '/v1/models' || url.pathname === '/models')) {
         return json(res, 200, modelList())
+      }
+
+      if (req.method === 'GET' && url.pathname.startsWith('/v1/media/')) {
+        return await handleMedia(decodeURIComponent(url.pathname.slice('/v1/media/'.length)), res)
       }
 
       if (req.method === 'POST' && url.pathname.endsWith('/chat/completions')) {

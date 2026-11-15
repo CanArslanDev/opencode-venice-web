@@ -119,6 +119,15 @@ export function serverLoopMessage() {
 export const invalidCallReminder = (problems, available) =>
   `your last tool call(s) cannot be executed: ${problems.join('; ')}. Send the reply again with complete, valid tool calls. Available tools: ${available.join(', ')}.`
 
+/**
+ * A reply that only announces a lookup: "no veo la imagen, la abro", "déjame
+ * verla". Those are not answers, whatever the status says.
+ */
+const ANUNCIA_MIRADA =
+  /\b(no (veo|tengo|puedo ver)|la (abro|reviso|miro)|déjame (ver|mirar|revisar)|voy a (verla|mirarla|revisarla|abrirla))\b/i
+export const MIRADA_REMINDER =
+  'the image is already in the conversation and you have seen it. Answer the request now with what it says; do not announce another lookup.'
+
 /** Every value the envelope's `status` may take. */
 export const STATUSES = new Set(['continue', 'done', 'ask'])
 
@@ -129,8 +138,21 @@ export function lastToolResult(messages) {
   return textOf(last.content)
 }
 
-/** Empty reply: no tool calls and nothing but whitespace in content. */
+/**
+ * Empty reply: no tool calls and nothing but whitespace in content.
+ *
+ * A pending server call (`view_media`/`edit_image`) is work still to do, not an
+ * empty turn: counting it empty made the retry path answer `(empty reply)` and
+ * drop an edit that was already parsed but not yet run.
+ */
 export function isEmptyAnswer(message) {
+  if (message?.serverCalls?.length) return false
+  // A client call was already handed over after its server calls ran: the
+  // server side is finished with the turn, so `tool_calls` being set is not a
+  // pending step, and `status: continue` is the stale status of the envelope.
+  // Without this a lone `view_media` with prose was retried as if it had no
+  // tool call, and the retry replaced the description.
+  if (message?.serverCallsRan) return !(message?.content ?? '').trim()
   return !message?.tool_calls && !(message?.content ?? '').trim()
 }
 
@@ -145,7 +167,7 @@ export const EMPTY_MARKER = '(empty reply)'
  * the one case structure cannot settle ("finished" and "stopped halfway" look
  * the same), so it is handed to the judge instead (`judge: true`).
  *
- * @param {{ message: {tool_calls: unknown[]|null, content: string, sawEnvelope: boolean, brokenEnvelope?: boolean, status?: string, problems?: string[]}, lastRole?: string, available?: string[] }} input
+ * @param {{ message: {tool_calls: unknown[]|null, content: string, sawEnvelope: boolean, brokenEnvelope?: boolean, serverCalls?: unknown[]|null, serverCallsRan?: boolean, status?: string, problems?: string[]}, lastRole?: string, available?: string[] }} input
  * @returns {{ retry: boolean, reason?: string, reminder?: string, judge?: boolean }}
  */
 export function shouldRetry({ message, lastRole, available = [] }) {
@@ -169,7 +191,13 @@ export function shouldRetry({ message, lastRole, available = [] }) {
     }
   }
   if (message.tool_calls) return { retry: false }
-  if (message.status === 'continue') {
+  // A pending server call is already work: the proxy answers it and resends, so
+  // the envelope's own `continue` status is not a missing tool call here.
+  // Without this a lone `view_media` fell through to the status branch below.
+  if (message.serverCalls?.length) return { retry: false }
+  // Same reason as above: with the server calls already run, the status no
+  // longer describes a pending step.
+  if (message.status === 'continue' && !message.serverCallsRan) {
     return { retry: true, reason: 'status continue without a tool call', reminder: CONTINUE_REMINDER }
   }
   if (lastRole === 'user') {
@@ -177,7 +205,13 @@ export function shouldRetry({ message, lastRole, available = [] }) {
     return { retry: true, reason: 'envelope without tool calls', reminder: RETRY_REMINDER }
   }
   // After a tool result: done, ask, or no status at all. Only a reader of the
-  // conversation can tell a finished answer from a stop halfway.
+  // conversation can tell a finished answer from a stop halfway. The judge is
+  // off on this install, so a reply that announces it is about to look at the
+  // image ("no veo la imagen, la abro") used to end the turn as it was. That
+  // shape is settled by structure instead.
+  if (ANUNCIA_MIRADA.test(message.content ?? '')) {
+    return { retry: true, reason: 'says it is about to look', reminder: MIRADA_REMINDER }
+  }
   return { retry: false, judge: true }
 }
 
@@ -345,12 +379,35 @@ export function normalizeToolName(name, available) {
  */
 const WRAPPER_TOOLS = new Set(['execute', 'search'])
 
+/**
+ * Names of the tools the proxy runs itself. A turn that carries an image has
+ * them announced, and `toVeniceRequest` needs the same list to leave them out
+ * of the client's own tools (see `skipServer`).
+ */
+const SERVER_TOOL_NAMES = new Set(SERVER_TOOL_DEFS.map((tool) => tool.function.name))
+
+/**
+ * Client tools that are handed to Venice as its own server tools instead of
+ * being emulated. Only names with a measured counterpart: `webfetch` is
+ * `web_scrape`, `grep` is `context_grep` (docs/ADAPTING.md). The argument shapes
+ * already match, so no translation is needed - only the name.
+ */
+export const DELEGATED_TOOLS = new Map([
+  ['webfetch', 'web_scrape'],
+  ['grep', 'context_grep'],
+])
+
+/** The server tool that replaces `name`, or `undefined` when there is none. */
+export function delegatedServerTool(name) {
+  return DELEGATED_TOOLS.get(name)
+}
+
 export function textOf(content) {
   if (typeof content === 'string') return content
   if (content == null) return ''
   if (!Array.isArray(content)) return String(content)
   return content
-    .map((part) => (part?.type === 'text' ? (part.text ?? '') : part?.type === 'image_url' ? '[image]' : ''))
+    .map((part) => (part?.type === 'text' || part?.type === 'output_text' ? (part.text ?? '') : part?.type === 'image_url' ? '[image]' : ''))
     .filter(Boolean)
     .join('\n')
 }
@@ -374,15 +431,19 @@ function safeJson(value) {
 /**
  * Builds the upstream request.
  *
- * @returns {{ request: object, toolNames: Set<string>, toolSchemas: Map<string, object>, emulatedTools: boolean, images: string[], imageIds: string[] }}
+ * @returns {{ request: object, toolNames: Set<string>, toolSchemas: Map<string, object>, emulatedTools: boolean, skipServer: boolean, images: string[], imageIds: string[] }}
  */
-export function toVeniceRequest(body) {
+export function toVeniceRequest(body, { skipServer = false, delegate = [] } = {}) {
   if (!MODELS[body.model]) {
     throw new Error(`unknown model: ${body.model}. Known: ${Object.keys(MODELS).join(', ')}`)
   }
   if (!Array.isArray(body.messages) || body.messages.length === 0) throw new Error('messages must not be empty')
 
   let tools = body.tool_choice === 'none' ? [] : (body.tools ?? [])
+  // A client that offers a server tool's name of its own (`view_media` has an
+  // argument shape OpenCode might send) would otherwise have its call answered
+  // locally and never executed. Left out, it is not a client tool this turn.
+  if (skipServer) tools = tools.filter((tool) => !SERVER_TOOL_NAMES.has(tool?.function?.name))
   const direct = tools.filter((tool) => tool?.function?.name && !WRAPPER_TOOLS.has(tool.function.name))
   if (direct.length) tools = direct
 
@@ -390,6 +451,19 @@ export function toVeniceRequest(body) {
   for (const tool of tools) {
     if (tool?.type !== 'function' || !tool.function?.name) throw new Error('only function tools are supported')
     names.add(tool.function.name)
+  }
+  // Hand the convertible ones to Venice as its own server tools and leave them
+  // out of the prompt: the server runs them, so nothing has to be parsed.
+  // Emulated tools stay emulated, hence a per-tool choice and not a switch.
+  const delegated = []
+  if (delegate.length) {
+    tools = tools.filter((tool) => {
+      const server = delegatedServerTool(tool.function.name)
+      if (!server || !delegate.includes(tool.function.name)) return true
+      names.delete(tool.function.name)
+      if (!delegated.includes(server)) delegated.push(server)
+      return false
+    })
   }
   // Venice's own agent tools (view_media, edit_image) run inside the proxy, but
   // the model still has to be told they exist: left out, it looks at the image
@@ -443,26 +517,28 @@ export function toVeniceRequest(body) {
     // Images cannot travel as text: the web endpoint takes them as `input_image`
     // parts next to the text. They are kept only on real user turns (history
     // re-serialised as envelopes is text-only).
+    //
+    // An attachment the client keeps by id is referenced, not copied: the turn
+    // carries `[image: <id>]` in its text and the bytes stay in the client, which
+    // hands them over as a data URL on the very next turn. `image_url` (OpenAI),
+    // `input_image` and `file` (OpenCode v2) are read alike, so a bare file part
+    // with a `media_id` no longer goes in as the literal text `[image]`.
     const parts = [{ type: 'output_text', text: content, annotations: [] }]
     if (message.role === 'user' && Array.isArray(message.content)) {
       for (const part of message.content) {
         const url = part?.image_url?.url ?? (typeof part?.image_url === 'string' ? part.image_url : part?.url)
         const known = typeof part?.media_id === 'string' && part.media_id ? part.media_id : null
-        if ((part?.type === 'image_url' || part?.type === 'input_image' || part?.type === 'image') && (url || known)) {
-          // A `media_id` the client already holds (an upload of its own) is passed
-          // through as is. Otherwise https images keep the url and data URLs are
-          // uploaded by the caller, the placeholder replaced by the returned id.
-          if (!url && known) {
-            parts.push({ type: 'input_image', media_id: known, detail: part.detail ?? 'auto' })
-            continue
-          }
-          const mediaId = url.startsWith('data:') ? `upload-${uploads.length}` : (known ?? randomUUID())
-          parts.push({ type: 'input_image', media_id: mediaId, detail: 'auto', image_url: url })
-          if (url.startsWith('data:')) {
-            images.push(url)
-            imageIds.push(mediaId)
-            uploads.push({ placeholder: mediaId, url })
-          }
+        if (!url && !known) continue
+        if (!url && known) {
+          parts[0].text = `${parts[0].text}${parts[0].text ? '\n' : ''}[image: ${known}]`
+          continue
+        }
+        const mediaId = url.startsWith('data:') ? `upload-${uploads.length}` : (known ?? randomUUID())
+        parts.push({ type: 'input_image', media_id: mediaId, detail: part.detail ?? 'auto', image_url: url })
+        if (url.startsWith('data:')) {
+          images.push(url)
+          imageIds.push(mediaId)
+          uploads.push({ placeholder: mediaId, url })
         }
       }
     }
@@ -491,10 +567,14 @@ export function toVeniceRequest(body) {
 
   // Venice's own agent tools (view_media, edit_image) run inside the proxy, but
   // the model still has to be told they exist: left out, it looks at the image
-  // and then claims it has no way to edit it. `textOf()` renders images as the
-  // literal `[image]`, so the text of the newest user turn is the signal.
+  // and then claims it has no way to edit it. Two signals count: a part with
+  // bytes (`input_image`) and an attachment kept only by id, which lands in the
+  // text as `[image: <id>]` (see above).
+  // Looked up before the format reminder is appended, so the reminder (also a
+  // user message) is not what the signal is read from.
   const lastUser = [...messages].reverse().find((message) => message.role === 'user')
-  const carriesImage = (lastUser?.content ?? []).some((part) => part?.type === 'input_image') || textOf(body.messages.at(-1)?.content).includes('[image]')
+  const carriesImage =
+    (lastUser?.content ?? []).some((part) => part?.type === 'input_image') || /\[image(?:: [^\]]+)?\]/.test(textOf(lastUser?.content))
   if (carriesImage) {
     for (const tool of SERVER_TOOL_DEFS) {
       if (names.has(tool.function.name)) continue
@@ -525,13 +605,20 @@ export function toVeniceRequest(body) {
       modelId: body.model,
       systemPrompt: { instructions: instructions.filter(Boolean).join('\n\n') },
       messages,
-      tools: [],
+      // Venice *server* tools, only the delegated ones: the rest of the list is
+      // the client's and travels in the prompt.
+      tools: delegated.map((type) => ({ type })),
       clientTools: [],
       ...reasoningMode(body),
     },
     toolNames: names,
     toolSchemas: new Map(announced.map((tool) => [tool.function.name, tool.function.parameters ?? {}])),
-    emulatedTools: tools.length > 0,
+    // Announced server tools count too: a turn that carries only an image and no
+    // client tool still has `view_media`/`edit_image` offered, and without them
+    // here the proxy never entered the block that answers a lookup, so the turn
+    // closed with the raw envelope and no text.
+    emulatedTools: announced.length > 0,
+    skipServer,
     images,
     imageIds,
     uploads,
@@ -547,6 +634,15 @@ export function applyMediaIds(request, mediaIds) {
   for (const message of request.messages) {
     if (!Array.isArray(message.content)) continue
     for (const part of message.content) {
+      if (part?.type === 'output_text') {
+        // The `[image: <id>]` reference is written before the upload, so it still
+        // holds the placeholder the client used. Left alone, the model asks
+        // Venice for an id it never issued and the hydration finds no bytes.
+        for (const [placeholder, id] of byPlaceholder) {
+          part.text = part.text.split(`[image: ${placeholder}]`).join(`[image: ${id}]`)
+        }
+        continue
+      }
       if (part?.type !== 'input_image') continue
       const mediaId = byPlaceholder.get(part.media_id)
       if (mediaId) {
@@ -884,9 +980,55 @@ const isValidArgString = (value) => {
   }
 }
 
+/**
+ * Keys the model uses for the answer when it does not use `content` (measured on
+ * image turns: `answer`, `response`, `transcription`). Without them the envelope
+ * parsed but its text was empty and the turn closed as `(empty reply)`.
+ */
+const CLAVES_RESPUESTA = [
+  'content', 'answer', 'respuesta', 'response', 'transcription', 'transcripcion',
+  'text', 'texto', 'message', 'mensaje', 'descripcion', 'resumen', 'summary', 'lectura',
+]
+
+/** The answer of an envelope, whatever key it used. */
+const respuestaDe = (value) => {
+  for (const clave of CLAVES_RESPUESTA) {
+    if (typeof value?.[clave] === 'string') return value[clave]
+  }
+  // Nested variant: { status, contenido: { resumen: "..." } }. A `contenido`
+  // with other keys (`tipo`, `encabezado`...) is dumped as text so the answer
+  // is never blank.
+  if (isPlainObject(value?.contenido)) {
+    for (const clave of CLAVES_RESPUESTA) {
+      if (typeof value.contenido[clave] === 'string') return value.contenido[clave]
+    }
+    const claves = Object.keys(value.contenido).filter((k) => value.contenido[k] != null)
+    if (claves.length) {
+      return claves.map((k) => `${k}: ${typeof value.contenido[k] === 'string' ? value.contenido[k] : JSON.stringify(value.contenido[k])}`).join('\n')
+    }
+  }
+  // A structured answer (`{ transcripcion: { ... } }`, `{ lectura: {...} }`):
+  // dumped as JSON so the turn is never blank.
+  for (const clave of ['transcripcion', 'transcription', 'lectura', 'datos', 'data']) {
+    if (isPlainObject(value?.[clave])) return JSON.stringify(value[clave], null, 1)
+  }
+  // An envelope that only carries metadata (`idioma`, `tipo`, `hora`...): the
+  // same, so it is not read as a blank answer. When `tool_calls` is present it
+  // is left out of the dump: it is not text, and the caller reads it separately.
+  if (isPlainObject(value)) {
+    // `status: answered` alone (nothing else) is the model saying it is done
+    // without writing the answer; the retry path covers it.
+    const claves = Object.keys(value).filter((k) => !['status', 'tool_calls'].includes(k) && value[k] != null)
+    if (claves.length) {
+      return claves.map((k) => `${k}: ${typeof value[k] === 'string' ? value[k] : JSON.stringify(value[k])}`).join('\n')
+    }
+  }
+  return undefined
+}
+
 /** An object shaped like our envelope (as opposed to, say, a bare arguments object). */
 const isEnvelope = (value) =>
-  isPlainObject(value) && (Array.isArray(value.tool_calls) || typeof value.content === 'string')
+  isPlainObject(value) && (Array.isArray(value.tool_calls) || respuestaDe(value) !== undefined)
 
 /**
  * The model sometimes writes a whole envelope *into* the `content` string of
@@ -916,7 +1058,7 @@ const CALL_KEYS = new Set(['name', 'id', 'type', 'arguments', 'function'])
 /** Builds an OpenAI tool call from a parsed envelope entry. */
 function buildCall(call) {
   if (!isPlainObject(call)) return null
-  let name = call.name
+  let name = call.name ?? call.tool
   let args = call.arguments
   // the OpenAI shape, `{"function": {"name", "arguments"}}`, is accepted too
   if (typeof name !== 'string' && isPlainObject(call.function) && typeof call.function.name === 'string') {
@@ -998,22 +1140,26 @@ export function extractEnvelopes(text) {
 
     let calls = null
     if (isEnvelope(parsed)) parsed = unwrapNested(parsed)
-    let piece = typeof parsed?.content === 'string' ? parsed.content.trim() : ''
+    let piece = (respuestaDe(parsed) ?? '').trim()
     const region = slice || text.slice(start)
     const looksLikeEnvelope = parsed !== null || region.includes('"tool_calls"')
 
     if (looksLikeEnvelope && !Array.isArray(parsed?.tool_calls) && !piece) {
       // Broken JSON: salvage the tool calls and the leaked text next to them.
-      const salvaged = salvageCalls(region)
+      // The scan stops at the first `}` it balances, which on a truncated reply
+      // cuts the rest of the calls off, so the salvage reads from the envelope
+      // start to the end of the text instead.
+      const completo = text.slice(start)
+      const salvaged = salvageCalls(completo)
       if (salvaged.length) {
         calls = salvaged
-        piece = cleanLeakedEnvelope(region)
+        piece = cleanLeakedEnvelope(completo)
       }
     }
 
     const isEnvelopeHere =
       looksLikeEnvelope &&
-      (Array.isArray(parsed?.tool_calls) || typeof parsed?.content === 'string' || (calls?.length ?? 0) > 0)
+      (Array.isArray(parsed?.tool_calls) || respuestaDe(parsed) !== undefined || (calls?.length ?? 0) > 0)
 
     if (!isEnvelopeHere) {
       if (region.trimStart().startsWith('{"content"') || /^\{\s*"(?:content|tool_calls|status)"\s*:/.test(region)) {
@@ -1058,7 +1204,13 @@ export function extractEnvelopes(text) {
     if (tool_calls.length) sawEnvelope = true
   }
 
-  return { content: stripToolMarkup(parts.join('\n')), tool_calls, sawEnvelope, brokenEnvelope, status }
+  // The model often wraps the whole envelope in a ```json fence; the fence is
+  // not part of the answer and used to reach the user as a bare "```json".
+  const texto = stripToolMarkup(parts.join('\n'))
+    .replace(/^```[a-zA-Z]*\s*\n?/, '')
+    .replace(/\n?```\s*$/, '')
+    .trim()
+  return { content: texto, tool_calls, sawEnvelope, brokenEnvelope, status }
 }
 
 /**
