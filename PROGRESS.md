@@ -14,7 +14,7 @@
 
 - Escrito `docs/ADAPTING.md`: qué server tools pueden sustituir a tools del cliente (`web_scrape`←`webfetch`, `context_grep`←`grep`, `calculator`←`bash` aritmético), qué no tiene equivalente (`read` local, `write`, `edit`, `glob`, `shell`, `task`, MCP) y dos opciones (delegar por tabla estática / reducir la superficie de tools sirviendo el árbol por HTTP local).
 - Medido que el bucle del servidor ejecuta server tools con argumentos y encadena pasos: `calculator` 1 paso `391`, 2 pasos `391`→`400`, `failed: 0`. `client_function_call` sigue en 0 tras 7 variantes y 3 sintaxis de recordatorio.
-- Delegación por tabla implementada: `VENICE_WEB_DELEGATE` (`0` lo apaga, por defecto `['webfetch','grep']`), `DELEGATED_TOOLS` en `emulate.mjs`, `toVeniceRequest({ delegate })` los saca del prompt y los manda en `tools[]` como tipos de servidor, `server.mjs` pasa `delegateTools`. 3 tests nuevos; `npm test` 111/111. **Sin medir en turno real.**
+- Delegación por tabla implementada: `VENICE_WEB_DELEGATE` (`0` lo apaga, por defecto `['webfetch','grep']`), `DELEGATED_TOOLS` en `emulate.mjs`, `toVeniceRequest({ delegate })` los saca del prompt y los manda en `tools[]` como tipos de servidor, `server.mjs` pasa `delegateTools`. 3 tests nuevos; `npm test` 111/111. **Medido en turno real:** la tool delegada se usa y el turno cierra con la respuesta. Con `webfetch` sola, 3/3 el servidor ejecutó `web_scrape` y no hubo tool call al cliente. Con `webfetch` + `read` el modelo seguía eligiendo `read`, así que el proxy reescribe un `read` con URL a `web_scrape` (`delegatedCallTarget`, `src/lib/server.mjs`) y `read` entra en la lista por defecto: 3/3 con el título y `finish_reason: stop`. Un `read` de ruta local sigue yendo al cliente. 112 tests.
 
 ## Falta
 
