@@ -471,6 +471,14 @@ export function toVeniceRequest(body, { skipServer = false, delegate = [] } = {}
   const extra = []
 
   const instructions = []
+  // A delegated tool is gone from the list, so the model has to be told where it
+  // went: without this it keeps calling the emulated neighbour (a URL went to
+  // `read` instead of `web_scrape`).
+  if (delegated.length) {
+    instructions.push(
+      `Venice runs some tools itself, they are NOT in the list below: use \`web_scrape\` for http(s) URLs instead of \`read\`, and \`context_grep\` to search the conversation instead of \`grep\`.`,
+    )
+  }
   const messages = []
   // data URLs of the images of the newest user turn: Venice answers an image
   // turn with `hydrate_content` and the bytes have to be handed back on the
