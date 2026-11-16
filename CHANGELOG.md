@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Images.** Attach a screenshot in OpenCode and the model sees it, also on every
+  tool step of the task it starts (an OpenCode run read `4719` off a test picture
+  and wrote it to a file, on macOS and Linux). The bytes travel with the request
+  as multipart; nothing is uploaded or stored. The image has to sit in the last
+  user message or the model reaches for Venice's `view_media`, which the client
+  cannot run (0/5 before, 5/5 after). The sync marks the 19 measured models with
+  image input so OpenCode sends pictures to them. Protocol notes: PROTOCOL §2b;
+  the multipart field names come from @crisazas's work in #4.
+
 - **Linux works end to end.** Measured on Ubuntu 24.04 (Brave 157, curl 8.5.0 /
   OpenSSL 3.0.13) next to macOS, with the same account:
   - Sign-in read the cookie with the macOS key derivation (1003 PBKDF2 rounds;

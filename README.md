@@ -16,6 +16,7 @@ OpenCode ──HTTP──> 127.0.0.1:3456  ──HTTPS + your session cookie─�
 - No API key, no credits, no password stored: only the browser's long-lived Clerk `__client` cookie.
 - 20 free web models (DeepSeek, Qwen, GLM, Kimi, Gemma, Aion, TEE-hosted variants).
 - Tool calling works: OpenCode's `read`/`write`/`edit`/`shell`/`glob`/`grep` tools are emulated through a JSON envelope (see [docs/PROTOCOL.md](docs/PROTOCOL.md)).
+- Images work: attach a screenshot in OpenCode and the model sees it, also while it works through tool calls.
 - Zero runtime dependencies. Node 22+ and the system `curl` (preinstalled on macOS and most Linux distributions).
 
 ---
@@ -98,6 +99,8 @@ Only models the web catalogue marks as free (`usesCredits: false`) are exposed -
 | Aion | `aion-labs-aion-3-0`, `aion-labs-aion-3-0-mini` |
 | TEE / E2EE hosted | `e2ee-qwen3-8-27b`, `e2ee-gpt-oss-120b-p`, `e2ee-qwen3-6-35b-a3b`, `e2ee-gemma-4-26b-a4b-uncensored-p`, `e2ee-qwen-2-5-7b-p`, `e2ee-qwen3-vl-30b-a3b-p` |
 
+All of them except `kimi-k2-5` take images: each one read a test picture correctly through this proxy, so the sync marks them with image input and OpenCode lets you attach pictures. Rerun `venice-web-sync` after updating if OpenCode says a model does not support images.
+
 The catalogue lives in [`src/lib/models.mjs`](src/lib/models.mjs); edit it and rerun `venice-web-sync` if Venice adds models. If the web catalogue ships a model you want, run `GET /v1/models` (or `venice-web-doctor`) after adding it to verify it is reachable.
 
 ---
@@ -161,7 +164,8 @@ All environment variables are optional; the defaults are what the installer uses
 - **Tool calls are emulated.** The web endpoint ignores OpenAI `tools`, so the model answers with a JSON envelope that the proxy turns into `tool_calls`. This is reliable in practice (see [docs/PROTOCOL.md](docs/PROTOCOL.md) for the measured technique) but it is a prompt contract, not a native feature: `tool_choice: required` is advisory, and with tools in the request the answer arrives buffered rather than token-by-token (reasoning still streams live).
 - **No sampling controls.** `temperature`, `top_p` and `max_tokens` are not applied by this endpoint.
 - **Unlimited, not infinite.** Venice's fair-use and Cloudflare bot checks apply. A Cloudflare challenge surfaces as HTTP 401 with a "refresh the cookies" message.
-- **Web session, not API route.** Anything that needs the official API surface (embeddings, images, video, `/responses`) still has to use `api.venice.ai` with an API key. Both can coexist in OpenCode - the installer only *adds* a provider.
+- **Images: what is sent.** The images of your latest message go to the model as images, on every step of the work they start. Images from earlier messages stay in the history as `[image]` and are not sent again. Only pictures inside the request (data URLs, which is what OpenCode sends) are used, up to 10 per message; the proxy never downloads an image from a URL.
+- **Web session, not API route.** Anything that needs the official API surface (embeddings, image generation, video, `/responses`) still has to use `api.venice.ai` with an API key. Both can coexist in OpenCode - the installer only *adds* a provider.
 
 ### NUL bytes and `400 Invalid request parameters`
 

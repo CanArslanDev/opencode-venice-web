@@ -198,18 +198,41 @@ async function attestationToken(headers) {
 }
 
 /**
+ * A `FormData` as bytes plus its `multipart/form-data; boundary=…` type. curl
+ * reads the body from stdin, so the multipart encoding is done here, by the
+ * same encoder `fetch()` uses.
+ */
+export async function multipartBody(form) {
+  const request = new Request('http://localhost/', { method: 'POST', body: form })
+  return { body: Buffer.from(await request.arrayBuffer()), contentType: request.headers.get('content-type') }
+}
+
+/**
  * Calls the web inference endpoint, retrying once with a freshly minted token on
  * 401 (a rotated or revoked session).
+ *
+ * `files` (`{ mediaId, mimeType, data }`) turn the request into the multipart
+ * form the web client sends with images: the JSON body in `request` and every
+ * image in its own `media.<media_id>` field (docs/PROTOCOL.md §2b).
  */
-export async function upstreamChat(body, route = INFERENCE_PATH, signal) {
+export async function upstreamChat(body, route = INFERENCE_PATH, signal, files = []) {
   const session = await loadSession()
   const timeout = signal ? AbortSignal.any([signal, AbortSignal.timeout(requestTimeoutMs)]) : AbortSignal.timeout(requestTimeoutMs)
+
+  let payload = JSON.stringify(body)
+  let contentType = 'application/json'
+  if (files.length) {
+    const form = new FormData()
+    form.append('request', payload)
+    for (const file of files) form.append(`media.${file.mediaId}`, new Blob([file.data], { type: file.mimeType }), 'image')
+    ;({ body: payload, contentType } = await multipartBody(form))
+  }
 
   for (let attempt = 0; attempt < 2; attempt++) {
     const access = await mintToken({ force: attempt > 0 })
     const headers = {
       authorization: `Bearer ${access}`,
-      'content-type': 'application/json',
+      'content-type': contentType,
       // no `accept: text/event-stream`: Cloudflare blocks the route with it, and
       // the backend streams SSE without it anyway
       'x-venice-middleface-version': middlefaceVersion,
@@ -222,7 +245,7 @@ export async function upstreamChat(body, route = INFERENCE_PATH, signal) {
     const response = await veneziaFetch(apiBase + route, {
       method: 'POST',
       headers,
-      body: JSON.stringify(body),
+      body: payload,
       signal: timeout,
     })
     if (response.status === 401 && attempt === 0) {

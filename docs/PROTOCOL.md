@@ -88,6 +88,28 @@ Notes:
 * The endpoint ignores `temperature`, `top_p` and `max_tokens`.
 * Requests with `attestationToken` minted are required for `/api/inference/*`; the mint call needs the same headers (sans attestation).
 
+## 2b. Images
+
+Measured 2026-11-16 on the ad-hoc route with a 768x512 test picture (a red circle and the number `4719`).
+
+A user message part `{ "type": "input_image", "media_id": "<id>", "detail": "auto" }` refers to an image. What the web client does: upload the file to `POST /api/v2/agents/media` (multipart `file`, answers `{ mediaId }`), send the turn with the id, and when Venice answers with a `function_call` named `hydrate_content` (`media_ids`, `signature`, `pending_tool_calls`, `current_iteration`), send the turn again as **multipart**: the JSON body in a `request` field and each image in a `media.<media_id>` field, plus the `hydrate_content` call, its `function_call_output` (`{ "items": { "<id>": { "type": "image", "mime_type": … } } }`) and `ok` for every pending call. (Field names and the hydration flow were worked out by @crisazas in #4.)
+
+Measured shortcuts:
+
+| request | result |
+| --- | --- |
+| JSON body, uploaded id | `hydrate_content` with a pending `view_media`; answered once, then "4719, red" |
+| multipart with the bytes, uploaded id, no hydration messages | answer in one round trip |
+| multipart with the bytes, **an id that was never uploaded** | answer in one round trip (2/2) |
+
+So the proxy uploads nothing. Each image of the user's latest message gets an id derived from its bytes, the request goes out as multipart with the bytes in `media.<id>`, and Venice reads them straight from the request: no upload endpoint (which rate-limits with `429`), no id cache, nothing stored on disk. `upstreamChat(…, files)` builds the multipart body with `multipartBody()` (the encoder `fetch()` uses), so it travels through curl like any other body.
+
+Every model in `src/lib/models.mjs` except `kimi-k2-5` (billed now, not measured) answered "4719" and "red", including the ones the catalogue does not flag `supportsMultiModal`. PNG, a 2.5 MB 3000x2000 PNG, and two images in one message (both read) work too.
+
+**The image has to be in the last user message.** Venice shows the model an image directly only when it sits in the last user message; anywhere earlier the model calls Venice's own `view_media` to look at it (2/2, both answered after that server call). With emulated tools that call is written into the envelope, where nothing runs it: 5 of 5 image questions ended in an invalid `view_media` call and then an unrelated `bash`. The format and retry reminders are user messages that come after the user's own, so `withImagesLast()` moves the image parts onto the last user message with a line saying whose they are. After that: 5/5 answered with tools on, 0 `view_media` calls, and in a tool loop the model still sees the picture (`write code.txt "4719"` after a tool result), on macOS and Linux, through the proxy and through real `opencode run -f`.
+
+Only the latest user message's images are sent. In a tool loop that is the message that started the work, so the picture stays visible on every step; after the user's next message it is history and stays `[image]`.
+
 ## 3. Inference response
 
 Newline-delimited SSE (`\n\n` separated `event:`/`data:` frames, `: keepalive` comments, `data: [DONE]` terminator) with `content-type: text/event-stream`. Event names seen:

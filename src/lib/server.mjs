@@ -281,7 +281,8 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
 
       log(`  ~ ${decision.reason}, retrying...`)
       try {
-        const retryResponse = await upstreamChat(withRetryReminder(mapping.request, decision.reminder), INFERENCE_PATH, signal)
+        // the retry resends the same image parts, so their bytes go along again
+        const retryResponse = await upstreamChat(withRetryReminder(mapping.request, decision.reminder), INFERENCE_PATH, signal, mapping.images)
         if (!retryResponse.ok) break
         // the last allowed retry runs to the end, so the turn always gets an answer
         const retryState = yield* collectStream(retryResponse.body, mapping, chunk, {
@@ -349,7 +350,8 @@ async function handleChat(req, res) {
 
   if (dumpFile) {
     try {
-      writeFileSync(dumpFile, JSON.stringify({ body, mapping }, null, 1))
+      const images = mapping.images.map(({ mediaId, mimeType, data }) => ({ mediaId, mimeType, bytes: data.length }))
+      writeFileSync(dumpFile, JSON.stringify({ body, mapping: { ...mapping, images } }, null, 1))
     } catch {
       /* ignore */
     }
@@ -357,7 +359,7 @@ async function handleChat(req, res) {
 
   const names = [...mapping.toolNames]
   log(
-    `-> ${body.model} • ${body.messages?.length ?? 0} msgs • ${names.length} tools${names.length ? ` [${names.join(',')}]` : ''} • stream=${body.stream !== false}`,
+    `-> ${body.model} • ${body.messages?.length ?? 0} msgs • ${names.length} tools${names.length ? ` [${names.join(',')}]` : ''}${mapping.images.length ? ` • ${mapping.images.length} image(s)` : ''} • stream=${body.stream !== false}`,
   )
 
   const abort = new AbortController()
@@ -365,7 +367,7 @@ async function handleChat(req, res) {
 
   let upstream
   try {
-    upstream = await upstreamChat(mapping.request, INFERENCE_PATH, abort.signal)
+    upstream = await upstreamChat(mapping.request, INFERENCE_PATH, abort.signal, mapping.images)
   } catch (error) {
     return openaiError(res, error instanceof SignInError || error.signIn ? 401 : 502, error.message)
   }

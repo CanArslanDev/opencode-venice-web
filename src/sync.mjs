@@ -45,6 +45,8 @@ if (args.includes('--remove')) {
           name: model.name,
           tool_call: true,
           reasoning: model.reasoning,
+          // without image input OpenCode refuses to send an attached picture
+          ...(model.vision ? { attachment: true, modalities: { input: ['text', 'image'], output: ['text'] } } : {}),
           limit: { context: model.context, output: model.output },
         },
       ]),
