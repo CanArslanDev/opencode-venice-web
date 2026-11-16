@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Linux works end to end.** Measured on Ubuntu 24.04 (Brave 157, curl 8.5.0 /
+  OpenSSL 3.0.13) next to macOS, with the same account:
+  - Sign-in read the cookie with the macOS key derivation (1003 PBKDF2 rounds;
+    Chromium uses 1 on Linux) and, before that, died on a variable shadowing bug
+    (`Cannot access 'profile' before initialization`). Both v10 (no keyring) and
+    v11 (GNOME keyring) cookies now sign in. A cookie that is found but cannot be
+    decrypted is reported as such instead of "no venice.ai cookie".
+  - curl got its headers from `/dev/fd/3`, which Linux cannot open for Node's
+    socket pipes (curl exit 26). They now go through a `0600` file that is
+    removed as soon as curl has read it.
+  - Cloudflare rejects the stock OpenSSL ClientHello (0/5); with `--tlsv1.3` the
+    same request passes (10/10). OpenSSL builds of curl get that flag,
+    `VENICE_WEB_CURL_TLS_ARGS` overrides it, and macOS is unchanged.
+  - The systemd unit template now has the name `install.sh` looks for.
+  Thanks to @crisazas for reporting and diagnosing these (#1, #2, #3).
+
 - `skills/opencode-orchestrator/`: a Claude Code skill that lets Claude plan work,
   hand small tasks to `opencode run` workers and verify every result itself. The
   scripts close stdin (an open pipe made workers hang before the model was called),
