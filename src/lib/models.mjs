@@ -20,7 +20,6 @@ export const MODELS = {
   'qwen3-5-35b-a3b': { name: 'Qwen 3.5 35B A3B (web)', context: 256000, output: 16384, reasoning: true, vision: true },
   'zai-org-glm-5.2': { name: 'GLM 5.2 (web)', context: 1000000, output: 131072, reasoning: true, vision: true },
   'zai-org-glm-4.6': { name: 'GLM 4.6 (web)', context: 198000, output: 16384, reasoning: false, vision: true },
-  'kimi-k2-5': { name: 'Kimi K2.5 (web)', context: 524288, output: 32768, reasoning: true },
   'venice-uncensored-1-2': { name: 'Venice Uncensored 1.2 (web)', context: 128000, output: 8192, reasoning: false, vision: true },
   'google-gemma-4-31b-it': { name: 'Gemma 4 31B Instruct (web)', context: 256000, output: 8192, reasoning: true, vision: true },
   'google-gemma-4-26b-a4b-it': { name: 'Gemma 4 26B A4B Instruct (web)', context: 256000, output: 8192, reasoning: true, vision: true },

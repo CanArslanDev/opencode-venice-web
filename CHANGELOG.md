@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **`kimi-k2-5` is gone from the catalogue.** The web catalogue bills it now
+  (`usesCredits: true`), and this proxy only lists free models. Rerun
+  `venice-web-sync` (or the installer); if OpenCode used it as the default model,
+  pick another one.
+
 - **Images.** Attach a screenshot in OpenCode and the model sees it, also on every
   tool step of the task it starts (an OpenCode run read `4719` off a test picture
   and wrote it to a file, on macOS and Linux). The bytes travel with the request

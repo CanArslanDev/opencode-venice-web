@@ -139,6 +139,5 @@ test('multipartBody encodes the request and each image as the web client does', 
 
 test('the catalogue marks every measured model as taking images', () => {
   const missing = Object.entries(MODELS).filter(([, model]) => !model.vision).map(([id]) => id)
-  // kimi-k2-5 is billed in the web catalogue now and was not measured
-  assert.deepEqual(missing, ['kimi-k2-5'])
+  assert.deepEqual(missing, [])
 })
