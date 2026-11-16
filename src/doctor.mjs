@@ -9,7 +9,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { host, port, providerID, sessionFile, transport } from './lib/config.mjs'
-import { findCurl } from './lib/curl.mjs'
+import { curlTlsArgs, findCurl } from './lib/curl.mjs'
 import { MODELS } from './lib/models.mjs'
 import { log, warn } from './lib/log.mjs'
 
@@ -31,7 +31,7 @@ async function main() {
     transport === 'fetch'
       ? 'Node fetch forced; Cloudflare blocks it on the inference route'
       : curl
-        ? `using ${curl}`
+        ? `using ${curl}${curlTlsArgs().length ? ` ${curlTlsArgs().join(' ')}` : ''}`
         : 'curl not found; Cloudflare blocks Node fetch on the inference route, install curl',
   )
 

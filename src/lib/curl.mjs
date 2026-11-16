@@ -12,13 +12,24 @@
  *   curl --http1.1, default accept                                 200 SSE
  *
  * So requests to the API host go through one short-lived `curl` process each:
- * HTTP/1.1, no redirects, headers handed over on fd 3 (never on the command line,
- * where `ps` would show the bearer token), the body on stdin, and the response
- * streamed back from stdout. No browser, no npm dependency, a few MB per request.
+ * HTTP/1.1, no redirects, the body on stdin, and the response streamed back from
+ * stdout. No browser, no npm dependency, a few MB per request.
+ *
+ * Headers never go on the command line, where `ps` would show the bearer token.
+ * They are written to a private file (`0600` inside a `0700` directory) right
+ * before curl starts and removed as soon as curl has read them. The file holds
+ * nothing the session file does not already keep on disk with the same mode.
+ * An earlier version handed them over on `/dev/fd/3`, which only works on macOS:
+ * Node's extra stdio pipes are sockets, and Linux cannot reopen a socket through
+ * `/proc/self/fd/N`, so curl exited with code 26 before sending anything.
  */
 import { spawn, execFileSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 
 let curlPath
+let curlVersion = ''
 
 /** The curl binary (VENICE_WEB_CURL overrides), or null when none is installed. */
 export function findCurl() {
@@ -27,7 +38,7 @@ export function findCurl() {
   curlPath = null
   for (const candidate of candidates) {
     try {
-      execFileSync(candidate, ['--version'], { stdio: 'ignore' })
+      curlVersion = execFileSync(candidate, ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
       curlPath = candidate
       break
     } catch {
@@ -35,6 +46,33 @@ export function findCurl() {
     }
   }
   return curlPath
+}
+
+/**
+ * Extra TLS flags for a curl build, from its `curl --version` text.
+ *
+ * Cloudflare blocks the ClientHello of a stock OpenSSL curl on the inference
+ * route, and lets the same request through once it offers TLS 1.3 only.
+ * Measured 2026-11-16 from one IP (a Linux VM behind the Mac that passes):
+ *
+ *   Ubuntu 24.04, curl 8.5.0 / OpenSSL 3.0.13            0/5   403 html
+ *   same curl with --tlsv1.3                             5/5   200 SSE
+ *   macOS curl 8.7.1 (LibreSSL / SecureTransport)        5/5   200 SSE
+ *   macOS curl with --tlsv1.3                            exit 4 (not built in)
+ *
+ * So only OpenSSL builds get the flag. `VENICE_WEB_CURL_TLS_ARGS` replaces the
+ * choice (space separated; an empty value sends no extra flags).
+ */
+export function tlsArgsFor(versionText, override = process.env.VENICE_WEB_CURL_TLS_ARGS) {
+  if (override !== undefined) return override.split(/\s+/).filter(Boolean)
+  const first = String(versionText).split('\n')[0]
+  // ` OpenSSL/3.x` is the backend in use; `(OpenSSL)` would only be an alternative
+  return / OpenSSL\/\d/.test(first) ? ['--tlsv1.3'] : []
+}
+
+/** The extra TLS flags for the curl that `findCurl()` picked. */
+export function curlTlsArgs() {
+  return findCurl() ? tlsArgsFor(curlVersion) : []
 }
 
 /** A Cloudflare block or challenge page instead of an API answer. */
@@ -54,6 +92,28 @@ export function headerLines(headers) {
   // curl would otherwise send `Expect: 100-continue` for larger bodies
   lines.push('Expect:')
   return `${lines.join('\n')}\n`
+}
+
+/**
+ * Writes the header lines to a fresh private file for `curl -H @file`.
+ * `remove()` deletes the file and its directory and is safe to call twice.
+ */
+export function writeHeaderFile(headers, dir = tmpdir()) {
+  const folder = mkdtempSync(path.join(dir, 'venice-web-'))
+  const file = path.join(folder, 'headers')
+  let removed = false
+  const remove = () => {
+    if (removed) return
+    removed = true
+    rmSync(folder, { recursive: true, force: true })
+  }
+  try {
+    writeFileSync(file, headerLines(headers), { mode: 0o600, flag: 'wx' })
+  } catch (error) {
+    remove()
+    throw error
+  }
+  return { file, remove }
 }
 
 /**
@@ -89,14 +149,22 @@ export function curlFetch(url, { method = 'GET', headers, body, signal } = {}) {
   // plain `-H` line lands after `Accept` and gets the request blocked, so it goes
   // through `-A`, where curl puts it in its usual place.
   const userAgent = new Headers(headers).get('user-agent')
-  const args = ['-sS', '--http1.1', '--no-buffer', '--proto', '=https', '-D', '-', '-X', method, '-H', '@/dev/fd/3']
-  if (userAgent) args.push('-A', userAgent)
-  if (body != null) args.push('--data-binary', '@-')
-  args.push(url)
 
   return new Promise((resolve, reject) => {
     if (signal?.aborted) return reject(signal.reason ?? new Error('aborted'))
-    const child = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe', 'pipe'] })
+    // Written before curl starts: it reads `-H @file` while parsing its arguments.
+    let headerFile
+    try {
+      headerFile = writeHeaderFile(headers)
+    } catch (error) {
+      return reject(error)
+    }
+    const args = ['-sS', '--http1.1', '--no-buffer', '--proto', '=https', ...curlTlsArgs(), '-D', '-', '-X', method, '-H', `@${headerFile.file}`]
+    if (userAgent) args.push('-A', userAgent)
+    if (body != null) args.push('--data-binary', '@-')
+    args.push(url)
+
+    const child = spawn(bin, args, { stdio: ['pipe', 'pipe', 'pipe'] })
     let head = Buffer.alloc(0)
     let controller = null
     let settled = false
@@ -130,16 +198,17 @@ export function curlFetch(url, { method = 'GET', headers, body, signal } = {}) {
     }
     signal?.addEventListener('abort', onAbort, { once: true })
 
-    child.stdio[3].end(headerLines(headers))
     child.stdin.on('error', () => {})
-    child.stdio[3].on('error', () => {})
     if (body != null) child.stdin.end(typeof body === 'string' ? body : Buffer.from(body))
     else child.stdin.end()
 
     child.stderr.on('data', (data) => {
       stderr += data
     })
-    child.on('error', fail)
+    child.on('error', (error) => {
+      headerFile.remove()
+      fail(error)
+    })
 
     child.stdout.on('data', (data) => {
       if (settled) return push(data)
@@ -152,6 +221,8 @@ export function curlFetch(url, { method = 'GET', headers, body, signal } = {}) {
         return fail(error)
       }
       if (!parsed) return
+      // a response head means curl has long since read its headers
+      headerFile.remove()
       settled = true
       const nullBody = [101, 204, 205, 304].includes(parsed.status)
       const readable = new ReadableStream({
@@ -168,6 +239,7 @@ export function curlFetch(url, { method = 'GET', headers, body, signal } = {}) {
     })
 
     child.on('close', (code) => {
+      headerFile.remove()
       signal?.removeEventListener('abort', onAbort)
       if (code === 0 || code === null) {
         if (!settled) return fail(new Error('curl: no response'))

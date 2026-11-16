@@ -32,7 +32,22 @@ browser cookie jar                     your machine                Venice
   | `curl --http1.1` with the user agent as a plain `-H` line (lands after `Accept`) | 403 html |
   | `curl --http1.1 -A <browser UA>`, default `Accept: */*` | **200 SSE** |
 
-  So: HTTP/1.1, the user agent via `-A`, no `accept: text/event-stream` (the backend streams SSE without it), one short-lived curl process per request. Headers go over fd 3 so the bearer token never shows up in `ps`. Clerk calls still use Node's fetch. `VENICE_WEB_TRANSPORT=fetch|curl` overrides the default `auto` (curl when installed).
+  So: HTTP/1.1, the user agent via `-A`, no `accept: text/event-stream` (the backend streams SSE without it), one short-lived curl process per request. Clerk calls still use Node's fetch. `VENICE_WEB_TRANSPORT=fetch|curl` overrides the default `auto` (curl when installed).
+
+  **Linux** (measured 2026-11-16, Ubuntu 24.04 in a VM that shares the public IP of a Mac whose curl passes, same session):
+
+  | client | result |
+  | --- | --- |
+  | macOS curl 8.7.1 (LibreSSL / SecureTransport) | 5/5 **200 SSE** |
+  | Ubuntu curl 8.5.0 / OpenSSL 3.0.13, defaults | 0/5 403 html |
+  | same, `--curves X25519:prime256v1:secp384r1` | 0/5 403 html |
+  | same, `--tlsv1.3` | 5/5, then 10/10 **200 SSE** |
+  | same, `--tls-max 1.2` / Chrome cipher list / `--no-alpn` | 5/5 200 SSE each |
+  | macOS curl with `--tlsv1.3` | exit 4 (not built in) |
+
+  Cloudflare rejects the stock OpenSSL ClientHello and nothing else about the request, so `tlsArgsFor()` adds `--tlsv1.3` when `curl --version` names OpenSSL as the backend in use and adds nothing otherwise. `VENICE_WEB_CURL_TLS_ARGS` replaces that choice (space separated, empty for none) in case the rule moves. A TLS-impersonating npm client (`wreq-js`) was proposed for this and is not needed.
+
+  Headers never go on the command line, where `ps` would show the bearer token: they are written to a `0600` file in a fresh `0700` directory just before curl starts (`-H @file`) and removed once the response head arrives. The file holds nothing `session.json` does not already store with the same mode. They used to go over `/dev/fd/3`, which works on macOS only: Node's extra stdio pipes are sockets, Linux cannot reopen a socket through `/proc/self/fd/N`, and curl exited with code 26 before sending anything.
 * If a request still gets challenged, the proxy raises a `SignInError` which surfaces as **HTTP 401** with a "refresh the cookies" message.
 
 Session discovery (`GET /v1/client`) yields the active session id and account. It picks the session matching the stored `uid` when several exist.

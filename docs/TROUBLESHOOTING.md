@@ -37,7 +37,9 @@ launchctl kickstart -k gui/$(id -u)/ai.opencode.venice-web   # macOS: restart th
 systemctl --user restart ai.opencode.venice-web               # Linux
 ```
 
-If the message says `(fetch)`, the request went through Node's own HTTP client, which Cloudflare blocks on the inference route. Install `curl` (or point `VENICE_WEB_CURL` at one) and leave `VENICE_WEB_TRANSPORT` unset. If it says `(curl)` and fresh cookies do not help, read `docs/PROTOCOL.md` §1: Venice may have changed what its Cloudflare rule looks at.
+If the message says `(fetch)`, the request went through Node's own HTTP client, which Cloudflare blocks on the inference route. Install `curl` (or point `VENICE_WEB_CURL` at one) and leave `VENICE_WEB_TRANSPORT` unset. If it says `(curl)` and fresh cookies do not help, read `docs/PROTOCOL.md` §1: Venice may have changed what its Cloudflare rule looks at. On Linux the proxy already asks an OpenSSL curl for TLS 1.3 only, which is what gets it past the rule today; if that stops working, try `VENICE_WEB_CURL_TLS_ARGS="--tls-max 1.2"` (also measured to pass) and restart the proxy.
+
+`curl exited with code 26` ("error encountered when reading a file") on Linux means an old copy of the proxy that passed headers over `/dev/fd/3`; update it.
 
 Logging out of venice.ai in the browser invalidates `__client` - sign in again, then rerun the login command.
 

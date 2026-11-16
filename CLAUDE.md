@@ -26,7 +26,7 @@ src/lib/sanitize.mjs          NUL byte scrubbing + lenient JSON control characte
 test/emulate.test.mjs         unit tests (node --test)
 test/lenient-json.test.mjs    unit tests for the structural JSON reader
 test/fixtures/real-replies.mjs  real broken model replies (anonymised); every shape must keep parsing
-test/curl.test.mjs            curl transport helpers (head parser, header lines)
+test/curl.test.mjs            curl transport: helpers, TLS flags, and real curl against a local HTTPS server
 test/server-loop.test.mjs     Venice tool-loop detection in collectStream (fake SSE)
 test/smoke.mjs                end-to-end check against a running proxy
 scripts/stress/               multilingual OpenCode stress tasks with their own verification (not in npm test)
@@ -74,6 +74,7 @@ VENICE_WEB_DUMP=/tmp/req.json node src/proxy.mjs
 * Clerk rotates `__client` on use - always read `set-cookie` and persist.
 * `/agents/ad-hoc` runs **Venice's own agent loop** inside one response. A native tool call (instead of the envelope) makes Venice answer "Tool not found" and re-run the model, up to 10 times, invisibly; the model then claims its tools are broken and stops without a result. `collectStream()` counts `veniceai:tool_call_generation` steps and stops past `SERVER_LOOP_STEPS`, then retries with `NATIVE_CALL_REMINDER`. Keep the last retry unstopped so a turn always ends with an answer. `docs/PROTOCOL.md` §4.7.
 * Cloudflare blocks Node's own HTTP client on `outerface.venice.ai/api/inference/*` (403 "Attention Required!" HTML). The system curl gets through, but only over HTTP/1.1, with the user agent passed via `-A` (header order matters) and **without** `accept: text/event-stream`. `src/lib/curl.mjs` encodes all three; read `docs/PROTOCOL.md` §1 before changing any of them.
+* On Linux the same rule also rejects the stock **OpenSSL** ClientHello (Ubuntu curl: 0/5), while `--tlsv1.3` passes (10/10); macOS curl passes as is and rejects `--tlsv1.3`. `tlsArgsFor()` picks the flag from `curl --version`. Headers go through a `0600` temp file (`writeHeaderFile()`), never `/dev/fd/3`: Node's extra stdio pipes are sockets and Linux cannot reopen them by path (curl exit 26). `test/curl.test.mjs` runs real curl against a local HTTPS server to keep this covered on CI's Ubuntu.
 
 ## Changing the model catalogue
 

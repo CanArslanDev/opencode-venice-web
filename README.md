@@ -135,6 +135,7 @@ All environment variables are optional; the defaults are what the installer uses
 | `VENICE_WEB_DUMP` | off | dump the last translated upstream request |
 | `VENICE_WEB_TRANSPORT` | `auto` | client for the inference host: `auto` (curl when installed), `curl`, `fetch` |
 | `VENICE_WEB_CURL` | `curl` | curl binary to use |
+| `VENICE_WEB_CURL_TLS_ARGS` | auto | extra TLS flags for curl, space separated; auto is `--tlsv1.3` for an OpenSSL build (Linux) and nothing otherwise, empty sends none |
 | `VENICE_WEB_TIMEOUT` | `900000` | per-request upstream timeout (ms) |
 | `VENICE_WEB_JUDGE` | on | `0` turns off the judge that checks whether a turn may end |
 | `VENICE_WEB_JUDGE_MODEL` | `qwen3-5-35b-a3b` | model for the judge (empty: the request's own model) |
@@ -148,7 +149,7 @@ All environment variables are optional; the defaults are what the installer uses
 ## Security and privacy
 
 - The session file (`~/.config/opencode/venice-web/session.json`, mode `600`) holds your Clerk cookie - treat it like a login token, keep it out of git.
-- Only `clerk.venice.ai` and `outerface.venice.ai` are contacted (inference through the system `curl`; its headers go over a pipe, so the token never appears in the process list); the proxy is bound to loopback by default. Anything that can reach it can use your Venice account, so do not expose the port publicly without thinking about it.
+- Only `clerk.venice.ai` and `outerface.venice.ai` are contacted (inference through the system `curl`; its headers go through a private `0600` file that is deleted as soon as curl has read it, so the token never appears in the process list); the proxy is bound to loopback by default. Anything that can reach it can use your Venice account, so do not expose the port publicly without thinking about it.
 - No password is stored (unlike password-based proxies). Logging out of venice.ai in the browser invalidates the cookie; `/out` from the browser plus a fresh login fixes it.
 - Requests leave your machine exactly as the web app would send them: same user agent, same headers, no extra telemetry.
 
