@@ -109,13 +109,20 @@ function readFromBrowser(name, profile) {
   )
   const parsed = rows.trim() ? JSON.parse(rows) : []
   let client = null
+  let undecryptable = false
   for (const row of parsed) {
     if (row.name !== '__client') continue
     try {
       client = decrypt(Buffer.from(row.hex, 'hex'), key)
     } catch {
-      /* try the next profile */
+      undecryptable = true
     }
+  }
+  // The cookie is there but the key is wrong: saying "no cookie" sent people
+  // looking for a sign-in problem instead of a keyring one.
+  if (!client && undecryptable) {
+    const store = process.platform === 'darwin' ? `the Keychain entry "${browser.keychain}"` : 'the keyring password (secret-tool)'
+    throw new Error(`found the venice.ai cookie but could not decrypt it; check ${store}, or pass --cookie/--ua`)
   }
   if (!client) return null
   return { client, userAgent: browserUserAgent(browser), source: browser.label }
