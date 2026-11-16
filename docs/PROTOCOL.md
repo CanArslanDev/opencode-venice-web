@@ -271,6 +271,35 @@ Venice → OpenAI:
 
 Usage is estimated (`countTokens` ≈ characters/4) because the web endpoint reports none.
 
+## 5b. Image generation and editing
+
+Measured 2026-11-16, macOS and Linux, through `POST /v1/images/generations` and `/v1/images/edits`.
+
+The web app makes pictures with Venice's own agent, not the ad-hoc route:
+
+```
+POST /api/inference/chat/agents/venice?paidImagesMode=block
+{ "input": { "messages": [ { …one user message… } ] }, "clientTools": [] }
+```
+
+The agent calls its server tool `generate_image` (`{"requests":[{"prompt","resource_id","width","height","seed"?}]}`) or `edit_image` (`{"requests":[{"prompt","media_ids","resource_id"}]}`) and the bytes stream back in the same response. `paidImagesMode=block` keeps it on free models. Events, in order: `response.output_item.added` with a `veniceai:image_generation` item whose `requests[]` carry the `model_id`, `prompt` and `dimensions` really used; `response.content_part.added` (`veniceai:output_image`, `format`); `veniceai:image_generation.image_chunk` (`item_id`, `content_index`, `chunk_index`, `image_chunk_b64`); `response.content_part.done` (final `dimensions`, `is_blurred`, `is_content_violation`); `veniceai:image_generation.done`; then the server call, its output and a short message. `imageCollector()` reads them.
+
+What was measured:
+
+| question | result |
+| --- | --- |
+| prompt in plain words | the agent rewrites it, picks the size, chats afterwards |
+| "Call generate_image once … exactly this prompt, unchanged … Model (resource_id): X. Width W, height H." | prompt used verbatim, model and size honoured, reply "Done." |
+| sizes | clamped by the model with the aspect kept: 1792x1024 → 1344x768; chroma 512x512 → 768x768 |
+| free models in the catalogue | `z-image-turbo`, `chroma`, `wai-illu` run. `stable-diffusion-3.5-rev2`, `lustify-sdxl`, `lustify-v8` are refused by the tool ("isn't available") and the agent silently switches to another model, so they are not offered |
+| two requests in one tool call, different seeds | two **identical** pictures (0 % of pixels differ) |
+| one call per picture, each with its own seed | `chroma`: different pictures (84.8 %, 73.5 %); `z-image-turbo`, `wai-illu`: identical, the seed has no effect there |
+| edit: reference as `input_image` with its bytes in the multipart request, never uploaded | works in one round trip, no `hydrate_content` (as for chat, §2b); `firered-image-edit` and `qwen-edit-uncensored` both honoured |
+| edit `n=2` as two calls | two variants (12.2 %, 5.5 % of pixels differ) |
+| time | 4-8 s per generation, 7-15 s per edit; `n` calls run in parallel |
+
+So the proxy sends one agent call per requested image, in parallel, with a seed each when `n > 1`. `mask` is refused (the edit tool has no mask; describe the change in the prompt). `response_format: url` is answered with a data URL, since the proxy hosts no files. OpenAI model names (`dall-e-3`, `gpt-image-1`, …) map to the default model; any other unknown name is a 400.
+
 ## 6. Free-model catalogue
 
 `src/lib/models.mjs` mirrors the web catalogue entries flagged `usesCredits: false`. The web app fetches that list from `GET /api/app/models` and `GET /api/v2/agents/configuration_options` with the same session; both are useful if you want to regenerate the list automatically (the proxy currently ships a static copy so it works offline and with a dead session).

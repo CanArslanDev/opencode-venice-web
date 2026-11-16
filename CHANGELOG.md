@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Image generation and editing**: `POST /v1/images/generations` and
+  `POST /v1/images/edits` in OpenAI's shape, on the free web models
+  (`z-image-turbo`, `chroma`, `wai-illu`; edits on `firered-image-edit`,
+  `qwen-edit-uncensored`). The prompt is used verbatim, size and model are
+  honoured, `n` runs in parallel, edits take multipart or JSON. Nothing is
+  uploaded or stored. Verified on macOS and Linux. PROTOCOL §5b; the agent route
+  and its events were first mapped by @crisazas in #4.
+
 - **`kimi-k2-5` is gone from the catalogue.** The web catalogue bills it now
   (`usesCredits: true`), and this proxy only lists free models. Rerun
   `venice-web-sync` (or the installer); if OpenCode used it as the default model,

@@ -104,6 +104,32 @@ The catalogue lives in [`src/lib/models.mjs`](src/lib/models.mjs); edit it and r
 
 ---
 
+## Image generation and editing
+
+The proxy also answers OpenAI's image routes with the free web image models:
+
+```sh
+# generate (default model z-image-turbo; size and n are optional)
+curl -s 127.0.0.1:3456/v1/images/generations -H 'content-type: application/json' \
+  -d '{"prompt":"a red bicycle against a blue wall","size":"1024x1024"}' \
+  | python3 -c 'import sys,json,base64; open("out.png","wb").write(base64.b64decode(json.load(sys.stdin)["data"][0]["b64_json"]))'
+
+# edit (multipart, like the OpenAI SDK sends it)
+curl -s 127.0.0.1:3456/v1/images/edits -F image=@photo.png -F 'prompt=make the sky stormy'
+```
+
+| | models |
+| --- | --- |
+| generate | `z-image-turbo` (default), `chroma`, `wai-illu` (anime) |
+| edit | `firered-image-edit` (default), `qwen-edit-uncensored` |
+
+- The prompt is used as written; the answer's `revised_prompt` is what the model actually got.
+- Sizes from 256 to 2048 per side are accepted. Each model rounds to its own resolution and keeps the aspect ratio (`1792x1024` comes back as 1344x768).
+- `n` up to 4 runs that many generations in parallel. Only `chroma` gives a different picture each time; `z-image-turbo` and `wai-illu` return the same picture for the same prompt.
+- Edits take PNG, JPEG, WebP or GIF as a file or a base64 data URL; image URLs are not downloaded. `mask` is not supported: describe the change in the prompt.
+- `response_format: "url"` returns a `data:` URL, because the proxy stores nothing.
+- OpenAI model names (`dall-e-3`, `gpt-image-1`) get the default model.
+
 ## Commands
 
 | Command | What it does |
@@ -164,7 +190,7 @@ All environment variables are optional; the defaults are what the installer uses
 - **No sampling controls.** `temperature`, `top_p` and `max_tokens` are not applied by this endpoint.
 - **Unlimited, not infinite.** Venice's fair-use and Cloudflare bot checks apply. A Cloudflare challenge surfaces as HTTP 401 with a "refresh the cookies" message.
 - **Images: what is sent.** The images of your latest message go to the model as images, on every step of the work they start. Images from earlier messages stay in the history as `[image]` and are not sent again. Only pictures inside the request (data URLs, which is what OpenCode sends) are used, up to 10 per message; the proxy never downloads an image from a URL.
-- **Web session, not API route.** Anything that needs the official API surface (embeddings, image generation, video, `/responses`) still has to use `api.venice.ai` with an API key. Both can coexist in OpenCode - the installer only *adds* a provider.
+- **Web session, not API route.** Anything that needs the official API surface (embeddings, video, `/responses`) still has to use `api.venice.ai` with an API key. Both can coexist in OpenCode - the installer only *adds* a provider.
 
 ### NUL bytes and `400 Invalid request parameters`
 

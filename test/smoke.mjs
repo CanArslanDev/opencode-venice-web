@@ -11,7 +11,8 @@
  *
  *   - no proxy reachable        -> skipped
  *   - proxy up, no session      -> checks the HTTP surface, then skips chat
- *   - proxy up and signed in    -> full check, including an emulated tool call
+ *   - proxy up and signed in    -> full check, including one generated image
+ *                                  and an emulated tool call
  */
 import assert from 'node:assert/strict'
 import { host, port } from '../src/lib/config.mjs'
@@ -57,6 +58,19 @@ check(
   'plain answer',
   typeof answer.choices?.[0]?.message?.content === 'string',
   JSON.stringify(answer.choices?.[0]?.message?.content ?? answer.error?.message ?? '').slice(0, 60),
+)
+
+// one small picture on the default image model: a PNG must come back
+const picture = await fetch(`${base}/v1/images/generations`, {
+  method: 'POST',
+  headers: { 'content-type': 'application/json' },
+  body: JSON.stringify({ prompt: 'a red apple on a white table', size: '512x512' }),
+}).then((response) => response.json())
+const png = picture.data?.[0]?.b64_json ? Buffer.from(picture.data[0].b64_json, 'base64') : null
+check(
+  'image generation',
+  !!png && png.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])),
+  png ? `${png.length} bytes` : (picture.error?.message ?? '').slice(0, 80),
 )
 
 const tooled = await fetch(`${base}/v1/chat/completions`, {

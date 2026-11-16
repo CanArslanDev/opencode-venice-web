@@ -366,10 +366,13 @@ function imageUrlOf(part) {
 export function imageFromDataUrl(url) {
   const match = /^data:([^;,]+)((?:;[^;,]*)*);base64,(.*)$/s.exec(typeof url === 'string' ? url : '')
   if (!match) return null
-  const mimeType = match[1].trim().toLowerCase()
-  if (!IMAGE_TYPES.has(mimeType)) return null
-  const data = Buffer.from(match[3], 'base64')
-  if (!data.length) return null
+  return imageFromBytes(match[1], Buffer.from(match[3], 'base64'))
+}
+
+/** `{ mediaId, mimeType, data }` for raw image bytes, or null for an unknown type or no bytes. */
+export function imageFromBytes(type, data) {
+  const mimeType = String(type ?? '').split(';')[0].trim().toLowerCase()
+  if (!IMAGE_TYPES.has(mimeType) || !data?.length) return null
   const hex = createHash('sha256').update(data).digest('hex')
   const mediaId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
   return { mediaId, mimeType, data }

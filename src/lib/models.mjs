@@ -42,3 +42,27 @@ export const DEFAULT_MODEL = 'deepseek-v4-1-flash-free'
 export const DEFAULT_SMALL_MODEL = 'qwen3-5-35b-a3b'
 
 export const modelIds = Object.keys(MODELS)
+
+/**
+ * Image models that are free (`GET /api/app/models`, section `image`,
+ * `usesCredits: false`) *and* that Venice's agent actually runs. The catalogue
+ * also lists `stable-diffusion-3.5-rev2`, `lustify-sdxl` and `lustify-v8` as
+ * free, but the agent's `generate_image` tool rejects them and falls back to
+ * another model ("isn't available", checked 2026-11-16), so they are left out.
+ * Images run on the agent route with `paidImagesMode=block` (docs/PROTOCOL.md §5b).
+ */
+export const IMAGE_MODELS = {
+  'z-image-turbo': { name: 'Z-Image Turbo' },
+  chroma: { name: 'Chroma' },
+  'wai-illu': { name: 'Anime (WAI)' },
+}
+
+export const DEFAULT_IMAGE_MODEL = 'z-image-turbo'
+
+/** Free image *editing* models (the catalogue's `inpaint` section). */
+export const EDIT_MODELS = {
+  'firered-image-edit': { name: 'FireRed' },
+  'qwen-edit-uncensored': { name: 'Qwen Edit Uncensored' },
+}
+
+export const DEFAULT_EDIT_MODEL = 'firered-image-edit'

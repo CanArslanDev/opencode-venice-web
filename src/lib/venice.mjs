@@ -23,6 +23,8 @@ import {
 import { curlFetch, findCurl, isCloudflareBlock } from './curl.mjs'
 
 const INFERENCE_PATH = '/api/inference/chat/agents/ad-hoc'
+/** Venice's own agent, which makes images; `paidImagesMode=block` keeps it on free models (docs/PROTOCOL.md §5b). */
+const AGENT_IMAGE_PATH = '/api/inference/chat/agents/venice?paidImagesMode=block'
 
 let state = null
 let tokenFlight = null
@@ -264,4 +266,4 @@ export async function probeAccount() {
   return { email: session.email, uid: session.uid, sessionId: session.sessionId }
 }
 
-export { INFERENCE_PATH }
+export { AGENT_IMAGE_PATH, INFERENCE_PATH }

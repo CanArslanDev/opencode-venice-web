@@ -22,6 +22,9 @@ import {
   preferAnswer,
   serverLoopMessage,
   shouldRetry,
+  MAX_IMAGES,
+  imageFromBytes,
+  imageFromDataUrl,
   sseReader,
   toVeniceRequest,
   withRetryReminder,
@@ -29,7 +32,21 @@ import {
 import { MODELS } from './models.mjs'
 import { debugRaw, log, preview, warn } from './log.mjs'
 import { deepStripNulls, repairJsonControlChars } from './sanitize.mjs'
-import { INFERENCE_PATH, SignInError, loadSession, resetSessionCache, upstreamChat } from './venice.mjs'
+import { AGENT_IMAGE_PATH, INFERENCE_PATH, SignInError, loadSession, resetSessionCache, upstreamChat } from './venice.mjs'
+import {
+  ImageRequestError,
+  agentRequest,
+  editInstruction,
+  generationInstruction,
+  imageCollector,
+  imagesResponse,
+  parseCount,
+  parseResponseFormat,
+  parseSize,
+  pickEditModel,
+  pickImageModel,
+  seedsFor,
+} from './imagegen.mjs'
 
 const json = (res, status, payload) => {
   res.writeHead(status, { 'content-type': 'application/json' })
@@ -38,10 +55,26 @@ const json = (res, status, payload) => {
 const openaiError = (res, status, message, type = 'venice_web_error') =>
   json(res, status, { error: { message, type } })
 
-async function readJson(req) {
+/** Largest request body the image routes accept. */
+const MAX_IMAGE_BODY = 64 * 1024 * 1024
+
+/** The whole request body, or a 413-shaped error past `limit` bytes. */
+async function readRaw(req, limit = Infinity) {
   const chunks = []
-  for await (const chunk of req) chunks.push(chunk)
-  const raw = Buffer.concat(chunks).toString('utf8')
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.length
+    if (size > limit) {
+      const error = new ImageRequestError(`request body is larger than ${Math.round(limit / 1024 / 1024)} MB`)
+      error.status = 413
+      throw error
+    }
+    chunks.push(chunk)
+  }
+  return Buffer.concat(chunks)
+}
+
+function parseJsonText(raw) {
   if (!raw) return {}
   try {
     return JSON.parse(raw)
@@ -52,6 +85,10 @@ async function readJson(req) {
     if (repaired === raw) throw error
     return JSON.parse(repaired)
   }
+}
+
+async function readJson(req) {
+  return parseJsonText((await readRaw(req)).toString('utf8'))
 }
 
 /** Model catalog in OpenAI shape. */
@@ -335,6 +372,149 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
   })
 }
 
+/** A failed upstream image request, answered with `status`. */
+class UpstreamImageError extends Error {
+  constructor(status, message) {
+    super(message)
+    this.status = status
+  }
+}
+
+/** Runs one agent image request and returns its images. */
+async function imageRequest(label, body, files, requestedModel, signal) {
+  let upstream
+  try {
+    upstream = await upstreamChat(body, AGENT_IMAGE_PATH, signal, files)
+  } catch (error) {
+    throw new UpstreamImageError(error instanceof SignInError || error.signIn ? 401 : 502, error.message)
+  }
+  if (!upstream.ok) {
+    const text = await upstream.text().catch(() => '')
+    throw new UpstreamImageError(upstream.status, `${apiBase} responded HTTP ${upstream.status}: ${text.slice(0, 400)}`)
+  }
+  const collector = imageCollector()
+  const reader = upstream.body.getReader()
+  const stream = sseReader()
+  try {
+    for (;;) {
+      const { value, done } = await reader.read()
+      for (const event of stream.feed(value, done)) collector.feed(event)
+      if (done) break
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {})
+    throw new UpstreamImageError(502, `${label} failed: ${error.message}`)
+  }
+  const { images, text } = collector.result()
+  if (!images.length) {
+    throw new UpstreamImageError(502, `${label} failed: Venice returned no image${text.trim() ? ` (agent said: ${preview(text, 200)})` : ''}`)
+  }
+  for (const image of images) {
+    if (image.model && image.model !== requestedModel) warn(`   ~ asked for ${requestedModel}, Venice used ${image.model}`)
+    if (image.flags.is_blurred || image.flags.is_content_violation) warn(`   ~ Venice flagged an image: ${JSON.stringify(image.flags)}`)
+  }
+  return images
+}
+
+/**
+ * Runs one agent call per image, in parallel, and answers the client. Several
+ * images in one call come back identical, so `n` is `n` calls.
+ */
+async function answerImages(res, label, instructions, files, model, format) {
+  const abort = new AbortController()
+  res.on('close', () => abort.abort())
+  let batches
+  try {
+    batches = await Promise.all(instructions.map((text) => imageRequest(label, agentRequest(text, files), files, model, abort.signal)))
+  } catch (error) {
+    abort.abort()
+    if (error instanceof UpstreamImageError) return openaiError(res, error.status, error.message)
+    throw error
+  }
+  const images = batches.flat()
+  log(`   <- ${images.length} image(s) • ${images.map((image) => `${image.width ?? '?'}x${image.height ?? '?'} ${image.data.length} B`).join(', ')}`)
+  return json(res, 200, imagesResponse(images, format))
+}
+
+/** A JSON body, with a 400 instead of a 500 when it does not parse. */
+function imageJson(raw) {
+  try {
+    return parseJsonText(raw.toString('utf8'))
+  } catch {
+    throw new ImageRequestError('the request body is not valid JSON')
+  }
+}
+
+/** `POST /v1/images/generations` (OpenAI shape) on the free image models. */
+async function handleImageGenerations(req, res) {
+  const body = imageJson(await readRaw(req, MAX_IMAGE_BODY))
+  if (typeof body.prompt !== 'string' || !body.prompt.trim()) throw new ImageRequestError('prompt is required')
+  const model = pickImageModel(body.model)
+  const n = parseCount(body.n)
+  const size = parseSize(body.size)
+  const format = parseResponseFormat(body.response_format)
+  log(`-> image ${model} • n=${n}${size ? ` • ${size.width}x${size.height}` : ''} • ${preview(body.prompt, 80)}`)
+  const instructions = seedsFor(n).map((seed) => generationInstruction({ prompt: body.prompt, model, size, seed }))
+  return answerImages(res, 'image generation', instructions, [], model, format)
+}
+
+/** The reference images of an edit request, from multipart files or JSON data URLs. */
+async function editImages(values) {
+  const images = []
+  for (const value of values) {
+    let image = null
+    if (value && typeof value === 'object' && typeof value.arrayBuffer === 'function') {
+      image = imageFromBytes(value.type, Buffer.from(await value.arrayBuffer()))
+      if (!image) throw new ImageRequestError(`image must be PNG, JPEG, WebP or GIF, got ${value.type || 'an untyped file'}`)
+    } else {
+      const url = typeof value === 'string' ? value : (value?.image_url?.url ?? value?.image_url ?? value?.url)
+      image = imageFromDataUrl(url)
+      if (!image) {
+        throw new ImageRequestError(
+          typeof url === 'string' && /^https?:/i.test(url)
+            ? 'image URLs are not fetched; send the image as a file or a base64 data URL'
+            : 'image must be a file or a base64 data URL of a PNG, JPEG, WebP or GIF',
+        )
+      }
+    }
+    if (!images.some((known) => known.mediaId === image.mediaId)) images.push(image)
+  }
+  if (!images.length) throw new ImageRequestError('image is required')
+  if (images.length > MAX_IMAGES) throw new ImageRequestError(`at most ${MAX_IMAGES} images per edit`)
+  return images
+}
+
+/** `POST /v1/images/edits` (OpenAI shape, multipart or JSON) on the free edit models. */
+async function handleImageEdits(req, res) {
+  const raw = await readRaw(req, MAX_IMAGE_BODY)
+  const type = String(req.headers['content-type'] ?? '')
+  let fields
+  let values
+  if (type.toLowerCase().startsWith('multipart/form-data')) {
+    let form
+    try {
+      form = await new Response(raw, { headers: { 'content-type': type } }).formData()
+    } catch {
+      throw new ImageRequestError('the multipart body could not be read')
+    }
+    fields = Object.fromEntries([...form.entries()].filter(([, value]) => typeof value === 'string'))
+    values = [...form.getAll('image'), ...form.getAll('image[]')]
+    if (form.has('mask')) throw new ImageRequestError('mask is not supported; describe the change in the prompt')
+  } else {
+    fields = imageJson(raw)
+    values = [fields.image, fields.images].flat().filter((value) => value != null)
+    if (fields.mask != null) throw new ImageRequestError('mask is not supported; describe the change in the prompt')
+  }
+  if (typeof fields.prompt !== 'string' || !fields.prompt.trim()) throw new ImageRequestError('prompt is required')
+  const model = pickEditModel(fields.model)
+  const n = parseCount(fields.n)
+  const format = parseResponseFormat(fields.response_format)
+  const images = await editImages(values)
+  log(`-> edit ${model} • n=${n} • ${images.length} reference(s) • ${preview(fields.prompt, 80)}`)
+  const instructions = seedsFor(n).map((seed) => editInstruction({ prompt: fields.prompt, model, seed }))
+  return answerImages(res, 'image edit', instructions, images, model, format)
+}
+
 async function handleChat(req, res) {
   const body = await readJson(req)
   const mapping = toVeniceRequest(body)
@@ -451,6 +631,14 @@ export function createServer() {
         return json(res, 200, modelList())
       }
 
+      if (req.method === 'POST' && url.pathname.endsWith('/images/generations')) {
+        return await handleImageGenerations(req, res)
+      }
+
+      if (req.method === 'POST' && url.pathname.endsWith('/images/edits')) {
+        return await handleImageEdits(req, res)
+      }
+
       if (req.method === 'POST' && url.pathname.endsWith('/chat/completions')) {
         return await handleChat(req, res)
       }
@@ -464,6 +652,7 @@ export function createServer() {
       openaiError(res, 404, `unknown endpoint: ${req.method} ${url.pathname}`, 'not_found')
     } catch (error) {
       if (error instanceof SignInError) return openaiError(res, 401, error.message)
+      if (error instanceof ImageRequestError) return openaiError(res, error.status ?? 400, error.message, 'invalid_request_error')
       warn('request error:', error.stack ?? error.message)
       if (!res.headersSent) openaiError(res, 500, error.message)
       else res.end()
