@@ -139,5 +139,16 @@ test('multipartBody encodes the request and each image as the web client does', 
 
 test('the catalogue marks every measured model as taking images', () => {
   const missing = Object.entries(MODELS).filter(([, model]) => !model.vision).map(([id]) => id)
-  assert.deepEqual(missing, [])
+  // added 2026-11-25 from the web catalogue, not measured with a test picture yet
+  assert.deepEqual(missing.sort(), [
+    'deepseek-v4-1-flash',
+    'nvidia-nemotron-3-nano-30b-a3b',
+    'nvidia-nemotron-3-ultra-550b-a55b',
+    'olafangensan-glm-4.7-flash-heretic',
+    'qwen3-coder-480b-a35b-instruct-turbo',
+    'qwen3-vl-235b-a22b',
+    'venice-uncensored-role-play',
+    'z-ai-glm-5-3-flash',
+    'zai-org-glm-4.7-app',
+  ])
 })

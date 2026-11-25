@@ -14,7 +14,7 @@ OpenCode ──HTTP──> 127.0.0.1:3456  ──HTTPS + your session cookie─�
 ```
 
 - No API key, no credits, no password stored: only the browser's long-lived Clerk `__client` cookie.
-- 19 free web models (DeepSeek, Qwen, GLM, Gemma, Aion, TEE-hosted variants).
+- 27 web models included in Pro (DeepSeek, Qwen, GLM, Gemma, NVIDIA Nemotron, Aion, TEE-hosted variants).
 - Tool calling works: OpenCode's `read`/`write`/`edit`/`shell`/`glob`/`grep` tools are emulated through a JSON envelope (see [docs/PROTOCOL.md](docs/PROTOCOL.md)).
 - Images work: attach a screenshot in OpenCode and the model sees it, also while it works through tool calls.
 - Zero runtime dependencies. Node 22+ and the system `curl` (preinstalled on macOS and most Linux distributions).
@@ -86,19 +86,20 @@ Full details, including the exact request/response shapes and the tool-emulation
 
 ## Models
 
-Only models the web catalogue marks as free (`usesCredits: false`) are exposed - picking a credit-billed model through this proxy would silently spend your API balance, so they are left out on purpose.
+Only models the web catalogue marks as free (`usesCredits: false`) are exposed - picking a credit-billed model through this proxy would silently spend your API balance, so they are left out on purpose. Two exceptions, `z-ai-glm-5-3-flash` and `deepseek-v4-1-flash`: the catalogue flags them as billed, but the web model picker shows them to Pro accounts with no pay-per-use price (checked 2026-11-25). Keep an eye on your credit balance the first time you use them.
 
 | Family | Model ids |
 | --- | --- |
-| DeepSeek | `deepseek-v4-1-flash-free`, `deepseek-ai-DeepSeek-V3.2` |
-| Qwen | `qwen-3-8-27b`, `qwen3-6-27b`, `qwen3-5-35b-a3b` |
-| GLM | `zai-org-glm-5.2`, `zai-org-glm-4.6` |
+| DeepSeek | `deepseek-v4-1-flash-free`, `deepseek-v4-1-flash` (1017), `deepseek-ai-DeepSeek-V3.2` |
+| Qwen | `qwen-3-8-27b`, `qwen3-6-27b`, `qwen3-5-35b-a3b`, `qwen3-coder-480b-a35b-instruct-turbo`, `qwen3-vl-235b-a22b` |
+| GLM | `z-ai-glm-5-3-flash`, `zai-org-glm-5.2`, `zai-org-glm-4.7-app`, `olafangensan-glm-4.7-flash-heretic` |
+| NVIDIA | `nvidia-nemotron-3-ultra-550b-a55b`, `nvidia-nemotron-3-nano-30b-a3b` |
 | Gemma | `google-gemma-4-31b-it`, `google-gemma-4-26b-a4b-it`, `gemma4-uncensored` |
-| Venice | `venice-uncensored-1-2` |
+| Venice | `venice-uncensored-1-2`, `venice-uncensored-role-play` |
 | Aion | `aion-labs-aion-3-0`, `aion-labs-aion-3-0-mini` |
 | TEE / E2EE hosted | `e2ee-qwen3-8-27b`, `e2ee-gpt-oss-120b-p`, `e2ee-qwen3-6-35b-a3b`, `e2ee-gemma-4-26b-a4b-uncensored-p`, `e2ee-qwen-2-5-7b-p`, `e2ee-qwen3-vl-30b-a3b-p` |
 
-All of them take images: each one read a test picture correctly through this proxy, so the sync marks them with image input and OpenCode lets you attach pictures. Rerun `venice-web-sync` after updating if OpenCode says a model does not support images.
+The 18 models that were measured take images: each one read a test picture correctly through this proxy, so the sync marks them with image input and OpenCode lets you attach pictures. The models added on 2026-11-25 (GLM 5.3 Flash, DeepSeek V4.1 Flash 1017, GLM 4.7, GLM 4.7 Flash Heretic, Qwen 3 Coder, Qwen3 VL 235B, both Nemotrons, Venice Role Play) are not measured yet and are text-only until they are. Rerun `venice-web-sync` after updating if OpenCode says a model does not support images.
 
 The catalogue lives in [`src/lib/models.mjs`](src/lib/models.mjs); edit it and rerun `venice-web-sync` if Venice adds models. If the web catalogue ships a model you want, run `GET /v1/models` (or `venice-web-doctor`) after adding it to verify it is reachable.
 

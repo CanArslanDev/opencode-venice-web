@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **Catalogue refreshed against the web catalogue (2026-11-25).** Added the free
+  (`usesCredits: false`) models that were missing: `zai-org-glm-4.7-app`, `olafangensan-glm-4.7-flash-heretic`,
+  `qwen3-coder-480b-a35b-instruct-turbo`, `qwen3-vl-235b-a22b`,
+  `nvidia-nemotron-3-ultra-550b-a55b`, `nvidia-nemotron-3-nano-30b-a3b` and
+  `venice-uncensored-role-play` (text only until measured with a picture).
+  `zai-org-glm-4.6` is gone from the web catalogue and was removed. Output limits
+  follow the catalogue (`deepseek-v4-1-flash-free` 131072, Gemma 4 31B 16384).
+  Also added `z-ai-glm-5-3-flash` (GLM 5.3 Flash) and `deepseek-v4-1-flash`
+  (DeepSeek V4.1 Flash 1017): the catalogue flags them `usesCredits: true`, but
+  the web model picker shows them to Pro accounts with no pay-per-use price.
+  GLM 5.3 (full) stays out, it is pay-per-use in the picker. GLM 5.1 and GLM 5
+  are free but marked as being discontinued soon, so they were not added.
+  Rerun `venice-web-sync`.
+
 - **Image generation and editing**: `POST /v1/images/generations` and
   `POST /v1/images/edits` in OpenAI's shape, on the free web models
   (`z-image-turbo`, `chroma`, `wai-illu`; edits on `firered-image-edit`,
