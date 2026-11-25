@@ -10,6 +10,14 @@
   free image models on this route: `krea-2-turbo`, `stable-diffusion-3.5-rev2`,
   `lustify-sdxl`, `lustify-v8`. `VENICE_WEB_IMAGE_ROUTE=agent` keeps the old
   agent route. PROTOCOL §5c.
+- **Image settings measured per model (2026-11-25).** Seeds go up to
+  999999999 (larger ones were refused, so random seeds failed about half the
+  time). Sizes are scaled to Venice's limit of 1344 per side and 1.5 MP, which
+  makes `krea-2-turbo` at `2K` and wide aspect ratios work. The reported size is
+  read from the picture (`chroma` and `lustify-v8` return 1.5x). `steps` is
+  refused on `z-image-turbo`, `chroma` and `krea-2-turbo`, which ignore it, and
+  prompts longer than the model's limit (1500 to 7500 characters) are a 400.
+  README has the per-model table.
 
 - **Catalogue refreshed against the web catalogue (2026-11-25).** Added the free
   (`usesCredits: false`) models that were missing: `zai-org-glm-4.7-app`, `olafangensan-glm-4.7-flash-heretic`,
@@ -19,8 +27,9 @@
   `zai-org-glm-4.6` is gone from the web catalogue and was removed. Output limits
   follow the catalogue (`deepseek-v4-1-flash-free` 131072, Gemma 4 31B 16384).
   Also added `z-ai-glm-5-3-flash` (GLM 5.3 Flash) and `deepseek-v4-1-flash`
-  (DeepSeek V4.1 Flash 1017): the catalogue flags them `usesCredits: true`, but
-  the web model picker shows them to Pro accounts with no pay-per-use price.
+  (DeepSeek V4.1 Flash 1017): Pro-only, `usesCredits: false` in the live
+  catalogue (re-read from a Pro session on 2026-11-25), and both answer on the
+  web endpoint.
   GLM 5.3 (full) stays out, it is pay-per-use in the picker. GLM 5.1 and GLM 5
   are free but marked as being discontinued soon, so they were not added.
   Rerun `venice-web-sync`.

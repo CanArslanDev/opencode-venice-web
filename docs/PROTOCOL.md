@@ -302,7 +302,7 @@ So the proxy sends one agent call per requested image, in parallel, with a seed 
 
 ## 5c. Image generation on the Studio route
 
-Read from the web app's bundle on 2026-11-25 (the request schema of the Studio page, `venice.ai/studio/image`); **not yet measured through this proxy**.
+Read from the web app's bundle on 2026-11-25 (the request schema of the Studio page, `venice.ai/studio/image`), then measured through this proxy on the same day (all seven free models, Windows, curl 8.x Schannel).
 
 ```
 POST /api/inference/image          (JSON, same auth and attestation headers as chat)
@@ -314,7 +314,23 @@ POST /api/inference/image          (JSON, same auth and attestation headers as c
 
 `seed`, `steps`, `width`, `height`, `hideWatermark` and `matureFilter` are required by the schema. The answer is the picture's bytes (`image/png|webp|jpeg`); the headers say what happened: `x-venice-model-id`, `x-venice-model-name`, `x-venice-is-blurred`, `x-venice-is-content-violation`, `x-venice-is-adult-content`, `x-venice-is-adult-model-content-violation`, plus `x-ratelimit-*`. `seed` must be at most 999999999 (`Number must be less than or equal to 999999999`).
 
-Which settings a model takes comes from the catalogue (`GET /api/app/models`, section `image`): `supportsNegativePrompts`, `supportsSeed`, `supportsSteps`, `settings.steps.max`, `settings.cfgScale.scale`, `settings.widthHeightDivisor`, and for fixed-size models `settings.aspectRatio` + `settings.resolution` + `settings.customSizeMapping`. The web app drops settings the model does not take; the proxy answers 400 instead. `src/lib/models.mjs` mirrors those values.
+Which settings a model takes comes from the catalogue (`GET /api/app/models`, section `image`): `supportsNegativePrompts`, `supportsSeed`, `supportsSteps`, `settings.steps.max`, `settings.cfgScale.scale`, `settings.widthHeightDivisor`, and for fixed-size models `settings.aspectRatio` + `settings.resolution` + `settings.customSizeMapping`. The web app drops settings the model does not take; the proxy answers 400 instead.
+
+Schema limits measured on 2026-11-25, the same for every model: `width` and `height` at most 1344 each and 1,500,000 pixels in total ("Number must be less than or equal to 1344", "Total pixel count (width × height) must not exceed 1,500,000"); `prompt` at most the model's `promptCharacterLimit` ("String must contain at most 1500 character(s)" on SD35, while `z-image-turbo` takes 1600). On fixed-size models (`krea-2-turbo`) the picture's size comes from `aspectRatio` + `resolution` only: 16:9 at 2K returns 2560x1440 whatever `width`/`height` say, as long as those pass the limits. `chroma` and `lustify-v8` (`settings.outputScale: 1.5`) return 1.5x the size asked for (1024 → 1536).
+
+Per-model effect, measured with one setting changed against the same seed (mean pixel difference to the base picture; the same request twice differs by 0 to 7):
+
+| model | other seed | steps 4 | negativePrompt | cfgScale | stylePreset |
+| --- | --- | --- | --- | --- | --- |
+| z-image-turbo | 53 | 0 | 1 | 0 | 63 |
+| chroma | 62 | 0 | 0 | 0 | 70 |
+| wai-illu | 70 | 34 | 35 | 21 | 74 |
+| krea-2-turbo | 65 | 0 | 0 | 0 | 113 |
+| stable-diffusion-3.5-rev2 | 125 | 56 | 20 | 18 | 34 |
+| lustify-sdxl | 48 | 31 | 22 | 41 | 39 |
+| lustify-v8 | 60 | 20 | 22 | 28 | 38 |
+
+None of these fields is refused upstream: a model that does not take one ignores it. `hideWatermark: false` adds the "Venice" mark in the bottom-left corner on every model, and `format: "webp"` returns WebP on every model, `krea-2-turbo` included (its catalogue says `supportsFormatSelection: false`). `src/lib/models.mjs` mirrors those values.
 
 Unlike the agent route this one takes `modelId` directly, so the free models the agent refuses (SD35, Lustify) are offered here. The proxy warns when `x-venice-model-id` differs from the model asked for.
 

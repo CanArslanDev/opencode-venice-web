@@ -66,7 +66,8 @@ test('every setting reaches the request under the web app field names', () => {
 test('settings a model does not take are refused, not dropped', () => {
   assert.throws(() => parseStudioOptions({ negative_prompt: 'x' }, 'z-image-turbo', IMAGE_MODELS['z-image-turbo']), /does not take a negative prompt/)
   assert.throws(() => parseStudioOptions({ cfg_scale: 3 }, 'chroma', IMAGE_MODELS.chroma), /does not take cfg_scale/)
-  assert.throws(() => parseStudioOptions({ steps: 9 }, 'z-image-turbo', IMAGE_MODELS['z-image-turbo']), /from 1 to 8/)
+  for (const id of ['z-image-turbo', 'chroma', 'krea-2-turbo']) assert.throws(() => parseStudioOptions({ steps: 4 }, id, IMAGE_MODELS[id]), /does not take steps/)
+  assert.throws(() => parseStudioOptions({ steps: 31 }, 'wai-illu', IMAGE_MODELS['wai-illu']), /from 1 to 30/)
   assert.throws(() => parseStudioOptions({ cfg_scale: 30 }, 'wai-illu', IMAGE_MODELS['wai-illu']), /from 0 to 10/)
   assert.throws(() => parseStudioOptions({ hide_watermark: 'maybe' }, 'chroma', IMAGE_MODELS.chroma), ImageRequestError)
   assert.throws(() => parseStudioOptions({ resolution: '2K' }, 'chroma', IMAGE_MODELS.chroma), /fixed sizes/)
@@ -157,4 +158,19 @@ test('imageSize reads PNG and WebP headers', () => {
   assert.deepEqual(imageSize(webp('VP8 ', (d) => { d.writeUInt16LE(1024, 26); d.writeUInt16LE(1024, 28) })), { width: 1024, height: 1024 })
   assert.deepEqual(imageSize(webp('VP8L', (d) => { d.writeUInt32LE((1023) | (511 << 14), 21) })), { width: 1024, height: 512 })
   assert.equal(imageSize(Buffer.from('not an image')), null)
+})
+
+test('prompt length follows the model limit (1500 for SD35, refused upstream past it)', () => {
+  const long = 'a'.repeat(1600)
+  assert.throws(() => parseStudioOptions({ prompt: long }, 'stable-diffusion-3.5-rev2', IMAGE_MODELS['stable-diffusion-3.5-rev2']), /at most 1500 characters, got 1600/)
+  assert.equal(parseStudioOptions({ prompt: long }, 'z-image-turbo', IMAGE_MODELS['z-image-turbo']).steps, 8)
+  assert.throws(() => parseStudioOptions({ prompt: 'a'.repeat(5001) }, 'krea-2-turbo', IMAGE_MODELS['krea-2-turbo']), /at most 5000/)
+})
+
+test('every image model carries a prompt limit and the measured settings', () => {
+  for (const [id, info] of Object.entries(IMAGE_MODELS)) {
+    assert.ok(info.promptLimit >= 1500, id)
+    // models that ignore steps also ignore negative prompt and CFG (measured 2026-11-25)
+    if (info.steps.fixed) assert.ok(!info.negativePrompt && !info.cfg, id)
+  }
 })

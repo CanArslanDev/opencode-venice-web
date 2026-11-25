@@ -126,6 +126,9 @@ export function resolveDimensions(info, { size, aspectRatio, resolution }) {
  * otherwise. A setting the model does not take is a 400, not silently dropped.
  */
 export function parseStudioOptions(body, model, info) {
+  if (info.promptLimit && typeof body.prompt === 'string' && body.prompt.length > info.promptLimit) {
+    throw new ImageRequestError(`${model} takes a prompt of at most ${info.promptLimit} characters, got ${body.prompt.length}`)
+  }
   const options = {
     seed: parseSeed(body.seed),
     format: parseOutputFormat(body.output_format),
@@ -149,6 +152,7 @@ export function parseStudioOptions(body, model, info) {
 
   const steps = number(body.steps, 'steps')
   if (steps != null) {
+    if (info.steps?.fixed) throw new ImageRequestError(`${model} does not take steps (it always runs ${info.steps.default})`)
     const max = info.steps?.max ?? 50
     if (!Number.isInteger(steps) || steps < 1 || steps > max) throw new ImageRequestError(`steps must be a whole number from 1 to ${max} for ${model}, got ${JSON.stringify(body.steps)}`)
     options.steps = steps

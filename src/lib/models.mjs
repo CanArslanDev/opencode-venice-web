@@ -4,10 +4,11 @@
  * unlimited for these in the web chat, and the web inference endpoint does not
  * bill them to the API balance - which is the whole point of this proxy.
  *
- * Exception: `z-ai-glm-5-3-flash` and `deepseek-v4-1-flash` (1017). The catalogue
- * flags them `usesCredits: true`, but the web model picker shows them to a Pro
- * account with the "Pro" tag and no pay-per-use price, like the other free
- * models (checked 2026-11-25). Watch the credit balance after using them.
+ * `z-ai-glm-5-3-flash` and `deepseek-v4-1-flash` (1017) are Pro-only and, like
+ * every model here, `usesCredits: false` in `GET /api/app/models` (read live
+ * from a Pro session on 2026-11-25; an earlier read had them `true`). Both
+ * answer on the web endpoint. The `pricing` block the catalogue shows on every
+ * model is the API price, not a web charge.
  *
  * Models that DO cost credits are deliberately left out: on the agent endpoint
  * Venice may silently route them to a free model anyway, so advertising them
@@ -72,7 +73,12 @@ export const modelIds = Object.keys(MODELS)
  * (checked 2026-11-16), so on `VENICE_WEB_IMAGE_ROUTE=agent` only those are
  * offered.
  *
- * Settings mirror the catalogue (checked 2026-11-25): `steps` default/max,
+ * Settings mirror the catalogue and were measured one model at a time
+ * (2026-11-25, same seed with one setting changed, pixel difference against
+ * the base picture): `promptLimit` (longer prompts are refused upstream with
+ * "String must contain at most N character(s)"), `steps` default/max
+ * (`fixed`: the catalogue's `supportsSteps: false`, and the picture does not
+ * change with steps, negative prompt or CFG; Venice ignores them silently),
  * `cfg` scale range (absent: the model takes none), `negativePrompt`,
  * `divisor` (width and height are multiples of it), and for models that only
  * take fixed sizes, `sizes[resolution][aspect]`.
@@ -89,13 +95,13 @@ const KREA_SIZES = {
 }
 
 export const IMAGE_MODELS = {
-  'z-image-turbo': { name: 'Z-Image Turbo', agent: true, steps: { default: 8, max: 8 }, negativePrompt: false, divisor: 8 },
-  chroma: { name: 'Chroma', agent: true, steps: { default: 10, max: 10 }, negativePrompt: false, divisor: 8 },
-  'wai-illu': { name: 'Anime (WAI)', agent: true, steps: { default: 25, max: 30 }, cfg: { default: 5, min: 0, max: 10 }, negativePrompt: true, divisor: 16 },
-  'krea-2-turbo': { name: 'Krea 2 Turbo', agent: false, steps: { default: 8, max: 8 }, negativePrompt: false, divisor: 8, sizes: KREA_SIZES, defaultResolution: '1K' },
-  'stable-diffusion-3.5-rev2': { name: 'Venice SD35', agent: false, steps: { default: 25, max: 30 }, cfg: { default: 3.5, min: 0, max: 20 }, negativePrompt: true, divisor: 16 },
-  'lustify-sdxl': { name: 'Lustify SDXL', agent: false, steps: { default: 20, max: 50 }, cfg: { default: 5, min: 0, max: 10 }, negativePrompt: true, divisor: 8 },
-  'lustify-v8': { name: 'Lustify v8', agent: false, steps: { default: 30, max: 50 }, cfg: { default: 3.5, min: 1.5, max: 10 }, negativePrompt: true, divisor: 8 },
+  'z-image-turbo': { name: 'Z-Image Turbo', agent: true, promptLimit: 7500, steps: { default: 8, max: 8, fixed: true }, negativePrompt: false, divisor: 8 },
+  chroma: { name: 'Chroma', agent: true, promptLimit: 7500, steps: { default: 10, max: 10, fixed: true }, negativePrompt: false, divisor: 8 },
+  'wai-illu': { name: 'Anime (WAI)', agent: true, promptLimit: 1500, steps: { default: 25, max: 30 }, cfg: { default: 5, min: 0, max: 10 }, negativePrompt: true, divisor: 16 },
+  'krea-2-turbo': { name: 'Krea 2 Turbo', agent: false, promptLimit: 5000, steps: { default: 8, max: 8, fixed: true }, negativePrompt: false, divisor: 8, sizes: KREA_SIZES, defaultResolution: '1K' },
+  'stable-diffusion-3.5-rev2': { name: 'Venice SD35', agent: false, promptLimit: 1500, steps: { default: 25, max: 30 }, cfg: { default: 3.5, min: 0, max: 20 }, negativePrompt: true, divisor: 16 },
+  'lustify-sdxl': { name: 'Lustify SDXL', agent: false, promptLimit: 1500, steps: { default: 20, max: 50 }, cfg: { default: 5, min: 0, max: 10 }, negativePrompt: true, divisor: 8 },
+  'lustify-v8': { name: 'Lustify v8', agent: false, promptLimit: 1500, steps: { default: 30, max: 50 }, cfg: { default: 3.5, min: 1.5, max: 10 }, negativePrompt: true, divisor: 8 },
 }
 
 export const DEFAULT_IMAGE_MODEL = 'z-image-turbo'

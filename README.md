@@ -132,7 +132,7 @@ Generation goes through the web app's Studio route, which takes the model and it
 | `negative_prompt` | what to keep out of the picture (`wai-illu`, `stable-diffusion-3.5-rev2`, `lustify-*`) |
 | `aspect_ratio` | `1:1`, `5:4`, `4:3`, `3:2`, `16:9`, `21:9`, `4:5`, `3:4`, `2:3`, `9:16`, `9:21`; instead of `size` |
 | `resolution` | `1K` or `2K`, for `krea-2-turbo` (fixed sizes) |
-| `steps` | sampling steps, up to the model's maximum (8 for `z-image-turbo`/`krea-2-turbo`, 10 for `chroma`, 30-50 for the others) |
+| `steps` | sampling steps, up to the model's maximum (30 for `wai-illu`/SD35, 50 for `lustify-*`); `z-image-turbo`, `chroma` and `krea-2-turbo` run a fixed number and refuse it |
 | `cfg_scale` | prompt adherence, for the models that have it (`wai-illu`, SD35, Lustify) |
 | `style_preset` | a style name from the web app's style list, e.g. `Cinematic` |
 | `hide_watermark` | `true` by default |
@@ -140,10 +140,24 @@ Generation goes through the web app's Studio route, which takes the model and it
 | `output_format` | `png` (default) or `webp` |
 | `embed_exif` | `false` by default |
 
-A setting the model does not take is answered with a 400 instead of being dropped. `VENICE_WEB_IMAGE_ROUTE=agent` switches back to Venice's agent route (only `z-image-turbo`, `chroma`, `wai-illu`, and none of the settings above).
+A setting the model does not take is answered with a 400 instead of being dropped (Venice itself ignores it silently).
+
+What each model takes, measured one setting at a time against the same seed (2026-11-25):
+
+| model | seed | steps | negative_prompt | cfg_scale | style_preset | watermark | webp | prompt limit | notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `z-image-turbo` | yes | no | no | no | yes | yes | yes | 7500 | |
+| `chroma` | yes | no | no | no | yes | yes | yes | 7500 | output 1.5x the size asked for |
+| `wai-illu` | yes | yes | yes | yes | yes | yes | yes | 1500 | |
+| `krea-2-turbo` | yes | no | no | no | yes | yes | yes | 5000 | size from `aspect_ratio` + `resolution` |
+| `stable-diffusion-3.5-rev2` | yes | yes | yes | yes | yes | yes | yes | 1500 | |
+| `lustify-sdxl` | yes | yes | yes | yes | yes | yes | yes | 1500 | |
+| `lustify-v8` | yes | yes | yes | yes | yes | yes | yes | 1500 | output 1.5x the size asked for |
+
+The same seed gives the same picture (byte for byte on most models; `wai-illu` and `lustify-sdxl` vary slightly from run to run). `VENICE_WEB_IMAGE_ROUTE=agent` switches back to Venice's agent route (only `z-image-turbo`, `chroma`, `wai-illu`, and none of the settings above).
 
 - The prompt is used as written.
-- Sizes from 256 to 2048 per side are accepted and rounded to the model's step (8 or 16 pixels).
+- Sizes from 256 to 2048 per side are accepted, rounded to the model's step (8 or 16 pixels) and scaled down to Venice's limit of 1344 per side and 1.5 MP (`krea-2-turbo` at `2K` still returns up to 2688 pixels: there the size comes from `aspect_ratio` + `resolution`). The size reported back is the picture's own.
 - `n` up to 4 runs that many generations in parallel.
 - Edits take PNG, JPEG, WebP or GIF as a file or a base64 data URL; image URLs are not downloaded. `mask` is not supported: describe the change in the prompt. Edits still go through the agent route, so the settings above do not apply to them.
 - `response_format: "url"` returns a `data:` URL, because the proxy stores nothing.
