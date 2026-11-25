@@ -10,7 +10,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
-import { apiBase, debug, dumpFile, host, judgeEnabled, judgeModel, judgeTimeoutMs, port, providerID } from './config.mjs'
+import { apiBase, debug, dumpFile, host, imageRoute, judgeEnabled, judgeModel, judgeTimeoutMs, port, providerID } from './config.mjs'
 import {
   applyFallback,
   buildJudgeRequest,
@@ -29,7 +29,7 @@ import {
   toVeniceRequest,
   withRetryReminder,
 } from './emulate.mjs'
-import { MODELS } from './models.mjs'
+import { IMAGE_MODELS, MODELS } from './models.mjs'
 import { debugRaw, log, preview, warn } from './log.mjs'
 import { deepStripNulls, repairJsonControlChars } from './sanitize.mjs'
 import { AGENT_IMAGE_PATH, INFERENCE_PATH, SignInError, loadSession, resetSessionCache, upstreamChat } from './venice.mjs'
@@ -47,6 +47,7 @@ import {
   pickImageModel,
   seedsFor,
 } from './imagegen.mjs'
+import { STUDIO_IMAGE_PATH, parseStudioOptions, studioImageMeta, studioImageRequest, studioSeeds } from './studio.mjs'
 
 const json = (res, status, payload) => {
   res.writeHead(status, { 'content-type': 'application/json' })
@@ -445,14 +446,57 @@ function imageJson(raw) {
   }
 }
 
+/** Runs one Studio image request (docs/PROTOCOL.md §5c) and returns its picture. */
+async function studioRequest(body, signal) {
+  let upstream
+  try {
+    upstream = await upstreamChat(body, STUDIO_IMAGE_PATH, signal)
+  } catch (error) {
+    throw new UpstreamImageError(error instanceof SignInError || error.signIn ? 401 : 502, error.message)
+  }
+  const meta = studioImageMeta(upstream.headers)
+  const data = Buffer.from(await upstream.arrayBuffer().catch(() => new ArrayBuffer(0)))
+  if (!upstream.ok || !String(upstream.headers.get('content-type') ?? '').startsWith('image/') || !data.length) {
+    const text = data.toString('utf8')
+    throw new UpstreamImageError(upstream.ok ? 502 : upstream.status, `${apiBase} responded HTTP ${upstream.status}: ${text.slice(0, 400) || 'no image'}`)
+  }
+  if (meta.model && meta.model !== body.modelId) warn(`   ~ asked for ${body.modelId}, Venice used ${meta.model}`)
+  if (meta.flags.is_blurred || meta.flags.is_content_violation) warn(`   ~ Venice flagged an image: ${JSON.stringify(meta.flags)}`)
+  return { data, mimeType: meta.mimeType, width: body.width, height: body.height, model: meta.model, prompt: null, flags: meta.flags }
+}
+
+/** Generation on the Studio route: one request per picture, in parallel. */
+async function answerStudioImages(res, prompt, model, n, body, format) {
+  const options = parseStudioOptions(body, model, IMAGE_MODELS[model])
+  const seeds = studioSeeds(n, options.seed)
+  log(`-> image ${model} • n=${n} • ${options.width}x${options.height}${options.negativePrompt ? ' • negative' : ''} • seed ${seeds[0]} • ${preview(prompt, 80)}`)
+  const abort = new AbortController()
+  res.on('close', () => abort.abort())
+  let images
+  try {
+    images = await Promise.all(seeds.map((seed) => studioRequest(studioImageRequest({ prompt, model, options, seed }), abort.signal)))
+  } catch (error) {
+    abort.abort()
+    if (error instanceof UpstreamImageError) return openaiError(res, error.status, error.message)
+    throw error
+  }
+  log(`   <- ${images.length} image(s) • ${images.map((image) => `${image.width}x${image.height} ${image.data.length} B`).join(', ')}`)
+  const answer = imagesResponse(images, format)
+  answer.data.forEach((item, index) => {
+    item.seed = seeds[index]
+  })
+  return json(res, 200, answer)
+}
+
 /** `POST /v1/images/generations` (OpenAI shape) on the free image models. */
 async function handleImageGenerations(req, res) {
   const body = imageJson(await readRaw(req, MAX_IMAGE_BODY))
   if (typeof body.prompt !== 'string' || !body.prompt.trim()) throw new ImageRequestError('prompt is required')
-  const model = pickImageModel(body.model)
+  const model = pickImageModel(body.model, { route: imageRoute })
   const n = parseCount(body.n)
-  const size = parseSize(body.size)
   const format = parseResponseFormat(body.response_format)
+  if (imageRoute === 'studio') return answerStudioImages(res, body.prompt, model, n, body, format)
+  const size = parseSize(body.size)
   log(`-> image ${model} • n=${n}${size ? ` • ${size.width}x${size.height}` : ''} • ${preview(body.prompt, 80)}`)
   const instructions = seedsFor(n).map((seed) => generationInstruction({ prompt: body.prompt, model, size, seed }))
   return answerImages(res, 'image generation', instructions, [], model, format)

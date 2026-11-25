@@ -19,6 +19,7 @@ src/lib/models.mjs            free web model catalogue
 src/lib/venice.mjs            session file, Clerk JWT, attestation, upstream fetch
 src/lib/curl.mjs              curl transport for the inference host (Cloudflare blocks Node's fetch there)
 src/lib/imagegen.mjs          image generation/editing: agent instructions, image event reader (pure)
+src/lib/studio.mjs            image generation on the Studio route: options, request body, response headers (pure)
 src/lib/emulate.mjs           tool-call emulation: prompt, envelope parser, SSE reader, translation, retry heuristics
 src/lib/server.mjs            routing + live chunk translation (reasoning, keepalive) + retry logic
 src/lib/cookies.mjs           Chromium cookie decryption (macOS Keychain / Linux secret-tool)
@@ -29,6 +30,7 @@ test/lenient-json.test.mjs    unit tests for the structural JSON reader
 test/fixtures/real-replies.mjs  real broken model replies (anonymised); every shape must keep parsing
 test/curl.test.mjs            curl transport: helpers, TLS flags, and real curl against a local HTTPS server
 test/imagegen.test.mjs        image generation/editing: validation, instructions, event reader
+test/studio.test.mjs          Studio image route: option parsing, request body, headers
 test/images.test.mjs          image input: data URLs, which images are sent, placement, multipart encoding
 test/server-loop.test.mjs     Venice tool-loop detection in collectStream (fake SSE)
 test/smoke.mjs                end-to-end check against a running proxy
@@ -77,7 +79,8 @@ VENICE_WEB_DUMP=/tmp/req.json node src/proxy.mjs
 * Clerk rotates `__client` on use - always read `set-cookie` and persist.
 * `/agents/ad-hoc` runs **Venice's own agent loop** inside one response. A native tool call (instead of the envelope) makes Venice answer "Tool not found" and re-run the model, up to 10 times, invisibly; the model then claims its tools are broken and stops without a result. `collectStream()` counts `veniceai:tool_call_generation` steps and stops past `SERVER_LOOP_STEPS`, then retries with `NATIVE_CALL_REMINDER`. Keep the last retry unstopped so a turn always ends with an answer. `docs/PROTOCOL.md` §4.7.
 * Images travel as **bytes in the request**, multipart (`request` + `media.<id>`), with an `input_image` part naming the id; nothing is uploaded and no id has to exist upstream. The image parts must sit in the **last** user message (`withImagesLast()`): earlier, the model calls Venice's `view_media` into the envelope and never sees the picture (0/5 vs 5/5). Only the latest user message's images are sent. `docs/PROTOCOL.md` §2b.
-* Image generation goes through Venice's own agent (`/agents/venice?paidImagesMode=block`), which rewrites prompts and picks models unless told exactly what to call (`generationInstruction()`). Several requests in one tool call come back identical, so `n` is `n` parallel calls. The agent only runs `z-image-turbo`, `chroma` and `wai-illu` of the free image models; it swaps the others silently, so a model goes into `IMAGE_MODELS` only after a run shows `requests[].model_id` matching. `docs/PROTOCOL.md` §5b.
+* Image generation goes through the Studio route (`POST /api/inference/image`, JSON in, bytes out) by default; `src/lib/studio.mjs` builds the body and the per-model limits live in `IMAGE_MODELS`. The agent route below stays as `VENICE_WEB_IMAGE_ROUTE=agent` and for edits. `docs/PROTOCOL.md` §5c.
+* On the agent route, image generation goes through Venice's own agent (`/agents/venice?paidImagesMode=block`), which rewrites prompts and picks models unless told exactly what to call (`generationInstruction()`). Several requests in one tool call come back identical, so `n` is `n` parallel calls. The agent only runs `z-image-turbo`, `chroma` and `wai-illu` of the free image models; it swaps the others silently, so only `IMAGE_MODELS` entries with `agent: true` (checked by a run showing `requests[].model_id` matching) are accepted there. `docs/PROTOCOL.md` §5b.
 * Cloudflare blocks Node's own HTTP client on `outerface.venice.ai/api/inference/*` (403 "Attention Required!" HTML). The system curl gets through, but only over HTTP/1.1, with the user agent passed via `-A` (header order matters) and **without** `accept: text/event-stream`. `src/lib/curl.mjs` encodes all three; read `docs/PROTOCOL.md` §1 before changing any of them.
 * On Linux the same rule also rejects the stock **OpenSSL** ClientHello (Ubuntu curl: 0/5), while `--tlsv1.3` passes (10/10); macOS curl passes as is and rejects `--tlsv1.3`. `tlsArgsFor()` picks the flag from `curl --version`. Headers go through a `0600` temp file (`writeHeaderFile()`), never `/dev/fd/3`: Node's extra stdio pipes are sockets and Linux cannot reopen them by path (curl exit 26). `test/curl.test.mjs` runs real curl against a local HTTPS server to keep this covered on CI's Ubuntu.
 

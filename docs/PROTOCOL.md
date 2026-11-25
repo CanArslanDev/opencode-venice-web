@@ -300,6 +300,26 @@ What was measured:
 
 So the proxy sends one agent call per requested image, in parallel, with a seed each when `n > 1`. `mask` is refused (the edit tool has no mask; describe the change in the prompt). `response_format: url` is answered with a data URL, since the proxy hosts no files. OpenAI model names (`dall-e-3`, `gpt-image-1`, …) map to the default model; any other unknown name is a 400.
 
+## 5c. Image generation on the Studio route
+
+Read from the web app's bundle on 2026-11-25 (the request schema of the Studio page, `venice.ai/studio/image`); **not yet measured through this proxy**.
+
+```
+POST /api/inference/image          (JSON, same auth and attestation headers as chat)
+{ "requestId", "modelId", "prompt", "width", "height", "seed", "steps",
+  "hideWatermark", "matureFilter", "embedExifMetadata", "format": "png"|"webp", "type": "image",
+  "aspectRatio"?, "resolution"?, "negativePrompt"?, "cfgScale"?, "stylePreset"?, "variants"? (1-4),
+  "loraStrength"?, "styleReferences"? [{ "url": data URL, "strength" }], "quality"?, "transparentBackground"? }
+```
+
+`seed`, `steps`, `width`, `height`, `hideWatermark` and `matureFilter` are required by the schema. The answer is the picture's bytes (`image/png|webp|jpeg`); the headers say what happened: `x-venice-model-id`, `x-venice-model-name`, `x-venice-is-blurred`, `x-venice-is-content-violation`, `x-venice-is-adult-content`, `x-venice-is-adult-model-content-violation`, plus `x-ratelimit-*`.
+
+Which settings a model takes comes from the catalogue (`GET /api/app/models`, section `image`): `supportsNegativePrompts`, `supportsSeed`, `supportsSteps`, `settings.steps.max`, `settings.cfgScale.scale`, `settings.widthHeightDivisor`, and for fixed-size models `settings.aspectRatio` + `settings.resolution` + `settings.customSizeMapping`. The web app drops settings the model does not take; the proxy answers 400 instead. `src/lib/models.mjs` mirrors those values.
+
+Unlike the agent route this one takes `modelId` directly, so the free models the agent refuses (SD35, Lustify) are offered here. The proxy warns when `x-venice-model-id` differs from the model asked for.
+
+Edits on the Studio page use `POST /api/inference/multi-edit` (multipart: the fields of `{ modelId, prompt, requestId, aspectRatio?, resolution?, thinkingLevel?, … }` each as its own form field, the pictures as `files`, an optional `mask`) and answer bytes the same way. The proxy does not use it yet: edits stay on the agent route (§5b).
+
 ## 6. Free-model catalogue
 
 `src/lib/models.mjs` mirrors the web catalogue entries flagged `usesCredits: false`. The web app fetches that list from `GET /api/app/models` and `GET /api/v2/agents/configuration_options` with the same session; both are useful if you want to regenerate the list automatically (the proxy currently ships a static copy so it works offline and with a dead session).

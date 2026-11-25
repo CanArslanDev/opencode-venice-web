@@ -121,13 +121,31 @@ curl -s 127.0.0.1:3456/v1/images/edits -F image=@photo.png -F 'prompt=make the s
 
 | | models |
 | --- | --- |
-| generate | `z-image-turbo` (default), `chroma`, `wai-illu` (anime) |
+| generate | `z-image-turbo` (default), `chroma`, `wai-illu` (anime), `krea-2-turbo`, `stable-diffusion-3.5-rev2`, `lustify-sdxl`, `lustify-v8` |
 | edit | `firered-image-edit` (default), `qwen-edit-uncensored` |
 
-- The prompt is used as written; the answer's `revised_prompt` is what the model actually got.
-- Sizes from 256 to 2048 per side are accepted. Each model rounds to its own resolution and keeps the aspect ratio (`1792x1024` comes back as 1344x768).
-- `n` up to 4 runs that many generations in parallel. Only `chroma` gives a different picture each time; `z-image-turbo` and `wai-illu` return the same picture for the same prompt.
-- Edits take PNG, JPEG, WebP or GIF as a file or a base64 data URL; image URLs are not downloaded. `mask` is not supported: describe the change in the prompt.
+Generation goes through the web app's Studio route, which takes the model and its settings directly. Extra fields on `/v1/images/generations`, all optional:
+
+| field | what it does |
+| --- | --- |
+| `seed` | fixed seed (0 to 2147483647); with `n` > 1 the pictures get `seed`, `seed+1`, … The seed used comes back on each `data[]` item |
+| `negative_prompt` | what to keep out of the picture (`wai-illu`, `stable-diffusion-3.5-rev2`, `lustify-*`) |
+| `aspect_ratio` | `1:1`, `5:4`, `4:3`, `3:2`, `16:9`, `21:9`, `4:5`, `3:4`, `2:3`, `9:16`, `9:21`; instead of `size` |
+| `resolution` | `1K` or `2K`, for `krea-2-turbo` (fixed sizes) |
+| `steps` | sampling steps, up to the model's maximum (8 for `z-image-turbo`/`krea-2-turbo`, 10 for `chroma`, 30-50 for the others) |
+| `cfg_scale` | prompt adherence, for the models that have it (`wai-illu`, SD35, Lustify) |
+| `style_preset` | a style name from the web app's style list, e.g. `Cinematic` |
+| `hide_watermark` | `true` by default |
+| `safe_mode` | Venice's mature filter, `true` by default (adult content is blurred); `false` turns it off |
+| `output_format` | `png` (default) or `webp` |
+| `embed_exif` | `false` by default |
+
+A setting the model does not take is answered with a 400 instead of being dropped. `VENICE_WEB_IMAGE_ROUTE=agent` switches back to Venice's agent route (only `z-image-turbo`, `chroma`, `wai-illu`, and none of the settings above).
+
+- The prompt is used as written.
+- Sizes from 256 to 2048 per side are accepted and rounded to the model's step (8 or 16 pixels).
+- `n` up to 4 runs that many generations in parallel.
+- Edits take PNG, JPEG, WebP or GIF as a file or a base64 data URL; image URLs are not downloaded. `mask` is not supported: describe the change in the prompt. Edits still go through the agent route, so the settings above do not apply to them.
 - `response_format: "url"` returns a `data:` URL, because the proxy stores nothing.
 - OpenAI model names (`dall-e-3`, `gpt-image-1`) get the default model.
 

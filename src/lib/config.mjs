@@ -68,3 +68,11 @@ export const transport = process.env.VENICE_WEB_TRANSPORT ?? 'auto'
 export const judgeEnabled = process.env.VENICE_WEB_JUDGE !== '0'
 export const judgeModel = process.env.VENICE_WEB_JUDGE_MODEL ?? 'qwen3-5-35b-a3b'
 export const judgeTimeoutMs = Number(process.env.VENICE_WEB_JUDGE_TIMEOUT ?? 45_000)
+
+/**
+ * Which upstream route makes images: `studio` (default) is the web app's Studio
+ * route, which takes the model and every setting directly (docs/PROTOCOL.md
+ * §5c); `agent` is Venice's agent (§5b), the route used before, kept as a
+ * fallback. Edits always go through the agent.
+ */
+export const imageRoute = process.env.VENICE_WEB_IMAGE_ROUTE === 'agent' ? 'agent' : 'studio'

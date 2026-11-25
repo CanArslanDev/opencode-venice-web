@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Image settings.** `/v1/images/generations` now uses the web app's Studio
+  route (`/api/inference/image`), which takes the model and its settings
+  directly: `seed`, `negative_prompt`, `aspect_ratio`, `resolution`, `steps`,
+  `cfg_scale`, `style_preset`, `hide_watermark` (on by default), `safe_mode`,
+  `output_format`, `embed_exif`. Settings a model does not take are a 400. New
+  free image models on this route: `krea-2-turbo`, `stable-diffusion-3.5-rev2`,
+  `lustify-sdxl`, `lustify-v8`. `VENICE_WEB_IMAGE_ROUTE=agent` keeps the old
+  agent route. PROTOCOL §5c.
+
 - **Catalogue refreshed against the web catalogue (2026-11-25).** Added the free
   (`usesCredits: false`) models that were missing: `zai-org-glm-4.7-app`, `olafangensan-glm-4.7-flash-heretic`,
   `qwen3-coder-480b-a35b-instruct-turbo`, `qwen3-vl-235b-a22b`,

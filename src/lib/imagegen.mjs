@@ -36,8 +36,18 @@ function pickModel(requested, models, fallback, kind) {
   throw new ImageRequestError(`unknown ${kind} model: ${requested}. Known: ${Object.keys(models).join(', ')}`)
 }
 
-/** The model for a generation; missing or an OpenAI name means the default. */
-export const pickImageModel = (requested) => pickModel(requested, IMAGE_MODELS, DEFAULT_IMAGE_MODEL, 'image')
+/**
+ * The model for a generation; missing or an OpenAI name means the default. On
+ * the agent route only the models the agent runs are accepted.
+ */
+export function pickImageModel(requested, { route = 'studio' } = {}) {
+  const model = pickModel(requested, IMAGE_MODELS, DEFAULT_IMAGE_MODEL, 'image')
+  if (route === 'agent' && !IMAGE_MODELS[model].agent) {
+    const agentModels = Object.keys(IMAGE_MODELS).filter((id) => IMAGE_MODELS[id].agent)
+    throw new ImageRequestError(`${model} only runs on the Studio route (unset VENICE_WEB_IMAGE_ROUTE). Agent models: ${agentModels.join(', ')}`)
+  }
+  return model
+}
 
 /** The model for an edit; missing or an OpenAI name means the default. */
 export const pickEditModel = (requested) => pickModel(requested, EDIT_MODELS, DEFAULT_EDIT_MODEL, 'edit')

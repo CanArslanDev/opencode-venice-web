@@ -63,16 +63,39 @@ export const modelIds = Object.keys(MODELS)
 
 /**
  * Image models that are free (`GET /api/app/models`, section `image`,
- * `usesCredits: false`) *and* that Venice's agent actually runs. The catalogue
- * also lists `stable-diffusion-3.5-rev2`, `lustify-sdxl` and `lustify-v8` as
- * free, but the agent's `generate_image` tool rejects them and falls back to
- * another model ("isn't available", checked 2026-11-16), so they are left out.
- * Images run on the agent route with `paidImagesMode=block` (docs/PROTOCOL.md §5b).
+ * `usesCredits: false`, or shown without a price in the web model picker).
+ *
+ * They run on the Studio route (`POST /api/inference/image`, docs/PROTOCOL.md
+ * §5c), which takes the model id and every setting directly. `agent: true` marks
+ * the ones Venice's agent also runs (`/agents/venice?paidImagesMode=block`,
+ * §5b); the agent refuses the others and swaps in another model silently
+ * (checked 2026-11-16), so on `VENICE_WEB_IMAGE_ROUTE=agent` only those are
+ * offered.
+ *
+ * Settings mirror the catalogue (checked 2026-11-25): `steps` default/max,
+ * `cfg` scale range (absent: the model takes none), `negativePrompt`,
+ * `divisor` (width and height are multiples of it), and for models that only
+ * take fixed sizes, `sizes[resolution][aspect]`.
  */
+const KREA_SIZES = {
+  '1K': {
+    '1:1': [1024, 1024], '5:4': [1120, 896], '4:3': [1152, 864], '3:2': [1248, 832], '16:9': [1352, 760], '21:9': [1552, 664],
+    '4:5': [896, 1120], '3:4': [864, 1152], '2:3': [832, 1248], '9:16': [760, 1352], '9:21': [664, 1552],
+  },
+  '2K': {
+    '1:1': [2048, 2048], '5:4': [2240, 1792], '4:3': [2240, 1680], '3:2': [2352, 1568], '16:9': [2560, 1440], '21:9': [2688, 1152],
+    '4:5': [1792, 2240], '3:4': [1680, 2240], '2:3': [1568, 2352], '9:16': [1440, 2560], '9:21': [1152, 2688],
+  },
+}
+
 export const IMAGE_MODELS = {
-  'z-image-turbo': { name: 'Z-Image Turbo' },
-  chroma: { name: 'Chroma' },
-  'wai-illu': { name: 'Anime (WAI)' },
+  'z-image-turbo': { name: 'Z-Image Turbo', agent: true, steps: { default: 8, max: 8 }, negativePrompt: false, divisor: 8 },
+  chroma: { name: 'Chroma', agent: true, steps: { default: 10, max: 10 }, negativePrompt: false, divisor: 8 },
+  'wai-illu': { name: 'Anime (WAI)', agent: true, steps: { default: 25, max: 30 }, cfg: { default: 5, min: 0, max: 10 }, negativePrompt: true, divisor: 16 },
+  'krea-2-turbo': { name: 'Krea 2 Turbo', agent: false, steps: { default: 8, max: 8 }, negativePrompt: false, divisor: 8, sizes: KREA_SIZES, defaultResolution: '1K' },
+  'stable-diffusion-3.5-rev2': { name: 'Venice SD35', agent: false, steps: { default: 25, max: 30 }, cfg: { default: 3.5, min: 0, max: 20 }, negativePrompt: true, divisor: 16 },
+  'lustify-sdxl': { name: 'Lustify SDXL', agent: false, steps: { default: 20, max: 50 }, cfg: { default: 5, min: 0, max: 10 }, negativePrompt: true, divisor: 8 },
+  'lustify-v8': { name: 'Lustify v8', agent: false, steps: { default: 30, max: 50 }, cfg: { default: 3.5, min: 1.5, max: 10 }, negativePrompt: true, divisor: 8 },
 }
 
 export const DEFAULT_IMAGE_MODEL = 'z-image-turbo'
