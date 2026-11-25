@@ -18,7 +18,8 @@ export const STUDIO_IMAGE_PATH = '/api/inference/image'
 /** Aspect ratios the web app offers. */
 export const ASPECT_RATIOS = ['1:1', '5:4', '4:3', '3:2', '16:9', '21:9', '4:5', '3:4', '2:3', '9:16', '9:21']
 
-const MAX_SEED = 2 ** 31 - 1
+/** The route refuses larger seeds ("Number must be less than or equal to 999999999", 2026-11-25). */
+const MAX_SEED = 999_999_999
 const MAX_NEGATIVE_PROMPT = 1500
 
 function bool(value, name, fallback) {
@@ -53,6 +54,22 @@ export function parseOutputFormat(value) {
 }
 
 const roundTo = (value, divisor) => Math.max(divisor, Math.round(value / divisor) * divisor)
+
+/**
+ * Size limits of the route's schema, for every model (2026-11-25): "Number must
+ * be less than or equal to 1344" per side, and "Total pixel count (width ×
+ * height) must not exceed 1,500,000".
+ */
+export const MAX_SIDE = 1344
+export const MAX_PIXELS = 1_500_000
+
+/** `width` x `height` scaled down (shape kept) to fit the route's limits, multiples of `divisor`. */
+export function fitStudioLimits(width, height, divisor = 8) {
+  const scale = Math.min(1, MAX_SIDE / width, MAX_SIDE / height, Math.sqrt(MAX_PIXELS / (width * height)))
+  if (scale === 1) return { width, height }
+  const floorTo = (value) => Math.max(divisor, Math.floor((value * scale) / divisor) * divisor)
+  return { width: floorTo(width), height: floorTo(height) }
+}
 
 /** Width and height for an aspect ratio at about one megapixel, multiples of `divisor`. */
 export function sizeForAspect(aspect, divisor = 8, area = 1024 * 1024) {
@@ -92,8 +109,14 @@ export function resolveDimensions(info, { size, aspectRatio, resolution }) {
   }
   if (resolution != null && resolution !== '') throw new ImageRequestError('resolution is only taken by models with fixed sizes (krea-2-turbo); use size or aspect_ratio')
   const wanted = parseSize(size)
-  if (wanted) return { width: roundTo(wanted.width, divisor), height: roundTo(wanted.height, divisor), aspectRatio: aspectRatio || null, resolution: null }
-  if (aspectRatio) return { ...sizeForAspect(aspectRatio, divisor), aspectRatio, resolution: null }
+  if (wanted) {
+    const rounded = fitStudioLimits(roundTo(wanted.width, divisor), roundTo(wanted.height, divisor), divisor)
+    return { ...rounded, aspectRatio: aspectRatio || null, resolution: null }
+  }
+  if (aspectRatio) {
+    const { width, height } = sizeForAspect(aspectRatio, divisor)
+    return { ...fitStudioLimits(width, height, divisor), aspectRatio, resolution: null }
+  }
   return { width: 1024, height: 1024, aspectRatio: null, resolution: null }
 }
 
@@ -148,14 +171,20 @@ export function studioSeeds(n, seed, random = Math.random) {
   return Array.from({ length: n }, (_, index) => (first + index) % (MAX_SEED + 1))
 }
 
-/** The body of one `POST /api/inference/image`, as the Studio page sends it. */
+/**
+ * The body of one `POST /api/inference/image`, as the Studio page sends it.
+ *
+ * On fixed-size models the picture's size comes from `aspectRatio` and
+ * `resolution` alone (measured: 16:9 at 2K gives 2560x1440 whatever width and
+ * height say), but width and height must still pass the schema's limits, so a
+ * size above them goes out scaled down.
+ */
 export function studioImageRequest({ prompt, model, options, seed }) {
   const request = {
     requestId: randomUUID(),
     modelId: model,
     prompt,
-    width: options.width,
-    height: options.height,
+    ...fitStudioLimits(options.width, options.height),
     seed,
     steps: options.steps,
     hideWatermark: options.hideWatermark,
@@ -187,4 +216,23 @@ export function studioImageMeta(headers) {
       is_adult_model_content_violation: flag('x-venice-is-adult-model-content-violation'),
     },
   }
+}
+
+/**
+ * Width and height read from PNG or WebP bytes, or null. Some models upscale on
+ * their own (`chroma`, `lustify-v8`: 1024x1024 asked, 1536x1536 returned,
+ * 2026-11-25), so the size reported back is the picture's, not the request's.
+ */
+export function imageSize(data) {
+  if (data.length >= 24 && data.toString('latin1', 1, 4) === 'PNG') return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) }
+  if (data.length >= 30 && data.toString('latin1', 0, 4) === 'RIFF' && data.toString('latin1', 8, 12) === 'WEBP') {
+    const chunk = data.toString('latin1', 12, 16)
+    if (chunk === 'VP8X') return { width: 1 + data.readUIntLE(24, 3), height: 1 + data.readUIntLE(27, 3) }
+    if (chunk === 'VP8 ') return { width: data.readUInt16LE(26) & 0x3fff, height: data.readUInt16LE(28) & 0x3fff }
+    if (chunk === 'VP8L') {
+      const bits = data.readUInt32LE(21)
+      return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 }
+    }
+  }
+  return null
 }

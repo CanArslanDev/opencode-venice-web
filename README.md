@@ -128,7 +128,7 @@ Generation goes through the web app's Studio route, which takes the model and it
 
 | field | what it does |
 | --- | --- |
-| `seed` | fixed seed (0 to 2147483647); with `n` > 1 the pictures get `seed`, `seed+1`, … The seed used comes back on each `data[]` item |
+| `seed` | fixed seed (0 to 999999999); with `n` > 1 the pictures get `seed`, `seed+1`, … The seed used comes back on each `data[]` item |
 | `negative_prompt` | what to keep out of the picture (`wai-illu`, `stable-diffusion-3.5-rev2`, `lustify-*`) |
 | `aspect_ratio` | `1:1`, `5:4`, `4:3`, `3:2`, `16:9`, `21:9`, `4:5`, `3:4`, `2:3`, `9:16`, `9:21`; instead of `size` |
 | `resolution` | `1K` or `2K`, for `krea-2-turbo` (fixed sizes) |

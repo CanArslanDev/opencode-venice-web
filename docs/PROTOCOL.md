@@ -312,7 +312,7 @@ POST /api/inference/image          (JSON, same auth and attestation headers as c
   "loraStrength"?, "styleReferences"? [{ "url": data URL, "strength" }], "quality"?, "transparentBackground"? }
 ```
 
-`seed`, `steps`, `width`, `height`, `hideWatermark` and `matureFilter` are required by the schema. The answer is the picture's bytes (`image/png|webp|jpeg`); the headers say what happened: `x-venice-model-id`, `x-venice-model-name`, `x-venice-is-blurred`, `x-venice-is-content-violation`, `x-venice-is-adult-content`, `x-venice-is-adult-model-content-violation`, plus `x-ratelimit-*`.
+`seed`, `steps`, `width`, `height`, `hideWatermark` and `matureFilter` are required by the schema. The answer is the picture's bytes (`image/png|webp|jpeg`); the headers say what happened: `x-venice-model-id`, `x-venice-model-name`, `x-venice-is-blurred`, `x-venice-is-content-violation`, `x-venice-is-adult-content`, `x-venice-is-adult-model-content-violation`, plus `x-ratelimit-*`. `seed` must be at most 999999999 (`Number must be less than or equal to 999999999`).
 
 Which settings a model takes comes from the catalogue (`GET /api/app/models`, section `image`): `supportsNegativePrompts`, `supportsSeed`, `supportsSteps`, `settings.steps.max`, `settings.cfgScale.scale`, `settings.widthHeightDivisor`, and for fixed-size models `settings.aspectRatio` + `settings.resolution` + `settings.customSizeMapping`. The web app drops settings the model does not take; the proxy answers 400 instead. `src/lib/models.mjs` mirrors those values.
 

@@ -47,7 +47,7 @@ import {
   pickImageModel,
   seedsFor,
 } from './imagegen.mjs'
-import { STUDIO_IMAGE_PATH, parseStudioOptions, studioImageMeta, studioImageRequest, studioSeeds } from './studio.mjs'
+import { STUDIO_IMAGE_PATH, parseStudioOptions, imageSize, studioImageMeta, studioImageRequest, studioSeeds } from './studio.mjs'
 
 const json = (res, status, payload) => {
   res.writeHead(status, { 'content-type': 'application/json' })
@@ -447,7 +447,7 @@ function imageJson(raw) {
 }
 
 /** Runs one Studio image request (docs/PROTOCOL.md §5c) and returns its picture. */
-async function studioRequest(body, signal) {
+async function studioRequest(body, signal, size = body) {
   let upstream
   try {
     upstream = await upstreamChat(body, STUDIO_IMAGE_PATH, signal)
@@ -462,7 +462,8 @@ async function studioRequest(body, signal) {
   }
   if (meta.model && meta.model !== body.modelId) warn(`   ~ asked for ${body.modelId}, Venice used ${meta.model}`)
   if (meta.flags.is_blurred || meta.flags.is_content_violation) warn(`   ~ Venice flagged an image: ${JSON.stringify(meta.flags)}`)
-  return { data, mimeType: meta.mimeType, width: body.width, height: body.height, model: meta.model, prompt: null, flags: meta.flags }
+  const real = imageSize(data) ?? size
+  return { data, mimeType: meta.mimeType, width: real.width, height: real.height, model: meta.model, prompt: null, flags: meta.flags }
 }
 
 /** Generation on the Studio route: one request per picture, in parallel. */
@@ -474,7 +475,7 @@ async function answerStudioImages(res, prompt, model, n, body, format) {
   res.on('close', () => abort.abort())
   let images
   try {
-    images = await Promise.all(seeds.map((seed) => studioRequest(studioImageRequest({ prompt, model, options, seed }), abort.signal)))
+    images = await Promise.all(seeds.map((seed) => studioRequest(studioImageRequest({ prompt, model, options, seed }), abort.signal, options)))
   } catch (error) {
     abort.abort()
     if (error instanceof UpstreamImageError) return openaiError(res, error.status, error.message)
