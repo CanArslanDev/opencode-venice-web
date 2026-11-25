@@ -17,8 +17,11 @@
  * `reasoning: true` marks models that emit reasoning deltas. `context`/`output`
  * are the web catalogue limits, used to build the OpenCode model config.
  * `vision: true` marks models measured to answer about an attached image
- * (docs/PROTOCOL.md §2b); OpenCode only sends images to those. Models added
- * on 2026-11-25 have not been measured yet and carry no `vision` flag.
+ * (docs/PROTOCOL.md §2b); OpenCode only sends images to those. The models
+ * added on 2026-11-25 were measured the same day (a photo of an apple: all nine
+ * named the object and its colour), including ones the catalogue does not flag
+ * `supportsMultiModal` (GLM 4.7, Qwen 3 Coder, Nemotron): the web endpoint
+ * answers about the picture for them too, as it does for GLM 5.2.
  *
  * `deepseek-v4-1-flash-free` is kept as the id although the catalogue now calls
  * the model `deepseek-v4-1-flash-uncensored`: the old id is still listed in its
@@ -26,20 +29,20 @@
  */
 export const MODELS = {
   'deepseek-v4-1-flash-free': { name: 'DeepSeek V4.1 Flash Uncensored (web)', context: 524288, output: 131072, reasoning: true, vision: true },
-  'deepseek-v4-1-flash': { name: 'DeepSeek V4.1 Flash 1017 (web)', context: 1000000, output: 131072, reasoning: true },
+  'deepseek-v4-1-flash': { name: 'DeepSeek V4.1 Flash 1017 (web)', context: 1000000, output: 131072, reasoning: true, vision: true },
   'qwen-3-8-27b': { name: 'Qwen 3.8 27B (web)', context: 262144, output: 65536, reasoning: true, vision: true },
   'qwen3-6-27b': { name: 'Qwen 3.6 27B (web)', context: 256000, output: 65536, reasoning: true, vision: true },
   'qwen3-5-35b-a3b': { name: 'Qwen 3.5 35B A3B (web)', context: 256000, output: 16384, reasoning: true, vision: true },
   'zai-org-glm-5.2': { name: 'GLM 5.2 (web)', context: 1000000, output: 131072, reasoning: true, vision: true },
-  'z-ai-glm-5-3-flash': { name: 'GLM 5.3 Flash (web)', context: 1048576, output: 131072, reasoning: true },
-  'zai-org-glm-4.7-app': { name: 'GLM 4.7 (web)', context: 198000, output: 16384, reasoning: false },
-  'olafangensan-glm-4.7-flash-heretic': { name: 'GLM 4.7 Flash Heretic (web)', context: 200000, output: 24000, reasoning: true },
-  'qwen3-coder-480b-a35b-instruct-turbo': { name: 'Qwen 3 Coder 480B Turbo (web)', context: 256000, output: 65536, reasoning: false },
-  'qwen3-vl-235b-a22b': { name: 'Qwen3 VL 235B (web)', context: 128000, output: 16384, reasoning: false },
-  'nvidia-nemotron-3-ultra-550b-a55b': { name: 'NVIDIA Nemotron 3 Ultra (web)', context: 256000, output: 32768, reasoning: true },
-  'nvidia-nemotron-3-nano-30b-a3b': { name: 'NVIDIA Nemotron 3 Nano 30B (web)', context: 128000, output: 16384, reasoning: false },
+  'z-ai-glm-5-3-flash': { name: 'GLM 5.3 Flash (web)', context: 1048576, output: 131072, reasoning: true, vision: true },
+  'zai-org-glm-4.7-app': { name: 'GLM 4.7 (web)', context: 198000, output: 16384, reasoning: false, vision: true },
+  'olafangensan-glm-4.7-flash-heretic': { name: 'GLM 4.7 Flash Heretic (web)', context: 200000, output: 24000, reasoning: true, vision: true },
+  'qwen3-coder-480b-a35b-instruct-turbo': { name: 'Qwen 3 Coder 480B Turbo (web)', context: 256000, output: 65536, reasoning: false, vision: true },
+  'qwen3-vl-235b-a22b': { name: 'Qwen3 VL 235B (web)', context: 128000, output: 16384, reasoning: false, vision: true },
+  'nvidia-nemotron-3-ultra-550b-a55b': { name: 'NVIDIA Nemotron 3 Ultra (web)', context: 256000, output: 32768, reasoning: true, vision: true },
+  'nvidia-nemotron-3-nano-30b-a3b': { name: 'NVIDIA Nemotron 3 Nano 30B (web)', context: 128000, output: 16384, reasoning: false, vision: true },
   'venice-uncensored-1-2': { name: 'Venice Uncensored 1.2 (web)', context: 128000, output: 8192, reasoning: false, vision: true },
-  'venice-uncensored-role-play': { name: 'Venice Role Play Uncensored (web)', context: 128000, output: 4096, reasoning: false },
+  'venice-uncensored-role-play': { name: 'Venice Role Play Uncensored (web)', context: 128000, output: 4096, reasoning: false, vision: true },
   'google-gemma-4-31b-it': { name: 'Gemma 4 31B Instruct (web)', context: 256000, output: 16384, reasoning: true, vision: true },
   'google-gemma-4-26b-a4b-it': { name: 'Gemma 4 26B A4B Instruct (web)', context: 256000, output: 8192, reasoning: true, vision: true },
   'gemma4-uncensored': { name: 'Gemma 4 Uncensored (web)', context: 256000, output: 8192, reasoning: false, vision: true },
