@@ -54,8 +54,12 @@ export const REMINDER_AFTER_TOOL =
 export const IMAGE_NOTE =
   'The image(s) attached here belong to the user\'s request above and are visible to you now: read them directly. There is no tool for viewing images.'
 
+/** The same note when files (documents) are among the attachments. */
+export const FILE_NOTE =
+  'The file(s) attached here belong to the user\'s request above and their contents are available to you now: read them directly. There is no tool for opening them.'
+
 /**
- * Moves every `input_image` part to the last user message. Venice shows the
+ * Moves every `input_image` and `input_file` part to the last user message. Venice shows the
  * model an image directly only when it sits in the last user message; anywhere
  * earlier the model has to call Venice's `view_media`, and with emulated tools
  * that call lands in the envelope where nothing runs it (docs/PROTOCOL.md §2b).
@@ -63,16 +67,18 @@ export const IMAGE_NOTE =
  * own, so the images are moved onto them.
  */
 export function withImagesLast(messages) {
-  const images = messages.flatMap((message) => (Array.isArray(message.content) ? message.content : []).filter((part) => part?.type === 'input_image'))
+  const isMedia = (part) => part?.type === 'input_image' || part?.type === 'input_file'
+  const images = messages.flatMap((message) => (Array.isArray(message.content) ? message.content : []).filter(isMedia))
   if (!images.length) return messages
   const lastUser = messages.findLastIndex((message) => message.role === 'user')
   return messages.map((message, index) => {
     if (!Array.isArray(message.content)) return message
-    const rest = message.content.filter((part) => part?.type !== 'input_image')
+    const rest = message.content.filter((part) => !isMedia(part))
     if (index !== lastUser) return rest.length === message.content.length ? message : { ...message, content: rest }
     const ownImages = rest.length !== message.content.length
-    // a reminder that receives the images says whose they are
-    const note = ownImages ? [] : [{ type: 'output_text', text: IMAGE_NOTE, annotations: [] }]
+    // a reminder that receives the attachments says whose they are
+    const hasFiles = images.some((part) => part.type === 'input_file')
+    const note = ownImages ? [] : [{ type: 'output_text', text: hasFiles ? FILE_NOTE : IMAGE_NOTE, annotations: [] }]
     return { ...message, content: [...images, ...rest, ...note] }
   })
 }
@@ -350,6 +356,93 @@ const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif
 /** Images per turn; the web catalogue's `maxImages` is 10 for every model that states one. */
 export const MAX_IMAGES = 10
 
+/** A request the proxy refuses with a 400 (an attachment it cannot send). */
+export class AttachmentError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'AttachmentError'
+    this.status = 400
+  }
+}
+
+/**
+ * Documents Venice reads (`input_file` parts, parsed server side into text: the
+ * stream shows a `veniceai:document_parsing` item, docs/PROTOCOL.md §2c). The
+ * extensions and types are the web client's upload list (2026-11-25); any
+ * `text/*` type is taken too.
+ */
+export const DOCUMENT_EXTENSIONS = {
+  csv: 'text/csv',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  epub: 'application/epub+zip',
+  json: 'application/json',
+  md: 'text/markdown',
+  odp: 'application/vnd.oasis.opendocument.presentation',
+  ods: 'application/vnd.oasis.opendocument.spreadsheet',
+  odt: 'application/vnd.oasis.opendocument.text',
+  pdf: 'application/pdf',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  rtf: 'application/rtf',
+  txt: 'text/plain',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  xml: 'application/xml',
+}
+const DOCUMENT_TYPES = new Set([...Object.values(DOCUMENT_EXTENSIONS), 'text/xml'])
+
+/** Files per turn, and bytes per file (the web client's upload limit). */
+export const MAX_FILES = 10
+export const MAX_FILE_BYTES = 100 * 1024 * 1024
+
+function mediaIdOf(data) {
+  const hex = createHash('sha256').update(data).digest('hex')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
+}
+
+/**
+ * The document type to send for `mimeType` and `filename`, or null when Venice
+ * does not read it. A missing or generic type (`application/octet-stream`) is
+ * taken from the extension.
+ */
+export function documentType(mimeType, filename) {
+  const type = String(mimeType ?? '').split(';')[0].trim().toLowerCase()
+  if (type.startsWith('text/') || DOCUMENT_TYPES.has(type)) return type
+  if (type && type !== 'application/octet-stream') return null
+  const extension = /\.([a-z0-9]+)$/i.exec(String(filename ?? ''))?.[1]?.toLowerCase()
+  return (extension && DOCUMENT_EXTENSIONS[extension]) ?? null
+}
+
+/**
+ * Reads an OpenAI chat `file` part (`{ type: "file", file: { filename,
+ * file_data } }`, what @ai-sdk/openai-compatible sends for a PDF) into an image
+ * or a document. Anything the proxy cannot send is an `AttachmentError` (a
+ * 400) instead of being dropped, so the client sees why.
+ */
+export function attachmentFromFilePart(part) {
+  const file = part?.file ?? {}
+  const filename = typeof file.filename === 'string' && file.filename.trim() ? file.filename.trim() : 'attachment'
+  if (file.file_id) throw new AttachmentError(`${filename}: file_id references are not supported; send the bytes as file_data`)
+  const raw = typeof file.file_data === 'string' ? file.file_data : ''
+  const match = /^data:([^;,]*)((?:;[^;,]*)*);base64,(.*)$/s.exec(raw)
+  if (raw && !match && !/^[A-Za-z0-9+/=\s]+$/.test(raw)) throw new AttachmentError(`${filename}: file_data must be base64 or a base64 data URL`)
+  const data = Buffer.from(match ? match[3] : raw, 'base64')
+  if (!data.length) throw new AttachmentError(`${filename}: the file is empty`)
+  if (data.length > MAX_FILE_BYTES) throw new AttachmentError(`${filename}: larger than ${MAX_FILE_BYTES / 1024 / 1024} MB`)
+  const declared = match ? match[1] : ''
+  const image = imageFromBytes(declared, data)
+  if (image) return { kind: 'image', mediaId: image.mediaId, image }
+  const mimeType = documentType(declared, filename)
+  if (!mimeType) {
+    throw new AttachmentError(
+      `${filename} (${declared || 'unknown type'}) cannot be sent: Venice reads images (png, jpeg, webp, gif) and documents (${Object.keys(DOCUMENT_EXTENSIONS).join(', ')}, any text/*)`,
+    )
+  }
+  const mediaId = mediaIdOf(data)
+  return { kind: 'file', mediaId, file: { mediaId, mimeType, data, filename } }
+}
+
 /** The URL of an OpenAI `image_url` part (`{ url }` or a bare string), or null. */
 function imageUrlOf(part) {
   if (part?.type !== 'image_url') return null
@@ -373,21 +466,31 @@ export function imageFromDataUrl(url) {
 export function imageFromBytes(type, data) {
   const mimeType = String(type ?? '').split(';')[0].trim().toLowerCase()
   if (!IMAGE_TYPES.has(mimeType) || !data?.length) return null
-  const hex = createHash('sha256').update(data).digest('hex')
-  const mediaId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
-  return { mediaId, mimeType, data }
+  return { mediaId: mediaIdOf(data), mimeType, data }
 }
 
 /**
- * Splits a user message into the images that travel as bytes and the text that
- * is left. Images the proxy cannot send (a remote URL, an unknown type, past
+ * Splits a user message into the images and files that travel as bytes and the
+ * text that is left. A `file` part the proxy cannot send is an `AttachmentError`. Images the proxy cannot send (a remote URL, an unknown type, past
  * `MAX_IMAGES`) stay in the text as `[image]`, like every older turn's do.
  */
 export function splitImages(content) {
-  if (!Array.isArray(content)) return { images: [], text: textOf(content) }
+  if (!Array.isArray(content)) return { images: [], files: [], text: textOf(content) }
   const images = []
+  const files = []
   const rest = []
   for (const part of content) {
+    if (part?.type === 'file') {
+      const attachment = attachmentFromFilePart(part)
+      if (attachment.kind === 'image') {
+        if (images.length >= MAX_IMAGES) throw new AttachmentError(`at most ${MAX_IMAGES} images per message`)
+        if (!images.some((known) => known.mediaId === attachment.mediaId)) images.push(attachment.image)
+        continue
+      }
+      if (files.length >= MAX_FILES) throw new AttachmentError(`at most ${MAX_FILES} files per message`)
+      if (!files.some((known) => known.mediaId === attachment.mediaId)) files.push(attachment.file)
+      continue
+    }
     const image = images.length < MAX_IMAGES ? imageFromDataUrl(imageUrlOf(part)) : null
     if (!image) {
       rest.push(part)
@@ -395,7 +498,7 @@ export function splitImages(content) {
     }
     if (!images.some((known) => known.mediaId === image.mediaId)) images.push(image)
   }
-  return { images, text: textOf(rest) }
+  return { images, files, text: textOf(rest) }
 }
 
 export function textOf(content) {
@@ -403,7 +506,12 @@ export function textOf(content) {
   if (content == null) return ''
   if (!Array.isArray(content)) return String(content)
   return content
-    .map((part) => (part?.type === 'text' ? (part.text ?? '') : part?.type === 'image_url' ? '[image]' : ''))
+    .map((part) => {
+      if (part?.type === 'text') return part.text ?? ''
+      if (part?.type === 'image_url') return '[image]'
+      if (part?.type === 'file') return `[file: ${part.file?.filename ?? 'attachment'}]`
+      return ''
+    })
     .filter(Boolean)
     .join('\n')
 }
@@ -427,7 +535,7 @@ function safeJson(value) {
 /**
  * Builds the upstream request.
  *
- * @returns {{ request: object, toolNames: Set<string>, toolSchemas: Map<string, object>, emulatedTools: boolean, images: {mediaId: string, mimeType: string, data: Buffer}[] }}
+ * @returns {{ request: object, toolNames: Set<string>, toolSchemas: Map<string, object>, emulatedTools: boolean, images: {mediaId: string, mimeType: string, data: Buffer}[], files: {mediaId: string, mimeType: string, data: Buffer, filename: string}[], media: object[] }}
  */
 export function toVeniceRequest(body) {
   if (!MODELS[body.model]) {
@@ -452,10 +560,11 @@ export function toVeniceRequest(body) {
   // on every step, and an older picture is not resent once the user moves on.
   const newestUser = body.messages.findLastIndex((message) => message?.role === 'user')
   let images = []
+  let files = []
 
   for (const [index, message] of body.messages.entries()) {
     let text = textOf(message.content)
-    if (index === newestUser) ({ images, text } = splitImages(message.content))
+    if (index === newestUser) ({ images, files, text } = splitImages(message.content))
     if (message.role === 'system' || message.role === 'developer') {
       instructions.push(text)
       continue
@@ -490,7 +599,12 @@ export function toVeniceRequest(body) {
 
     const parts = [{ type: 'output_text', text: content, annotations: [] }]
     // the image parts go first, the order the web client uses
-    if (index === newestUser) parts.unshift(...images.map((image) => ({ type: 'input_image', media_id: image.mediaId, detail: 'auto' })))
+    if (index === newestUser) {
+      parts.unshift(
+        ...images.map((image) => ({ type: 'input_image', media_id: image.mediaId, detail: 'auto' })),
+        ...files.map((file) => ({ type: 'input_file', media_id: file.mediaId, filename: file.filename })),
+      )
+    }
     messages.push({
       id: randomUUID(),
       type: 'message',
@@ -542,8 +656,11 @@ export function toVeniceRequest(body) {
     toolNames: names,
     toolSchemas: new Map(tools.map((tool) => [tool.function.name, tool.function.parameters ?? {}])),
     emulatedTools: tools.length > 0,
-    // bytes for the `input_image` parts above; they travel as multipart fields
+    // bytes for the `input_image` / `input_file` parts above; they travel as
+    // multipart fields (`media` is both lists, images first)
     images,
+    files,
+    media: [...images, ...files],
   }
 }
 

@@ -226,7 +226,7 @@ export async function upstreamChat(body, route = INFERENCE_PATH, signal, files =
   if (files.length) {
     const form = new FormData()
     form.append('request', payload)
-    for (const file of files) form.append(`media.${file.mediaId}`, new Blob([file.data], { type: file.mimeType }), 'image')
+    for (const file of files) form.append(`media.${file.mediaId}`, new Blob([file.data], { type: file.mimeType }), file.filename ?? 'image')
     ;({ body: payload, contentType } = await multipartBody(form))
   }
 

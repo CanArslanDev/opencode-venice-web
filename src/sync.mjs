@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import path from 'node:path'
 import os from 'node:os'
 import { port, providerID } from './lib/config.mjs'
-import { DEFAULT_MODEL, DEFAULT_SMALL_MODEL, MODELS } from './lib/models.mjs'
+import { DEFAULT_MODEL, DEFAULT_SMALL_MODEL, MODELS, openCodeModel } from './lib/models.mjs'
 import { log, warn } from './lib/log.mjs'
 
 const args = process.argv.slice(2)
@@ -39,17 +39,7 @@ if (args.includes('--remove')) {
     npm: '@ai-sdk/openai-compatible',
     options: { baseURL: `http://127.0.0.1:${port}/v1`, apiKey: providerID },
     models: Object.fromEntries(
-      Object.entries(MODELS).map(([id, model]) => [
-        id,
-        {
-          name: model.name,
-          tool_call: true,
-          reasoning: model.reasoning,
-          // without image input OpenCode refuses to send an attached picture
-          ...(model.vision ? { attachment: true, modalities: { input: ['text', 'image'], output: ['text'] } } : {}),
-          limit: { context: model.context, output: model.output },
-        },
-      ]),
+      Object.entries(MODELS).map(([id, model]) => [id, openCodeModel(model)]),
     ),
   }
   if (args.includes('--default')) {

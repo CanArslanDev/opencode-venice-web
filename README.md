@@ -17,6 +17,7 @@ OpenCode ──HTTP──> 127.0.0.1:3456  ──HTTPS + your session cookie─�
 - 27 web models included in Pro (DeepSeek, Qwen, GLM, Gemma, NVIDIA Nemotron, Aion, TEE-hosted variants).
 - Tool calling works: OpenCode's `read`/`write`/`edit`/`shell`/`glob`/`grep` tools are emulated through a JSON envelope (see [docs/PROTOCOL.md](docs/PROTOCOL.md)).
 - Images work: attach a screenshot in OpenCode and the model sees it, also while it works through tool calls.
+- Documents work: attach a PDF (`opencode run -f report.pdf`, or drag it in) and Venice reads it server side; .txt, .md, .csv, .json, .docx, .xlsx and the other formats the web app takes go the same way.
 - Zero runtime dependencies. Node 22+ and the system `curl` (preinstalled on macOS and most Linux distributions).
 
 ---
@@ -99,7 +100,7 @@ Only models the web catalogue marks as free (`usesCredits: false`) are exposed -
 | Aion | `aion-labs-aion-3-0`, `aion-labs-aion-3-0-mini` |
 | TEE / E2EE hosted | `e2ee-qwen3-8-27b`, `e2ee-gpt-oss-120b-p`, `e2ee-qwen3-6-35b-a3b`, `e2ee-gemma-4-26b-a4b-uncensored-p`, `e2ee-qwen-2-5-7b-p`, `e2ee-qwen3-vl-30b-a3b-p` |
 
-The 18 models that were measured take images: each one read a test picture correctly through this proxy, so the sync marks them with image input and OpenCode lets you attach pictures. The models added on 2026-11-25 (GLM 5.3 Flash, DeepSeek V4.1 Flash 1017, GLM 4.7, GLM 4.7 Flash Heretic, Qwen 3 Coder, Qwen3 VL 235B, both Nemotrons, Venice Role Play) are not measured yet and are text-only until they are. Rerun `venice-web-sync` after updating if OpenCode says a model does not support images.
+All 27 models take images and PDFs: each one read a test picture and a PDF with a code word correctly through this proxy (the models added on 2026-11-25 were measured the same day), so the sync marks them with `image` and `pdf` input and OpenCode lets you attach both. Rerun `venice-web-sync` after updating if OpenCode says a model does not support images or PDFs.
 
 The catalogue lives in [`src/lib/models.mjs`](src/lib/models.mjs); edit it and rerun `venice-web-sync` if Venice adds models. If the web catalogue ships a model you want, run `GET /v1/models` (or `venice-web-doctor`) after adding it to verify it is reachable.
 
@@ -223,6 +224,7 @@ All environment variables are optional; the defaults are what the installer uses
 - **No sampling controls.** `temperature`, `top_p` and `max_tokens` are not applied by this endpoint.
 - **Unlimited, not infinite.** Venice's fair-use and Cloudflare bot checks apply. A Cloudflare challenge surfaces as HTTP 401 with a "refresh the cookies" message.
 - **Images: what is sent.** The images of your latest message go to the model as images, on every step of the work they start. Images from earlier messages stay in the history as `[image]` and are not sent again. Only pictures inside the request (data URLs, which is what OpenCode sends) are used, up to 10 per message; the proxy never downloads an image from a URL.
+- **Documents: what is sent.** OpenAI `file` parts (`{"type":"file","file":{"filename","file_data"}}`, what OpenCode sends for a PDF) of your latest message go to Venice with their bytes, up to 10 per message and 100 MB each, and Venice extracts the text. Accepted: pdf, txt, md, csv, json, xml, rtf, doc, docx, xls, xlsx, ppt, pptx, odt, ods, odp, epub and any `text/*`. Anything else (a zip, a `file_id` reference, a URL) is answered with a 400 that says why, instead of being dropped silently. Files from earlier messages stay in the history as `[file: name]`.
 - **Web session, not API route.** Anything that needs the official API surface (embeddings, video, `/responses`) still has to use `api.venice.ai` with an API key. Both can coexist in OpenCode - the installer only *adds* a provider.
 
 ### NUL bytes and `400 Invalid request parameters`

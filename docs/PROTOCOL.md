@@ -110,6 +110,33 @@ Every model in `src/lib/models.mjs` answered "4719" and "red", including the one
 
 Only the latest user message's images are sent. In a tool loop that is the message that started the work, so the picture stays visible on every step; after the user's next message it is history and stays `[image]`.
 
+## 2c. Documents
+
+Measured 2026-11-25 (Windows, through this proxy and through real `opencode run -f`).
+
+A user message part `{ "type": "input_file", "media_id": "<id>", "filename": "<name>" }` refers to a document; the bytes travel exactly like an image's, as the multipart field `media.<media_id>`. **Venice takes the file name from the multipart field's file name**, not from the part: with the old fixed name `image` the parsing item said `"filename":"image"`, so `upstreamChat()` now sends each file under its own name. The stream then carries one extra output item before the answer:
+
+```
+response.output_item.added   { "type": "veniceai:document_parsing", "source_media_id", "status": "in_progress", "filename", "mime_type", "extracted_text": "" }
+veniceai:document_parsing.in_progress / .done
+response.output_item.done    { …, "status": "completed", "extracted_text": "<the document's text>" }
+```
+
+then the usual `message` item. The extracted text is not an `output_text` delta and the item is not a `veniceai:tool_call_generation`, so `collectStream()` neither forwards it nor counts it as a server tool step.
+
+The web client accepts csv, doc, docx, epub, json, md, odp, ods, odt, pdf, ppt, pptx, rtf, txt, xls, xlsx, xml (and `text/*`, the matching office types), up to 100 MB. OpenCode (`@ai-sdk/openai-compatible`) sends an attached PDF as `{ "type": "file", "file": { "filename": "report.pdf", "file_data": "data:application/pdf;base64,…" } }` (captured from `opencode run -f report.pdf`); it inlines .md/.txt itself as text. Before this the proxy turned that part into empty text, and the model only got the answer by shelling out to `pdftotext`.
+
+Measured with a PDF, a .txt and a .md each holding a unique code word ("What is the secret code word in the attached file?"):
+
+| request | result |
+| --- | --- |
+| PDF, all 27 models | 27/27 answered the code word |
+| .txt and .md, `deepseek-v4-1-flash-free`, `z-ai-glm-5-3-flash`, `qwen3-coder-480b-a35b-instruct-turbo` | 6/6 |
+| `opencode run -f report.pdf` on `deepseek-v4-1-flash-free`, `z-ai-glm-5-3-flash`, `deepseek-v4-1-flash` (sync config, `pdf` input) | 3/3, no tool call |
+| a zip | 400 from the proxy, with the list of accepted types |
+
+`attachmentFromFilePart()` reads the part (image types go the image way), `withImagesLast()` moves `input_file` parts to the last user message like images (with `FILE_NOTE` instead of `IMAGE_NOTE` when the reminder receives them), and the OpenCode config advertises `modalities.input` `pdf` on every model (`openCodeModel()`).
+
 ## 3. Inference response
 
 Newline-delimited SSE (`\n\n` separated `event:`/`data:` frames, `: keepalive` comments, `data: [DONE]` terminator) with `content-type: text/event-stream`. Event names seen:

@@ -22,6 +22,7 @@ import {
   preferAnswer,
   serverLoopMessage,
   shouldRetry,
+  AttachmentError,
   MAX_IMAGES,
   imageFromBytes,
   imageFromDataUrl,
@@ -320,7 +321,7 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
       log(`  ~ ${decision.reason}, retrying...`)
       try {
         // the retry resends the same image parts, so their bytes go along again
-        const retryResponse = await upstreamChat(withRetryReminder(mapping.request, decision.reminder), INFERENCE_PATH, signal, mapping.images)
+        const retryResponse = await upstreamChat(withRetryReminder(mapping.request, decision.reminder), INFERENCE_PATH, signal, mapping.media)
         if (!retryResponse.ok) break
         // the last allowed retry runs to the end, so the turn always gets an answer
         const retryState = yield* collectStream(retryResponse.body, mapping, chunk, {
@@ -575,8 +576,10 @@ async function handleChat(req, res) {
 
   if (dumpFile) {
     try {
-      const images = mapping.images.map(({ mediaId, mimeType, data }) => ({ mediaId, mimeType, bytes: data.length }))
-      writeFileSync(dumpFile, JSON.stringify({ body, mapping: { ...mapping, images } }, null, 1))
+      const strip = ({ mediaId, mimeType, data, filename }) => ({ mediaId, mimeType, filename, bytes: data.length })
+      const images = mapping.images.map(strip)
+      const files = mapping.files.map(strip)
+      writeFileSync(dumpFile, JSON.stringify({ body, mapping: { ...mapping, images, files, media: undefined } }, null, 1))
     } catch {
       /* ignore */
     }
@@ -584,7 +587,7 @@ async function handleChat(req, res) {
 
   const names = [...mapping.toolNames]
   log(
-    `-> ${body.model} • ${body.messages?.length ?? 0} msgs • ${names.length} tools${names.length ? ` [${names.join(',')}]` : ''}${mapping.images.length ? ` • ${mapping.images.length} image(s)` : ''} • stream=${body.stream !== false}`,
+    `-> ${body.model} • ${body.messages?.length ?? 0} msgs • ${names.length} tools${names.length ? ` [${names.join(',')}]` : ''}${mapping.images.length ? ` • ${mapping.images.length} image(s)` : ''}${mapping.files.length ? ` • ${mapping.files.length} file(s) [${mapping.files.map((file) => file.filename).join(',')}]` : ''} • stream=${body.stream !== false}`,
   )
 
   const abort = new AbortController()
@@ -592,7 +595,7 @@ async function handleChat(req, res) {
 
   let upstream
   try {
-    upstream = await upstreamChat(mapping.request, INFERENCE_PATH, abort.signal, mapping.images)
+    upstream = await upstreamChat(mapping.request, INFERENCE_PATH, abort.signal, mapping.media)
   } catch (error) {
     return openaiError(res, error instanceof SignInError || error.signIn ? 401 : 502, error.message)
   }
@@ -697,7 +700,7 @@ export function createServer() {
       openaiError(res, 404, `unknown endpoint: ${req.method} ${url.pathname}`, 'not_found')
     } catch (error) {
       if (error instanceof SignInError) return openaiError(res, 401, error.message)
-      if (error instanceof ImageRequestError) return openaiError(res, error.status ?? 400, error.message, 'invalid_request_error')
+      if (error instanceof ImageRequestError || error instanceof AttachmentError) return openaiError(res, error.status ?? 400, error.message, 'invalid_request_error')
       warn('request error:', error.stack ?? error.message)
       if (!res.headersSent) openaiError(res, 500, error.message)
       else res.end()

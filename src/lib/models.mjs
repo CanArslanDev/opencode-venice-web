@@ -66,6 +66,23 @@ export const DEFAULT_SMALL_MODEL = 'qwen3-5-35b-a3b'
 export const modelIds = Object.keys(MODELS)
 
 /**
+ * The OpenCode config entry for a text model. Every model here reads documents
+ * (measured 2026-11-25: a PDF with a code word, all 27 answered it; .txt and .md
+ * too on the ones tried), so `pdf` input is advertised unless a model says
+ * `documents: false`. Without it OpenCode does not send an attached PDF.
+ */
+export function openCodeModel(model) {
+  const input = ['text', ...(model.vision ? ['image'] : []), ...(model.documents === false ? [] : ['pdf'])]
+  return {
+    name: model.name,
+    tool_call: true,
+    reasoning: model.reasoning,
+    ...(input.length > 1 ? { attachment: true, modalities: { input, output: ['text'] } } : {}),
+    limit: { context: model.context, output: model.output },
+  }
+}
+
+/**
  * Image models that are free (`GET /api/app/models`, section `image`,
  * `usesCredits: false`, or shown without a price in the web model picker).
  *

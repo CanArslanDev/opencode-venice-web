@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Document attachments.** OpenAI chat `file` parts (what OpenCode sends for an
+  attached PDF) now reach Venice as `input_file` parts with their bytes, under
+  their own file name, and Venice reads them server side. pdf, txt, md, csv,
+  json, xml, rtf, office and OpenDocument formats and epub are accepted; other
+  types, `file_id` references and URLs are a 400 with the reason instead of
+  being dropped. Measured: a PDF on all 27 models, .txt/.md on three, and real
+  `opencode run -f report.pdf`. The sync now advertises `pdf` input on every
+  model; rerun `venice-web-sync`. PROTOCOL §2c.
+- **Image input on the models added 2026-11-25**, measured with a test picture
+  (all nine answered); they now carry `vision: true`.
 - **Image settings.** `/v1/images/generations` now uses the web app's Studio
   route (`/api/inference/image`), which takes the model and its settings
   directly: `seed`, `negative_prompt`, `aspect_ratio`, `resolution`, `steps`,
