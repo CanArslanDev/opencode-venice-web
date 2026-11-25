@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **`deepseek-v4-1-flash-free` is now `deepseek-v4-1-flash-uncensored`**, the id
+  Venice uses for it today ("free" was misleading: the model is the uncensored
+  DeepSeek V4.1 Flash, not a free tier of `deepseek-v4-1-flash`). The old id is
+  still accepted, and `venice-web-sync` moves `model` / `small_model` over to
+  the new one. All other ids already match the web catalogue.
+
 - **Document attachments.** OpenAI chat `file` parts (what OpenCode sends for an
   attached PDF) now reach Venice as `input_file` parts with their bytes, under
   their own file name, and Venice reads them server side. pdf, txt, md, csv,
@@ -35,7 +41,7 @@
   `nvidia-nemotron-3-ultra-550b-a55b`, `nvidia-nemotron-3-nano-30b-a3b` and
   `venice-uncensored-role-play` (text only until measured with a picture).
   `zai-org-glm-4.6` is gone from the web catalogue and was removed. Output limits
-  follow the catalogue (`deepseek-v4-1-flash-free` 131072, Gemma 4 31B 16384).
+  follow the catalogue (`deepseek-v4-1-flash-uncensored` 131072, Gemma 4 31B 16384).
   Also added `z-ai-glm-5-3-flash` (GLM 5.3 Flash) and `deepseek-v4-1-flash`
   (DeepSeek V4.1 Flash 1017): Pro-only, `usesCredits: false` in the live
   catalogue (re-read from a Pro session on 2026-11-25), and both answer on the

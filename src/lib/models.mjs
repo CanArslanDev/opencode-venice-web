@@ -23,12 +23,11 @@
  * `supportsMultiModal` (GLM 4.7, Qwen 3 Coder, Nemotron): the web endpoint
  * answers about the picture for them too, as it does for GLM 5.2.
  *
- * `deepseek-v4-1-flash-free` is kept as the id although the catalogue now calls
- * the model `deepseek-v4-1-flash-uncensored`: the old id is still listed in its
- * `aliasIds`, and keeping it leaves existing OpenCode configs working.
+ * Ids are the catalogue's own `id`s. Ids the catalogue renamed live on in
+ * `MODEL_ALIASES` so existing OpenCode configs keep working until the next sync.
  */
 export const MODELS = {
-  'deepseek-v4-1-flash-free': { name: 'DeepSeek V4.1 Flash Uncensored (web)', context: 524288, output: 131072, reasoning: true, vision: true },
+  'deepseek-v4-1-flash-uncensored': { name: 'DeepSeek V4.1 Flash Uncensored (web)', context: 524288, output: 131072, reasoning: true, vision: true },
   'deepseek-v4-1-flash': { name: 'DeepSeek V4.1 Flash 1017 (web)', context: 1000000, output: 131072, reasoning: true, vision: true },
   'qwen-3-8-27b': { name: 'Qwen 3.8 27B (web)', context: 262144, output: 65536, reasoning: true, vision: true },
   'qwen3-6-27b': { name: 'Qwen 3.6 27B (web)', context: 256000, output: 65536, reasoning: true, vision: true },
@@ -58,7 +57,19 @@ export const MODELS = {
 }
 
 /** Default model, used by the installer and `sync --default`. */
-export const DEFAULT_MODEL = 'deepseek-v4-1-flash-free'
+export const DEFAULT_MODEL = 'deepseek-v4-1-flash-uncensored'
+
+/**
+ * Old ids -> current ids. Accepted on requests and migrated by the sync, never
+ * advertised. `deepseek-v4-1-flash-free` was renamed by Venice (it is still in
+ * the new id's `aliasIds`, checked 2026-11-25).
+ */
+export const MODEL_ALIASES = {
+  'deepseek-v4-1-flash-free': 'deepseek-v4-1-flash-uncensored',
+}
+
+/** The current id for `id` (itself when it is not an old alias). */
+export const resolveModelId = (id) => MODEL_ALIASES[id] ?? id
 
 /** Cheap model for titles/summaries. */
 export const DEFAULT_SMALL_MODEL = 'qwen3-5-35b-a3b'

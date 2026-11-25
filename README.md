@@ -34,7 +34,7 @@ That installs the code to `~/.local/share/opencode-venice-web`, adds the `venice
 
 Add `--with-nul-plugin` if you also use other providers from OpenCode (see [NUL bytes](#nul-bytes-and-400-invalid-request)).
 
-Then **restart OpenCode** and pick a model such as `venice-web/deepseek-v4-1-flash-free`.
+Then **restart OpenCode** and pick a model such as `venice-web/deepseek-v4-1-flash-uncensored`.
 
 Or without cloning:
 
@@ -91,7 +91,7 @@ Only models the web catalogue marks as free (`usesCredits: false`) are exposed -
 
 | Family | Model ids |
 | --- | --- |
-| DeepSeek | `deepseek-v4-1-flash-free`, `deepseek-v4-1-flash` (1017), `deepseek-ai-DeepSeek-V3.2` |
+| DeepSeek | `deepseek-v4-1-flash-uncensored`, `deepseek-v4-1-flash` (1017), `deepseek-ai-DeepSeek-V3.2` |
 | Qwen | `qwen-3-8-27b`, `qwen3-6-27b`, `qwen3-5-35b-a3b`, `qwen3-coder-480b-a35b-instruct-turbo`, `qwen3-vl-235b-a22b` |
 | GLM | `z-ai-glm-5-3-flash`, `zai-org-glm-5.2`, `zai-org-glm-4.7-app`, `olafangensan-glm-4.7-flash-heretic` |
 | NVIDIA | `nvidia-nemotron-3-ultra-550b-a55b`, `nvidia-nemotron-3-nano-30b-a3b` |
@@ -272,7 +272,7 @@ Use it from any git repository:
 /opencode-orchestrator add input validation to the signup form and test it
 ```
 
-Without a task it continues the backlog in `.orchestrator/STATUS.md` (or asks what to do). Claude asks for the worker model at the start of the session; set it yourself with `export ORCH_MODEL=venice-web/deepseek-v4-1-flash-free`.
+Without a task it continues the backlog in `.orchestrator/STATUS.md` (or asks what to do). Claude asks for the worker model at the start of the session; set it yourself with `export ORCH_MODEL=venice-web/deepseek-v4-1-flash-uncensored`.
 
 What the scripts guard against (each of these cost hours in real sessions):
 

@@ -30,7 +30,7 @@ import {
   toVeniceRequest,
   withRetryReminder,
 } from './emulate.mjs'
-import { IMAGE_MODELS, MODELS } from './models.mjs'
+import { IMAGE_MODELS, MODELS, resolveModelId } from './models.mjs'
 import { debugRaw, log, preview, warn } from './log.mjs'
 import { deepStripNulls, repairJsonControlChars } from './sanitize.mjs'
 import { AGENT_IMAGE_PATH, INFERENCE_PATH, SignInError, loadSession, resetSessionCache, upstreamChat } from './venice.mjs'
@@ -563,6 +563,7 @@ async function handleImageEdits(req, res) {
 
 async function handleChat(req, res) {
   const body = await readJson(req)
+  body.model = resolveModelId(body.model)
   const mapping = toVeniceRequest(body)
 
   // Venice rejects null bytes ("String must not contain null bytes", HTTP 400)

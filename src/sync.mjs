@@ -12,7 +12,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import path from 'node:path'
 import os from 'node:os'
 import { port, providerID } from './lib/config.mjs'
-import { DEFAULT_MODEL, DEFAULT_SMALL_MODEL, MODELS, openCodeModel } from './lib/models.mjs'
+import { DEFAULT_MODEL, DEFAULT_SMALL_MODEL, MODEL_ALIASES, MODELS, openCodeModel } from './lib/models.mjs'
 import { log, warn } from './lib/log.mjs'
 
 const args = process.argv.slice(2)
@@ -41,6 +41,14 @@ if (args.includes('--remove')) {
     models: Object.fromEntries(
       Object.entries(MODELS).map(([id, model]) => [id, openCodeModel(model)]),
     ),
+  }
+  // move `model` / `small_model` off ids Venice renamed
+  for (const key of ['model', 'small_model']) {
+    const [provider, id] = String(config[key] ?? '').split(/\/(.*)/s)
+    if (provider === providerID && MODEL_ALIASES[id]) {
+      config[key] = `${providerID}/${MODEL_ALIASES[id]}`
+      log(`${key}: ${providerID}/${id} -> ${config[key]}`)
+    }
   }
   if (args.includes('--default')) {
     config.model = `${providerID}/${DEFAULT_MODEL}`

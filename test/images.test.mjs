@@ -142,3 +142,13 @@ test('the catalogue marks every measured model as taking images', () => {
   // the models added 2026-11-25 were measured with a test picture the same day
   assert.deepEqual(missing, [])
 })
+
+test('renamed model ids still resolve to the current id', async () => {
+  const { MODEL_ALIASES, resolveModelId } = await import('../src/lib/models.mjs')
+  assert.equal(resolveModelId('deepseek-v4-1-flash-free'), 'deepseek-v4-1-flash-uncensored')
+  assert.equal(resolveModelId('z-ai-glm-5-3-flash'), 'z-ai-glm-5-3-flash')
+  for (const [old, current] of Object.entries(MODEL_ALIASES)) {
+    assert.ok(MODELS[current], `${old} points at a listed model`)
+    assert.ok(!MODELS[old], `${old} is not advertised`)
+  }
+})

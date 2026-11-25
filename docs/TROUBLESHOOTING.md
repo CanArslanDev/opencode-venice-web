@@ -12,7 +12,7 @@ tail -40 ~/.config/opencode/venice-web/proxy.log
 `doctor` checks node, the session file, the running proxy and the OpenCode provider. The log line for every request looks like this - if you see `->` but no `<-`, the upstream call is failing:
 
 ```
-2026-01-01T00:00:00.000Z -> deepseek-v4-1-flash-free • 4 msgs • 11 tools [edit,glob,…] • stream=true
+2026-01-01T00:00:00.000Z -> deepseek-v4-1-flash-uncensored • 4 msgs • 11 tools [edit,glob,…] • stream=true
 2026-01-01T00:00:02.000Z   <- tools: read({"path":"a.txt"})
 ```
 

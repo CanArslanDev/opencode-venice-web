@@ -69,7 +69,7 @@ Body (responses-API flavoured, not chat-completions):
 
 ```jsonc
 {
-  "modelId": "deepseek-v4-1-flash-free",
+  "modelId": "deepseek-v4-1-flash-uncensored",
   "systemPrompt": { "instructions": "…all system messages joined…" },
   "messages": [
     { "id": "<uuid>", "type": "message", "status": "completed", "role": "user",
@@ -131,8 +131,8 @@ Measured with a PDF, a .txt and a .md each holding a unique code word ("What is 
 | request | result |
 | --- | --- |
 | PDF, all 27 models | 27/27 answered the code word |
-| .txt and .md, `deepseek-v4-1-flash-free`, `z-ai-glm-5-3-flash`, `qwen3-coder-480b-a35b-instruct-turbo` | 6/6 |
-| `opencode run -f report.pdf` on `deepseek-v4-1-flash-free`, `z-ai-glm-5-3-flash`, `deepseek-v4-1-flash` (sync config, `pdf` input) | 3/3, no tool call |
+| .txt and .md, `deepseek-v4-1-flash-uncensored`, `z-ai-glm-5-3-flash`, `qwen3-coder-480b-a35b-instruct-turbo` | 6/6 |
+| `opencode run -f report.pdf` on `deepseek-v4-1-flash-uncensored`, `z-ai-glm-5-3-flash`, `deepseek-v4-1-flash` (sync config, `pdf` input) | 3/3, no tool call |
 | a zip | 400 from the proxy, with the list of accepted types |
 
 `attachmentFromFilePart()` reads the part (image types go the image way), `withImagesLast()` moves `input_file` parts to the last user message like images (with `FILE_NOTE` instead of `IMAGE_NOTE` when the reminder receives them), and the OpenCode config advertises `modalities.input` `pdf` on every model (`openCodeModel()`).
@@ -230,7 +230,7 @@ Judge measurement: 29 labelled turn endings from real sessions (13 early stops, 
 | --- | --- | --- | --- | --- |
 | `qwen3-5-35b-a3b` (default) | 27/29 | 1 | 1 | 1.6 s |
 | `zai-org-glm-5.2` | 25/29 | 1 | 3 | 1.6 s |
-| `deepseek-v4-1-flash-free` | 24/29 | 2 | 3 | 1.5 s |
+| `deepseek-v4-1-flash-free` (now `deepseek-v4-1-flash-uncensored`) | 24/29 | 2 | 3 | 1.5 s |
 | `kimi-k2-5` | 24/29 | 2 | 3 | 2.0 s |
 | old word lists | 16/29 | 13 | 0 | - |
 
