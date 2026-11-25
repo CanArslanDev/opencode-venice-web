@@ -69,7 +69,7 @@ curl -s 127.0.0.1:3456/health
 | Session cookie | `venice.ai` cookie jar | long-lived Clerk `__client`, read straight out of the browser |
 | Session JWT | `POST clerk.venice.ai/v1/client/sessions/<id>/tokens` | ~60 s lifetime, refreshed by the proxy, single-flight |
 | Client attestation | `POST outerface.venice.ai/api/app/user/client_attestation/mint` | short-lived token, cached 5 minutes |
-| Inference | `POST outerface.venice.ai/api/inference/chat/agents/ad-hoc` | newline-delimited SSE |
+| Inference | `POST outerface.venice.ai/api/inference/chat/agents/ad-hoc` (agent route) or `/api/inference/chat` (classic route) | per model, see [Models](#models) |
 | Tool calls | emulated | the web endpoint does not accept OpenAI `tools` |
 
 The proxy exposes:
@@ -98,9 +98,18 @@ Only models the web catalogue marks as free (`usesCredits: false`) are exposed -
 | Gemma | `google-gemma-4-31b-it`, `google-gemma-4-26b-a4b-it`, `gemma4-uncensored` |
 | Venice | `venice-uncensored-1-2`, `venice-uncensored-role-play` |
 | Aion | `aion-labs-aion-3-0`, `aion-labs-aion-3-0-mini` |
-| TEE / E2EE hosted | `e2ee-qwen3-8-27b`, `e2ee-gpt-oss-120b-p`, `e2ee-qwen3-6-35b-a3b`, `e2ee-gemma-4-26b-a4b-uncensored-p`, `e2ee-qwen-2-5-7b-p`, `e2ee-qwen3-vl-30b-a3b-p` |
+| TEE / E2EE hosted | `e2ee-gpt-oss-120b-p`, `e2ee-qwen3-6-35b-a3b`, `e2ee-gemma-4-26b-a4b-uncensored-p`, `e2ee-qwen-2-5-7b-p`, `e2ee-qwen3-vl-30b-a3b-p` |
 
-All 27 models take images and PDFs: each one read a test picture and a PDF with a code word correctly through this proxy (the models added on 2026-11-25 were measured the same day), so the sync marks them with `image` and `pdf` input and OpenCode lets you attach both. Rerun `venice-web-sync` after updating if OpenCode says a model does not support images or PDFs.
+**Which route a model uses.** Venice has two chat routes. The agent route (the web app's agentic chat) really runs only `deepseek-v4-1-flash-uncensored`, `deepseek-v4-1-flash` and `z-ai-glm-5-3-flash`; asked for any other model it quietly answers with DeepSeek V4.1 Flash Uncensored. Every other model therefore goes through the classic route (the web app's ordinary chat), which serves the model you picked. The proxy logs a warning whenever Venice says it answered with a different model. `VENICE_WEB_CHAT_ROUTE=agent` or `classic` forces one route for all models. Measurements: [docs/PROTOCOL.md §2d](docs/PROTOCOL.md).
+
+What that means for each model:
+
+- **Context.** The classic route reads far less than the catalogue says: about 40k tokens for most models (about 150k for `qwen-3-8-27b`, 20k or 12k for some TEE models), and it drops the start of a longer prompt without saying so. The sync gives OpenCode these real limits, so OpenCode compacts the conversation in time. `deepseek-v4-1-flash`, `zai-org-glm-5.2` and `z-ai-glm-5-3-flash` read their full context; for long coding sessions use those or `deepseek-v4-1-flash-uncensored`.
+- **Images.** Only models that read a picture themselves are marked with `image` input: the three DeepSeek/GLM agent models, `qwen-3-8-27b`, `qwen3-6-27b`, `qwen3-5-35b-a3b`, `qwen3-vl-235b-a22b`, `venice-uncensored-1-2`, the three Gemma models and `e2ee-qwen3-vl-30b-a3b-p`. Venice answers an image sent to any other model with Qwen 3.5 35B instead.
+- **Documents.** Every model takes PDFs and the other document types. On the classic route the proxy sends the document's text (Venice extracts it from the PDF first).
+- **Sampling.** `temperature`, `top_p` and `max_tokens` work on classic-route models; the agent route ignores them.
+
+`e2ee-qwen3-8-27b` is gone: it failed on every request on the classic route. The old id now points at `qwen-3-8-27b`. Rerun `venice-web-sync` after updating so OpenCode gets the new limits and input types.
 
 The catalogue lives in [`src/lib/models.mjs`](src/lib/models.mjs); edit it and rerun `venice-web-sync` if Venice adds models. If the web catalogue ships a model you want, run `GET /v1/models` (or `venice-web-doctor`) after adding it to verify it is reachable.
 
@@ -200,7 +209,8 @@ All environment variables are optional; the defaults are what the installer uses
 | `VENICE_WEB_CURL_TLS_ARGS` | auto | extra TLS flags for curl, space separated; auto is `--tlsv1.3` for an OpenSSL build (Linux) and nothing otherwise, empty sends none |
 | `VENICE_WEB_TIMEOUT` | `900000` | per-request upstream timeout (ms) |
 | `VENICE_WEB_JUDGE` | on | `0` turns off the judge that checks whether a turn may end |
-| `VENICE_WEB_JUDGE_MODEL` | `qwen3-5-35b-a3b` | model for the judge (empty: the request's own model) |
+| `VENICE_WEB_JUDGE_MODEL` | `deepseek-v4-1-flash-uncensored` | model for the judge (empty: the request's own model) |
+| `VENICE_WEB_CHAT_ROUTE` | `auto` | chat route: `auto` (each model's own), `classic`, `agent` |
 | `VENICE_WEB_JUDGE_TIMEOUT` | `45000` | judge timeout (ms); a late judge keeps the reply |
 | `VENICE_WEB_MIDDLEFACE` | `0.1.1128` | `x-venice-middleface-version` header |
 | `VENICE_WEB_CLERK_VERSION` | pinned | Clerk frontend API version query |
@@ -221,7 +231,8 @@ All environment variables are optional; the defaults are what the installer uses
 
 - **Not the official API.** The web endpoints are undocumented and may change. `middleface` version headers are pinned to what the current web client sends.
 - **Tool calls are emulated.** The web endpoint ignores OpenAI `tools`, so the model answers with a JSON envelope that the proxy turns into `tool_calls`. This is reliable in practice (see [docs/PROTOCOL.md](docs/PROTOCOL.md) for the measured technique) but it is a prompt contract, not a native feature: `tool_choice: required` is advisory, and with tools in the request the answer arrives buffered rather than token-by-token (reasoning still streams live).
-- **No sampling controls.** `temperature`, `top_p` and `max_tokens` are not applied by this endpoint.
+- **Sampling controls only on the classic route.** `temperature`, `top_p` and `max_tokens` are applied for classic-route models and ignored on the agent route (`deepseek-v4-1-flash-uncensored`, `deepseek-v4-1-flash`, `z-ai-glm-5-3-flash`).
+- **Small context on most models.** The classic route reads about 40k tokens on most models and cuts longer prompts from the start silently; see [Models](#models).
 - **Unlimited, not infinite.** Venice's fair-use and Cloudflare bot checks apply. A Cloudflare challenge surfaces as HTTP 401 with a "refresh the cookies" message.
 - **Images: what is sent.** The images of your latest message go to the model as images, on every step of the work they start. Images from earlier messages stay in the history as `[image]` and are not sent again. Only pictures inside the request (data URLs, which is what OpenCode sends) are used, up to 10 per message; the proxy never downloads an image from a URL.
 - **Documents: what is sent.** OpenAI `file` parts (`{"type":"file","file":{"filename","file_data"}}`, what OpenCode sends for a PDF) of your latest message go to Venice with their bytes, up to 10 per message and 100 MB each, and Venice extracts the text. Accepted: pdf, txt, md, csv, json, xml, rtf, doc, docx, xls, xlsx, ppt, pptx, odt, ods, odp, epub and any `text/*`. Anything else (a zip, a `file_id` reference, a URL) is answered with a 400 that says why, instead of being dropped silently. Files from earlier messages stay in the history as `[file: name]`.

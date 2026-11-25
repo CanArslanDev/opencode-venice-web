@@ -17,6 +17,7 @@ src/doctor.mjs                diagnostics
 src/lib/config.mjs            paths, endpoints, tunables (all env-overridable)
 src/lib/models.mjs            free web model catalogue
 src/lib/venice.mjs            session file, Clerk JWT, attestation, upstream fetch
+src/lib/classic.mjs           classic chat route: request conversion, line-stream reader, document helpers (pure)
 src/lib/curl.mjs              curl transport for the inference host (Cloudflare blocks Node's fetch there)
 src/lib/imagegen.mjs          image generation/editing: agent instructions, image event reader (pure)
 src/lib/studio.mjs            image generation on the Studio route: options, request body, response headers (pure)
@@ -32,6 +33,7 @@ test/curl.test.mjs            curl transport: helpers, TLS flags, and real curl 
 test/imagegen.test.mjs        image generation/editing: validation, instructions, event reader
 test/studio.test.mjs          Studio image route: option parsing, request body, headers
 test/images.test.mjs          image input: data URLs, which images are sent, placement, multipart encoding
+test/classic.test.mjs         classic route: routes per model, request conversion, stream reader, merged runs, limits
 test/files.test.mjs           document input: file parts -> input_file, accepted types, 400s, OpenCode pdf modality
 test/server-loop.test.mjs     Venice tool-loop detection in collectStream (fake SSE)
 test/smoke.mjs                end-to-end check against a running proxy
@@ -86,9 +88,12 @@ VENICE_WEB_DUMP=/tmp/req.json node src/proxy.mjs
 * Cloudflare blocks Node's own HTTP client on `outerface.venice.ai/api/inference/*` (403 "Attention Required!" HTML). The system curl gets through, but only over HTTP/1.1, with the user agent passed via `-A` (header order matters) and **without** `accept: text/event-stream`. `src/lib/curl.mjs` encodes all three; read `docs/PROTOCOL.md` §1 before changing any of them.
 * On Linux the same rule also rejects the stock **OpenSSL** ClientHello (Ubuntu curl: 0/5), while `--tlsv1.3` passes (10/10); macOS curl passes as is and rejects `--tlsv1.3`. `tlsArgsFor()` picks the flag from `curl --version`. Headers go through a `0600` temp file (`writeHeaderFile()`), never `/dev/fd/3`: Node's extra stdio pipes are sockets and Linux cannot reopen them by path (curl exit 26). `test/curl.test.mjs` runs real curl against a local HTTPS server to keep this covered on CI's Ubuntu.
 
+* **The agent route serves only three models.** `/agents/ad-hoc` answers any `modelId`, but for all but `deepseek-v4-1-flash-uncensored`, `deepseek-v4-1-flash` and `z-ai-glm-5-3-flash` it runs DeepSeek V4.1 Flash Uncensored; only the finished message item's `model_id` tells. Other models use the classic route (`/api/inference/chat`, `src/lib/classic.mjs`), chosen per model by `route` / `routeFor()`. The request is still built agent-shaped and converted at send time (`toClassicRequest()`), so retries and tool emulation stay in one place. Never judge a model by an agent-route run without checking `model_id` / `servingModelId`. `docs/PROTOCOL.md` §2d.
+* The classic route keeps only the **last** of several user messages in a row; `mergeRuns()` joins them (the request + format reminder would otherwise be just the reminder). It reads ~40k tokens on most models and silently drops the start of longer prompts; `window` in models.mjs is what OpenCode gets as the context limit. It answers images for text-only models with Qwen 3.5 35B (`vision: false` there) and takes documents only as `isFile` text messages (PDFs are extracted through one agent-route call that is dropped once the `veniceai:document_parsing` items are done).
+
 ## Changing the model catalogue
 
-`src/lib/models.mjs` is curated to `usesCredits: false` web models only. Credit-billed models are excluded because the agent endpoint may silently serve a different (free) model for them. After editing, rerun `node src/sync.mjs` so the OpenCode config picks up the new list.
+`src/lib/models.mjs` is curated to `usesCredits: false` web models only. Credit-billed models are excluded because the agent endpoint may silently serve a different (free) model for them. A new model needs a `route` (agent only if an agent-route run shows its own `model_id`), a measured `window` on the classic route, and `vision` only if `servingModelId` stays the same with an image attached. After editing, rerun `node src/sync.mjs` so the OpenCode config picks up the new list.
 
 ## Version pins
 

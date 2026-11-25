@@ -16,44 +16,69 @@
  *
  * `reasoning: true` marks models that emit reasoning deltas. `context`/`output`
  * are the web catalogue limits, used to build the OpenCode model config.
- * `vision: true` marks models measured to answer about an attached image
- * (docs/PROTOCOL.md §2b); OpenCode only sends images to those. The models
- * added on 2026-11-25 were measured the same day (a photo of an apple: all nine
- * named the object and its colour), including ones the catalogue does not flag
- * `supportsMultiModal` (GLM 4.7, Qwen 3 Coder, Nemotron): the web endpoint
- * answers about the picture for them too, as it does for GLM 5.2.
+ * `vision: true` marks models that read an attached image themselves; OpenCode
+ * only sends images to those. Measured 2026-11-25 with a photo of a red apple,
+ * checking the model the stream names: on the classic route Venice answers an
+ * image sent to a text-only model with Qwen 3.5 35B A3B instead (14 models) or
+ * fails (Venice Role Play, HTTP 500), so those are `vision: false`. The
+ * earlier "every model reads images and PDFs" result was measured on the agent
+ * route, where all of them were DeepSeek V4.1 Flash Uncensored.
+ *
+ * `route` is the chat route (docs/PROTOCOL.md §2d). The agent route
+ * (`/agents/ad-hoc`) runs only the three models marked `route: 'agent'`; for
+ * every other id it silently answers with DeepSeek V4.1 Flash Uncensored (24 of the 27
+ * models then listed, measured 2026-11-25 from the stream's `model_id`), so those use the
+ * classic route (`/api/inference/chat`), which serves the model asked for.
+ *
+ * `window` is the prompt the classic route really reads, measured with markers
+ * every ~5k tokens in a 355k-token prompt: past it the route drops the START of
+ * the prompt silently (the system prompt survives) or, on some TEE models,
+ * answers 413 `userPromptTooLong`. It is far below the catalogue's
+ * `maxContextLength` for most models (about 40k tokens), so it is what OpenCode
+ * gets as the context limit, and OpenCode compacts before Venice truncates.
+ * Models without `window` read their whole catalogue context (checked up to
+ * ~355k tokens; 473k on GLM 5.2).
  *
  * Ids are the catalogue's own `id`s. Ids the catalogue renamed live on in
  * `MODEL_ALIASES` so existing OpenCode configs keep working until the next sync.
  */
 export const MODELS = {
-  'deepseek-v4-1-flash-uncensored': { name: 'DeepSeek V4.1 Flash Uncensored (web)', context: 524288, output: 131072, reasoning: true, vision: true },
-  'deepseek-v4-1-flash': { name: 'DeepSeek V4.1 Flash 1017 (web)', context: 1000000, output: 131072, reasoning: true, vision: true },
-  'qwen-3-8-27b': { name: 'Qwen 3.8 27B (web)', context: 262144, output: 65536, reasoning: true, vision: true },
-  'qwen3-6-27b': { name: 'Qwen 3.6 27B (web)', context: 256000, output: 65536, reasoning: true, vision: true },
-  'qwen3-5-35b-a3b': { name: 'Qwen 3.5 35B A3B (web)', context: 256000, output: 16384, reasoning: true, vision: true },
-  'zai-org-glm-5.2': { name: 'GLM 5.2 (web)', context: 1000000, output: 131072, reasoning: true, vision: true },
-  'z-ai-glm-5-3-flash': { name: 'GLM 5.3 Flash (web)', context: 1048576, output: 131072, reasoning: true, vision: true },
-  'zai-org-glm-4.7-app': { name: 'GLM 4.7 (web)', context: 198000, output: 16384, reasoning: false, vision: true },
-  'olafangensan-glm-4.7-flash-heretic': { name: 'GLM 4.7 Flash Heretic (web)', context: 200000, output: 24000, reasoning: true, vision: true },
-  'qwen3-coder-480b-a35b-instruct-turbo': { name: 'Qwen 3 Coder 480B Turbo (web)', context: 256000, output: 65536, reasoning: false, vision: true },
-  'qwen3-vl-235b-a22b': { name: 'Qwen3 VL 235B (web)', context: 128000, output: 16384, reasoning: false, vision: true },
-  'nvidia-nemotron-3-ultra-550b-a55b': { name: 'NVIDIA Nemotron 3 Ultra (web)', context: 256000, output: 32768, reasoning: true, vision: true },
-  'nvidia-nemotron-3-nano-30b-a3b': { name: 'NVIDIA Nemotron 3 Nano 30B (web)', context: 128000, output: 16384, reasoning: false, vision: true },
-  'venice-uncensored-1-2': { name: 'Venice Uncensored 1.2 (web)', context: 128000, output: 8192, reasoning: false, vision: true },
-  'venice-uncensored-role-play': { name: 'Venice Role Play Uncensored (web)', context: 128000, output: 4096, reasoning: false, vision: true },
-  'google-gemma-4-31b-it': { name: 'Gemma 4 31B Instruct (web)', context: 256000, output: 16384, reasoning: true, vision: true },
-  'google-gemma-4-26b-a4b-it': { name: 'Gemma 4 26B A4B Instruct (web)', context: 256000, output: 8192, reasoning: true, vision: true },
-  'gemma4-uncensored': { name: 'Gemma 4 Uncensored (web)', context: 256000, output: 8192, reasoning: false, vision: true },
-  'aion-labs-aion-3-0': { name: 'Aion 3.0 (web)', context: 128000, output: 32768, reasoning: true, vision: true },
-  'aion-labs-aion-3-0-mini': { name: 'Aion 3.0 Mini (web)', context: 128000, output: 32768, reasoning: true, vision: true },
-  'deepseek-ai-DeepSeek-V3.2': { name: 'DeepSeek V3.2 (web)', context: 160000, output: 32768, reasoning: true, vision: true },
-  'e2ee-qwen3-8-27b': { name: 'Qwen 3.8 27B TEE (web)', context: 262144, output: 8192, reasoning: true, vision: true },
-  'e2ee-gpt-oss-120b-p': { name: 'GPT OSS 120B TEE (web)', context: 128000, output: 32768, reasoning: true, vision: true },
-  'e2ee-qwen3-6-35b-a3b': { name: 'Qwen 3.6 35B A3B FP8 TEE (web)', context: 32000, output: 4096, reasoning: true, vision: true },
-  'e2ee-gemma-4-26b-a4b-uncensored-p': { name: 'Gemma 4 26B A4B Uncensored TEE (web)', context: 64000, output: 4096, reasoning: false, vision: true },
-  'e2ee-qwen-2-5-7b-p': { name: 'Qwen 2.5 7B TEE (web)', context: 32000, output: 4096, reasoning: false, vision: true },
-  'e2ee-qwen3-vl-30b-a3b-p': { name: 'Qwen3 VL 30B A3B TEE (web)', context: 128000, output: 4096, reasoning: false, vision: true },
+  'deepseek-v4-1-flash-uncensored': { name: 'DeepSeek V4.1 Flash Uncensored (web)', route: 'agent', context: 524288, output: 131072, reasoning: true, vision: true },
+  'deepseek-v4-1-flash': { name: 'DeepSeek V4.1 Flash 1017 (web)', route: 'agent', context: 1000000, output: 131072, reasoning: true, vision: true },
+  'qwen-3-8-27b': { name: 'Qwen 3.8 27B (web)', context: 262144, window: 150000, output: 65536, reasoning: true, vision: true },
+  'qwen3-6-27b': { name: 'Qwen 3.6 27B (web)', context: 256000, window: 40000, output: 65536, reasoning: true, vision: true },
+  'qwen3-5-35b-a3b': { name: 'Qwen 3.5 35B A3B (web)', context: 256000, window: 40000, output: 16384, reasoning: true, vision: true },
+  'zai-org-glm-5.2': { name: 'GLM 5.2 (web)', context: 1000000, output: 131072, reasoning: true, vision: false },
+  'z-ai-glm-5-3-flash': { name: 'GLM 5.3 Flash (web)', route: 'agent', context: 1048576, output: 131072, reasoning: true, vision: true },
+  'zai-org-glm-4.7-app': { name: 'GLM 4.7 (web)', context: 198000, window: 40000, output: 16384, reasoning: false, vision: false },
+  'olafangensan-glm-4.7-flash-heretic': { name: 'GLM 4.7 Flash Heretic (web)', context: 200000, window: 40000, output: 24000, reasoning: true, vision: false },
+  'qwen3-coder-480b-a35b-instruct-turbo': { name: 'Qwen 3 Coder 480B Turbo (web)', context: 256000, window: 40000, output: 65536, reasoning: false, vision: false },
+  'qwen3-vl-235b-a22b': { name: 'Qwen3 VL 235B (web)', context: 128000, window: 40000, output: 16384, reasoning: false, vision: true },
+  'nvidia-nemotron-3-ultra-550b-a55b': { name: 'NVIDIA Nemotron 3 Ultra (web)', context: 256000, window: 40000, output: 32768, reasoning: true, vision: false },
+  'nvidia-nemotron-3-nano-30b-a3b': { name: 'NVIDIA Nemotron 3 Nano 30B (web)', context: 128000, window: 40000, output: 16384, reasoning: false, vision: false },
+  'venice-uncensored-1-2': { name: 'Venice Uncensored 1.2 (web)', context: 128000, window: 40000, output: 8192, reasoning: false, vision: true },
+  'venice-uncensored-role-play': { name: 'Venice Role Play Uncensored (web)', context: 128000, window: 40000, output: 4096, reasoning: false, vision: false },
+  'google-gemma-4-31b-it': { name: 'Gemma 4 31B Instruct (web)', context: 256000, window: 40000, output: 16384, reasoning: true, vision: true },
+  'google-gemma-4-26b-a4b-it': { name: 'Gemma 4 26B A4B Instruct (web)', context: 256000, window: 40000, output: 8192, reasoning: true, vision: true },
+  'gemma4-uncensored': { name: 'Gemma 4 Uncensored (web)', context: 256000, window: 40000, output: 8192, reasoning: false, vision: true },
+  'aion-labs-aion-3-0': { name: 'Aion 3.0 (web)', context: 128000, window: 40000, output: 32768, reasoning: true, vision: false },
+  'aion-labs-aion-3-0-mini': { name: 'Aion 3.0 Mini (web)', context: 128000, window: 40000, output: 32768, reasoning: true, vision: false },
+  'deepseek-ai-DeepSeek-V3.2': { name: 'DeepSeek V3.2 (web)', context: 160000, window: 40000, output: 32768, reasoning: true, vision: false },
+  'e2ee-gpt-oss-120b-p': { name: 'GPT OSS 120B TEE (web)', context: 128000, window: 40000, output: 32768, reasoning: true, vision: false },
+  'e2ee-qwen3-6-35b-a3b': { name: 'Qwen 3.6 35B A3B FP8 TEE (web)', context: 32000, window: 20000, output: 4096, reasoning: true, vision: false },
+  'e2ee-gemma-4-26b-a4b-uncensored-p': { name: 'Gemma 4 26B A4B Uncensored TEE (web)', context: 64000, window: 40000, output: 4096, reasoning: false, vision: false },
+  'e2ee-qwen-2-5-7b-p': { name: 'Qwen 2.5 7B TEE (web)', context: 32000, window: 20000, output: 4096, reasoning: false, vision: false },
+  'e2ee-qwen3-vl-30b-a3b-p': { name: 'Qwen3 VL 30B A3B TEE (web)', context: 128000, window: 12000, output: 4096, reasoning: false, vision: true },
+}
+
+/**
+ * The chat route for model `id`: `agent` (`/agents/ad-hoc`) or `classic`
+ * (`/api/inference/chat`). `override` is `VENICE_WEB_CHAT_ROUTE` (`auto` keeps
+ * the model's own). docs/PROTOCOL.md §2d.
+ */
+export function routeFor(id, override = 'auto') {
+  if (override === 'agent' || override === 'classic') return override
+  return MODELS[id]?.route === 'agent' ? 'agent' : 'classic'
 }
 
 /** Default model, used by the installer and `sync --default`. */
@@ -66,6 +91,9 @@ export const DEFAULT_MODEL = 'deepseek-v4-1-flash-uncensored'
  */
 export const MODEL_ALIASES = {
   'deepseek-v4-1-flash-free': 'deepseek-v4-1-flash-uncensored',
+  // answered HTTP 500 on the classic route every time (2026-11-25, 6 tries) and
+  // was DeepSeek on the agent route; the same model without TEE works
+  'e2ee-qwen3-8-27b': 'qwen-3-8-27b',
 }
 
 /** The current id for `id` (itself when it is not an old alias). */
@@ -84,12 +112,16 @@ export const modelIds = Object.keys(MODELS)
  */
 export function openCodeModel(model) {
   const input = ['text', ...(model.vision ? ['image'] : []), ...(model.documents === false ? [] : ['pdf'])]
+  const context = model.window ?? model.context
+  // OpenCode compacts at `context - output`; with a small window the full
+  // output limit would leave almost no room for the conversation
+  const output = model.window ? Math.min(model.output, Math.floor(model.window / 5)) : model.output
   return {
     name: model.name,
     tool_call: true,
     reasoning: model.reasoning,
     ...(input.length > 1 ? { attachment: true, modalities: { input, output: ['text'] } } : {}),
-    limit: { context: model.context, output: model.output },
+    limit: { context, output },
   }
 }
 

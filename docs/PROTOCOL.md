@@ -85,7 +85,8 @@ Notes:
 
 * `modelId` uses the web catalogue's dotted ids (`zai-org-glm-5.2`), not the API's dashed ids.
 * `tools` and `clientTools` are what the web *agent* uses. Sending `tools: []` does not disable Venice's built-in server tools - the model may still call `view_media`/`get_attachment`.
-* The endpoint ignores `temperature`, `top_p` and `max_tokens`.
+* The endpoint ignores `temperature`, `top_p` and `max_tokens` (the classic route, §2d, honours them).
+* This route runs only three models; any other `modelId` is answered by DeepSeek V4.1 Flash Uncensored. See §2d.
 * Requests with `attestationToken` minted are required for `/api/inference/*`; the mint call needs the same headers (sans attestation).
 
 ## 2b. Images
@@ -104,7 +105,7 @@ Measured shortcuts:
 
 So the proxy uploads nothing. Each image of the user's latest message gets an id derived from its bytes, the request goes out as multipart with the bytes in `media.<id>`, and Venice reads them straight from the request: no upload endpoint (which rate-limits with `429`), no id cache, nothing stored on disk. `upstreamChat(…, files)` builds the multipart body with `multipartBody()` (the encoder `fetch()` uses), so it travels through curl like any other body.
 
-Every model in `src/lib/models.mjs` answered "4719" and "red", including the ones the catalogue does not flag `supportsMultiModal`. PNG, a 2.5 MB 3000x2000 PNG, and two images in one message (both read) work too.
+Every model in `src/lib/models.mjs` answered "4719" and "red", including the ones the catalogue does not flag `supportsMultiModal` - but on this route all of them except three were DeepSeek V4.1 Flash Uncensored (§2d); vision per model on the classic route is measured there. PNG, a 2.5 MB 3000x2000 PNG, and two images in one message (both read) work too.
 
 **The image has to be in the last user message.** Venice shows the model an image directly only when it sits in the last user message; anywhere earlier the model calls Venice's own `view_media` to look at it (2/2, both answered after that server call). With emulated tools that call is written into the envelope, where nothing runs it: 5 of 5 image questions ended in an invalid `view_media` call and then an unrelated `bash`. The format and retry reminders are user messages that come after the user's own, so `withImagesLast()` moves the image parts onto the last user message with a line saying whose they are. After that: 5/5 answered with tools on, 0 `view_media` calls, and in a tool loop the model still sees the picture (`write code.txt "4719"` after a tool result), on macOS and Linux, through the proxy and through real `opencode run -f`.
 
@@ -130,12 +131,102 @@ Measured with a PDF, a .txt and a .md each holding a unique code word ("What is 
 
 | request | result |
 | --- | --- |
-| PDF, all 27 models | 27/27 answered the code word |
+| PDF, all 27 models | 27/27 answered the code word (24 of them were DeepSeek V4.1 Flash Uncensored, §2d) |
 | .txt and .md, `deepseek-v4-1-flash-uncensored`, `z-ai-glm-5-3-flash`, `qwen3-coder-480b-a35b-instruct-turbo` | 6/6 |
 | `opencode run -f report.pdf` on `deepseek-v4-1-flash-uncensored`, `z-ai-glm-5-3-flash`, `deepseek-v4-1-flash` (sync config, `pdf` input) | 3/3, no tool call |
 | a zip | 400 from the proxy, with the list of accepted types |
 
 `attachmentFromFilePart()` reads the part (image types go the image way), `withImagesLast()` moves `input_file` parts to the last user message like images (with `FILE_NOTE` instead of `IMAGE_NOTE` when the reminder receives them), and the OpenCode config advertises `modalities.input` `pdf` on every model (`openCodeModel()`).
+
+## 2d. Two chat routes: agent and classic
+
+Measured 2026-11-25 (Windows, Pro session) with every model in `src/lib/models.mjs`, straight against upstream and then through the proxy.
+
+**The agent route runs only three models.** `/agents/ad-hoc` takes any `modelId` and answers, but the finished message item names the model that really ran:
+
+```
+response.output_item.done  { "item": { "type": "message", "id": "agent-node:llm:0", "status": "completed", "model_id": "deepseek-v4-1-flash-uncensored", … } }
+response.output_text.done  { …, "context_metadata": { "total_tokens": 2989, "max_context_length": 524288 } }
+```
+
+`response.created` / `response.completed` carry no model. For 24 of the 27 models then listed, `model_id` was `deepseek-v4-1-flash-uncensored` and `max_context_length` was that model's 524288; only `deepseek-v4-1-flash-uncensored`, `deepseek-v4-1-flash` (1000000) and `z-ai-glm-5-3-flash` (1048576) ran as themselves. These are the models of the web app's agentic model picker (its fourth entry is "Auto"). The fingerprint agrees: asked "What model are you, and which company made you?", the agent route answered "Claude, made by Anthropic" (or "an undisclosed model") for almost every id, while the classic route answered with each model's own maker (Alibaba/Tongyi for Qwen, Z.ai for GLM, NVIDIA for Nemotron, Google for Gemma, Mistral for the Venice models, OpenAI for GPT OSS, DeepSeek for DeepSeek). `total_tokens` 2989 for a one-word prompt also shows that the agent route adds about 3k tokens of its own system prompt.
+
+So every measurement in this file that was taken on the agent route with another model id (vision and documents on "all 27 models" in §2b/§2c, the judge candidates in §4.7) was in fact DeepSeek V4.1 Flash Uncensored.
+
+**The classic route** is what the web app's ordinary chat uses:
+
+```
+POST https://outerface.venice.ai/api/inference/chat
+(same auth, attestation, middleface and timestamp headers; no accept: text/event-stream, as on the agent route)
+```
+
+```jsonc
+{
+  "requestId": "a1b2c3d",            // any short id
+  "modelId": "qwen3-5-35b-a3b",
+  "prompt": [
+    { "role": "system" | "user" | "assistant", "content": "…",
+      "imagePath": ["data:image/png;base64,…"],   // optional, must be an array
+      "isFile": true }                             // optional: this message is a document's text
+  ],
+  "systemPrompt": "…",               // a string; an object is a 400
+  "includeVeniceSystemPrompt": false,
+  "reasoning": false,                // true: reasoning deltas (models that have them)
+  "enableLargeContextChat": true,    // see "Context" below
+  "maxResponseTokens": 2048,         // honoured
+  "temperature": 0.7,                // honoured, 0-2 (above 2: 400)
+  "topP": 0.9,
+  "webEnabled": false, "webScrapeEnabled": false, "xSearchEnabled": false,
+  "conversationType": "text",
+  "isCharacter": false
+}
+```
+
+The answer is **not SSE**: one JSON object per line (the response even says `content-type: text/html`), streamed as it is generated (267 chunks over 6 s for a 400-word story):
+
+```
+{"kind":"meta","references":[],"servingModelId":"qwen3-5-35b-a3b","servingModelName":"Qwen 3.5 35B A3B"}
+{"kind":"meta","augmented":false,"references":[],"completion_id":"chatcmpl-…"}
+{"kind":"meta","augmented":false,"references":[],"thinking":true}
+{"kind":"content","content":"","reasoning_content":"…"}     reasoning delta (reasoning: true)
+{"content":"P","kind":"content"}                             answer delta
+{"kind":"status","content":"processing"}                     on long prompts, before the first token
+{"kind":"meta","references":[],"servingModelId":"qwen3-5-35b-a3b","servingModelName":"Qwen 3.5 35B A3B"}
+```
+
+There is no terminal event: the stream simply ends. Errors are an HTTP status with a JSON body (`{"error":"Invalid request","details":…}` 400, `{"error":"modelOverloaded"}` 429, `{"error":"userPromptTooLong"}` 413, `{"error":"Internal server error"}` 500). No `x-venice-tee-model-pub-key` header came back for the TEE models; their answers were plain text like the others.
+
+Measured on the classic route:
+
+| check | result |
+| --- | --- |
+| "Reply with exactly: PONG", every model | 26/27 `PONG`, `servingModelId` = the model asked for every time; `e2ee-qwen3-8-27b` HTTP 500 on 6 of 6 tries (now an alias of `qwen-3-8-27b`) |
+| fingerprint question | each model named its own maker (see above) |
+| `temperature` | 0: the same invented name 3/3; 2: unreadable token soup; 9: 400 "less than or equal to 2" |
+| `maxResponseTokens: 20` | 88 characters instead of 1761 |
+| `systemPrompt` string, `role: "system"` message, multi-turn history | all followed |
+| several user messages in a row | **only the last one is read**: "code word two: LIME-77" followed by the question was forgotten (2/2 models), joined into one message both were named. An `isFile` message is not dropped and keeps the message before it |
+| `imagePath: [dataURL]` | read (a red apple). A string instead of an array is a 400 |
+| image sent to a text-only model | answered by **`qwen3-5-35b-a3b`** (`servingModelId` says so) on 14 models; HTTP 500 on `venice-uncensored-role-play`; read by the model itself on `qwen-3-8-27b`, `qwen3-6-27b`, `qwen3-5-35b-a3b`, `qwen3-vl-235b-a22b`, `venice-uncensored-1-2`, the three Gemma models and `e2ee-qwen3-vl-30b-a3b-p` |
+| document bytes (multipart, or a PDF data URL in `imagePath`) | 400 "Required" / not read. The route takes documents only as text, in a message with `isFile: true` |
+| median time to first byte, short prompt | 0.87 s (agent route 0.49 s); total time about the same as the agent route |
+
+**Context.** Without `enableLargeContextChat` the route keeps only the end of a long prompt and drops the start silently (GLM 5.2: a code word at the start of 120k characters found, of 200k characters not; with the flag, found at 1.6M characters, ~470k tokens). Even with the flag most models read far less than their catalogue `maxContextLength`. Measured with a marker line every ~5k tokens in a ~355k-token prompt, asking for the first marker the model sees, then confirmed with a code word at the start of prompts of known size:
+
+| models | prompt read on the classic route |
+| --- | --- |
+| `deepseek-v4-1-flash`, `zai-org-glm-5.2`, `z-ai-glm-5-3-flash` | all of it (355k tokens; 470k on GLM 5.2) |
+| `qwen-3-8-27b` | ~150k (118k found, 177k not) |
+| 18 others (`qwen3-5-35b-a3b`: 38k found, 47k not) | ~40k |
+| `e2ee-qwen3-6-35b-a3b`, `e2ee-qwen-2-5-7b-p` | ~20k |
+| `e2ee-qwen3-vl-30b-a3b-p` | ~12k; above that HTTP 413 `userPromptTooLong` instead of truncation |
+| `deepseek-v4-1-flash-uncensored` | ~40k (the agent route reads 121k of the same prompt correctly) |
+
+The system prompt survives the truncation (a `systemPrompt` saying "reply ZEBRA" was obeyed under a 400k-character prompt). The cut is silent, so these numbers are the models' `window` in `src/lib/models.mjs` and what the sync gives OpenCode as the context limit (with the output limit capped at a fifth of it, since OpenCode compacts at context minus output); OpenCode compacts before Venice drops anything. `nvidia-nemotron-3-nano-30b-a3b` once answered the marker question by reciting a "CONTENT MODERATION RULES" system prompt, so some models get a Venice prompt even with `includeVeniceSystemPrompt: false`.
+
+**What the proxy does.** Each model has a `route` (`routeFor()` in `src/lib/models.mjs`): `agent` for the three models the agent route runs (on DeepSeek Uncensored it reads more context than the classic route, and it keeps the measured behaviour of §4), `classic` for the rest. `VENICE_WEB_CHAT_ROUTE=classic|agent` forces one route for every model. The request is still built in the agent shape by `toVeniceRequest()` (tool emulation is text, so it is the same on both routes), and `toClassicRequest()` in `src/lib/classic.mjs` converts it at send time, retries included: text parts joined, consecutive messages of one role joined into one (`mergeRuns()`; the request and the format reminder, or a tool result and the reminder, would otherwise lose everything but the reminder), `input_image` parts as data URLs in `imagePath`, `systemPrompt` as a string, `reasoning` from `reasoningMode`, `enableLargeContextChat: true`, and the OpenAI `temperature` / `top_p` / `max_tokens` (clamped to 0-2, 0-1 and the model's output limit). `classicReader()` turns the lines into the agent route's event names, so `collectStream()` reads both. The proxy logs `asked for X, Venice answered with Y` whenever `servingModelId` or `model_id` differs from the model asked for. There is no Venice agent loop on the classic route, so the tool-loop guard (§4.7) never triggers there.
+
+Documents on the classic route: text types (`text/*`, JSON, XML) are decoded locally; other types (PDF, office, epub) are sent once to the agent route with a one-line prompt, and the proxy stops reading that stream as soon as the `veniceai:document_parsing` items are done (§2c), before any answer is generated. The text then goes as an `isFile` message right after the message that carried the file (before it when that is the format reminder, which stays last). The wording matters: with only the file name and text, before the question, Qwen 3.5 found the code word 1/4 times and otherwise said it "cannot access attached files"; with "The user attached the file "report.pdf". Its text was extracted for you …" after the question, 4/4 (Qwen 3 Coder 4/4 either way).
 
 ## 3. Inference response
 
@@ -233,6 +324,8 @@ Judge measurement: 29 labelled turn endings from real sessions (13 early stops, 
 | `deepseek-v4-1-flash-free` (now `deepseek-v4-1-flash-uncensored`) | 24/29 | 2 | 3 | 1.5 s |
 | `kimi-k2-5` | 24/29 | 2 | 3 | 2.0 s |
 | old word lists | 16/29 | 13 | 0 | - |
+
+> These runs asked for each judge model on the agent route, which served `qwen3-5-35b-a3b`, `zai-org-glm-5.2` and `kimi-k2-5` as DeepSeek V4.1 Flash Uncensored (§2d). The differences are run-to-run spread of one model, and the judge default is now `deepseek-v4-1-flash-uncensored`, the model that really produced the 27/29.
 
 Over 3 more runs Qwen scored 76/87 (4 missed stops, 7 needless retries; all translated cases right in 17 of 18). Most disagreements are borderline labels (a summary that ends with "two notes remain", an honest "1 test still fails" report). A needless retry costs one upstream call: `preferAnswer()` keeps the first answer when the retry is not better.
 
@@ -365,7 +458,7 @@ Edits on the Studio page use `POST /api/inference/multi-edit` (multipart: the fi
 
 ## 6. Free-model catalogue
 
-`src/lib/models.mjs` mirrors the web catalogue entries flagged `usesCredits: false`. The web app fetches that list from `GET /api/app/models` and `GET /api/v2/agents/configuration_options` with the same session; both are useful if you want to regenerate the list automatically (the proxy currently ships a static copy so it works offline and with a dead session).
+`src/lib/models.mjs` mirrors the web catalogue entries flagged `usesCredits: false`, plus the measured `route`, `window` and `vision` of each (§2d). The web app fetches that list from `GET /api/app/models` and `GET /api/v2/agents/configuration_options` with the same session; both are useful if you want to regenerate the list automatically (the proxy currently ships a static copy so it works offline and with a dead session).
 
 ## 7. Version pins
 

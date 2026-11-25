@@ -137,16 +137,32 @@ test('multipartBody encodes the request and each image as the web client does', 
   assert.deepEqual(Buffer.from(await file.arrayBuffer()), Buffer.from(PNG_A, 'base64'))
 })
 
-test('the catalogue marks every measured model as taking images', () => {
-  const missing = Object.entries(MODELS).filter(([, model]) => !model.vision).map(([id]) => id)
-  // the models added 2026-11-25 were measured with a test picture the same day
-  assert.deepEqual(missing, [])
+test('vision is advertised only where the model itself read the picture', () => {
+  // measured 2026-11-25 on each model's own route, checking the serving model:
+  // the classic route answers images for the other models with Qwen 3.5 35B
+  const vision = Object.entries(MODELS).filter(([, model]) => model.vision).map(([id]) => id)
+  assert.deepEqual(vision.sort(), [
+    'deepseek-v4-1-flash',
+    'deepseek-v4-1-flash-uncensored',
+    'e2ee-qwen3-vl-30b-a3b-p',
+    'gemma4-uncensored',
+    'google-gemma-4-26b-a4b-it',
+    'google-gemma-4-31b-it',
+    'qwen-3-8-27b',
+    'qwen3-5-35b-a3b',
+    'qwen3-6-27b',
+    'qwen3-vl-235b-a22b',
+    'venice-uncensored-1-2',
+    'z-ai-glm-5-3-flash',
+  ])
+  for (const model of Object.values(MODELS)) assert.equal(typeof model.vision, 'boolean')
 })
 
 test('renamed model ids still resolve to the current id', async () => {
   const { MODEL_ALIASES, resolveModelId } = await import('../src/lib/models.mjs')
   assert.equal(resolveModelId('deepseek-v4-1-flash-free'), 'deepseek-v4-1-flash-uncensored')
   assert.equal(resolveModelId('z-ai-glm-5-3-flash'), 'z-ai-glm-5-3-flash')
+  assert.equal(resolveModelId('e2ee-qwen3-8-27b'), 'qwen-3-8-27b')
   for (const [old, current] of Object.entries(MODEL_ALIASES)) {
     assert.ok(MODELS[current], `${old} points at a listed model`)
     assert.ok(!MODELS[old], `${old} is not advertised`)

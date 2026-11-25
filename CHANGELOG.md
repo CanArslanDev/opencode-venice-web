@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- **Every model now really is the model you picked.** The agent route the proxy
+  used for all chat runs only `deepseek-v4-1-flash-uncensored`,
+  `deepseek-v4-1-flash` and `z-ai-glm-5-3-flash`; for the other 24 models it
+  answered with DeepSeek V4.1 Flash Uncensored and said so only in the stream's
+  `model_id`. Those models now use the classic chat route
+  (`/api/inference/chat`), which serves the model asked for. Tool emulation,
+  images, documents, retries and the judge work the same on both. Each model
+  has a `route` in `src/lib/models.mjs`; `VENICE_WEB_CHAT_ROUTE=agent|classic`
+  forces one. The proxy warns when Venice answers with another model.
+  PROTOCOL §2d.
+- **Real limits per model.** The classic route reads about 40k tokens on most
+  models (150k on `qwen-3-8-27b`, 20k/12k on three TEE models) and drops the
+  start of longer prompts silently. The sync now gives OpenCode those limits
+  (`window`), so it compacts in time. `temperature`, `top_p` and `max_tokens`
+  are honoured on the classic route.
+- **Image input only where the model reads it.** On the classic route Venice
+  answers an image for a text-only model with Qwen 3.5 35B, so 14 models are
+  now `vision: false` (the earlier "all 27 read images" result was DeepSeek on
+  every row). PDFs and other documents still work on every model: on the
+  classic route the proxy sends their text (extracted by Venice).
+- **Judge model is now `deepseek-v4-1-flash-uncensored`**, the model the judge
+  measurements really ran on (they asked for Qwen 3.5, which the agent route
+  served as DeepSeek).
+- **`e2ee-qwen3-8-27b` removed** (HTTP 500 on every classic request); the id
+  is an alias of `qwen-3-8-27b`.
+
 - **`deepseek-v4-1-flash-free` is now `deepseek-v4-1-flash-uncensored`**, the id
   Venice uses for it today ("free" was misleading: the model is the uncensored
   DeepSeek V4.1 Flash, not a free tier of `deepseek-v4-1-flash`). The old id is

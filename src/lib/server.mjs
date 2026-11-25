@@ -10,7 +10,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
-import { apiBase, debug, dumpFile, host, imageRoute, judgeEnabled, judgeModel, judgeTimeoutMs, port, providerID } from './config.mjs'
+import { apiBase, chatRoute, debug, dumpFile, host, imageRoute, judgeEnabled, judgeModel, judgeTimeoutMs, port, providerID } from './config.mjs'
 import {
   applyFallback,
   buildJudgeRequest,
@@ -30,7 +30,18 @@ import {
   toVeniceRequest,
   withRetryReminder,
 } from './emulate.mjs'
-import { IMAGE_MODELS, MODELS, resolveModelId } from './models.mjs'
+import { DEFAULT_MODEL, IMAGE_MODELS, MODELS, resolveModelId, routeFor } from './models.mjs'
+import {
+  CLASSIC_PATH,
+  answerStarted,
+  classicReader,
+  decodeTextDocument,
+  documentExtractionRequest,
+  isTextDocument,
+  parsedDocument,
+  samplingOptions,
+  toClassicRequest,
+} from './classic.mjs'
 import { debugRaw, log, preview, warn } from './log.mjs'
 import { deepStripNulls, repairJsonControlChars } from './sanitize.mjs'
 import { AGENT_IMAGE_PATH, INFERENCE_PATH, SignInError, loadSession, resetSessionCache, upstreamChat } from './venice.mjs'
@@ -119,7 +130,9 @@ function modelList() {
  */
 export async function* collectStream(upstreamBody, mapping, chunk, { stopServerLoop = false } = {}) {
   const reader = upstreamBody.getReader()
-  const stream = sseReader()
+  // the classic route streams one JSON object per line; classicReader() turns
+  // those into the agent route's event names
+  const stream = mapping.route === 'classic' ? classicReader() : sseReader()
   const state = {
     text: '',
     answer: '',
@@ -130,12 +143,19 @@ export async function* collectStream(upstreamBody, mapping, chunk, { stopServerL
     nativeTools: new Set(),
     serverLoop: false,
     events: {},
+    servedModel: null,
   }
   const itemTypes = new Map()
 
   const apply = (event) => {
     if (event.type === 'error' || event.type === 'response.failed') {
       throw new Error(event.message ?? event.response?.error?.message ?? 'Venice generation failed')
+    }
+    // the model that really answered: `servingModelId` on the classic route,
+    // the finished message item's `model_id` on the agent route (§2d)
+    if (event.type === 'veniceai:serving_model' && event.model) state.servedModel = event.model
+    if (event.type === 'response.output_item.done' && event.item?.type === 'message' && event.item.model_id) {
+      state.servedModel = event.item.model_id
     }
     if (event.type === 'response.output_item.added' && event.item?.type) {
       itemTypes.set(event.output_index, event.item.type)
@@ -218,6 +238,62 @@ const STOP = Symbol('stop')
 const SERVER_LOOP_STEPS = 3
 
 /**
+ * Sends one chat request on the mapping's route. The request is always built in
+ * the agent route's shape (retries append to it); the classic route gets it
+ * converted, with images as data URLs and documents as their text.
+ */
+function sendChat(request, mapping, signal) {
+  if (mapping.route === 'classic') {
+    const classic = toClassicRequest(request, { images: mapping.images, documents: mapping.documents, sampling: mapping.sampling })
+    return upstreamChat(classic, CLASSIC_PATH, signal)
+  }
+  return upstreamChat(request, INFERENCE_PATH, signal, mapping.media)
+}
+
+/**
+ * The text of each document, for the classic route (which takes no file bytes).
+ * Text types are decoded here; the others go once to the agent route, which
+ * parses them server side (`veniceai:document_parsing`, §2c), and the stream is
+ * dropped as soon as the parsing is done, before any answer is generated.
+ * @returns {Promise<Map<string, {filename: string, text: string}>>}
+ */
+async function readDocuments(files, signal) {
+  const documents = new Map()
+  const binary = []
+  for (const file of files) {
+    if (isTextDocument(file.mimeType)) documents.set(file.mediaId, { filename: file.filename, text: decodeTextDocument(file.data) })
+    else binary.push(file)
+  }
+  if (!binary.length) return documents
+  const response = await upstreamChat(documentExtractionRequest(binary, DEFAULT_MODEL), INFERENCE_PATH, signal, binary)
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new Error(`could not read the attached document(s): HTTP ${response.status} ${text.slice(0, 200)}`)
+  }
+  const reader = response.body.getReader()
+  const stream = sseReader()
+  try {
+    outer: for (;;) {
+      const { value, done } = await reader.read()
+      for (const event of stream.feed(value, done)) {
+        const parsed = parsedDocument(event)
+        if (parsed) {
+          const file = binary.find((item) => item.mediaId === parsed.mediaId)
+          documents.set(parsed.mediaId, { filename: file?.filename ?? parsed.filename, text: parsed.text })
+        }
+        if (answerStarted(event) || binary.every((item) => documents.has(item.mediaId))) break outer
+      }
+      if (done) break
+    }
+  } finally {
+    await reader.cancel().catch(() => {})
+  }
+  const missing = binary.filter((item) => !documents.get(item.mediaId)?.text)
+  if (missing.length) warn(`   ~ no text extracted from ${missing.map((item) => item.filename).join(', ')}`)
+  return documents
+}
+
+/**
  * Asks the judge whether a reply without tool calls may end the turn. Any
  * failure (network, timeout, an unreadable verdict) returns `null`, which keeps
  * the reply: the judge can only add a retry, never block an answer.
@@ -225,18 +301,15 @@ const SERVER_LOOP_STEPS = 3
 async function askJudge(body, message, signal) {
   const model = judgeModel || body.model
   const timeout = AbortSignal.timeout(judgeTimeoutMs)
+  const route = routeFor(model, chatRoute)
   try {
-    const response = await upstreamChat(
-      buildJudgeRequest(body, message, model),
-      INFERENCE_PATH,
-      signal ? AbortSignal.any([signal, timeout]) : timeout,
-    )
+    const response = await sendChat(buildJudgeRequest(body, message, model), { route, images: [], media: [] }, signal ? AbortSignal.any([signal, timeout]) : timeout)
     if (!response.ok) {
       await response.body?.cancel()
       warn(`  ~ judge: HTTP ${response.status}, keeping the reply`)
       return null
     }
-    const collected = collectStream(response.body, { emulatedTools: true }, () => null)
+    const collected = collectStream(response.body, { emulatedTools: true, route }, () => null)
     let step
     do step = await collected.next()
     while (!step.done)
@@ -321,7 +394,7 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
       log(`  ~ ${decision.reason}, retrying...`)
       try {
         // the retry resends the same image parts, so their bytes go along again
-        const retryResponse = await upstreamChat(withRetryReminder(mapping.request, decision.reminder), INFERENCE_PATH, signal, mapping.media)
+        const retryResponse = await sendChat(withRetryReminder(mapping.request, decision.reminder), mapping, signal)
         if (!retryResponse.ok) break
         // the last allowed retry runs to the end, so the turn always gets an answer
         const retryState = yield* collectStream(retryResponse.body, mapping, chunk, {
@@ -347,6 +420,7 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
   }
 
   if (!state.terminal) throw new Error('the Venice stream ended before response.completed')
+  if (state.servedModel && state.servedModel !== body.model) warn(`   ~ asked for ${body.model}, Venice answered with ${state.servedModel}`)
   for (const buffered of state.chunks) yield buffered
 
   let finish = 'stop'
@@ -565,6 +639,10 @@ async function handleChat(req, res) {
   const body = await readJson(req)
   body.model = resolveModelId(body.model)
   const mapping = toVeniceRequest(body)
+  mapping.route = routeFor(body.model, chatRoute)
+  // honoured on the classic route only; the agent route ignores them
+  mapping.sampling = samplingOptions(body, MODELS[body.model])
+  mapping.documents = new Map()
 
   // Venice rejects null bytes ("String must not contain null bytes", HTTP 400)
   // and a nested leak in the system prompt breaks the whole session, so scrub
@@ -588,7 +666,7 @@ async function handleChat(req, res) {
 
   const names = [...mapping.toolNames]
   log(
-    `-> ${body.model} • ${body.messages?.length ?? 0} msgs • ${names.length} tools${names.length ? ` [${names.join(',')}]` : ''}${mapping.images.length ? ` • ${mapping.images.length} image(s)` : ''}${mapping.files.length ? ` • ${mapping.files.length} file(s) [${mapping.files.map((file) => file.filename).join(',')}]` : ''} • stream=${body.stream !== false}`,
+    `-> ${body.model} (${mapping.route}) • ${body.messages?.length ?? 0} msgs • ${names.length} tools${names.length ? ` [${names.join(',')}]` : ''}${mapping.images.length ? ` • ${mapping.images.length} image(s)` : ''}${mapping.files.length ? ` • ${mapping.files.length} file(s) [${mapping.files.map((file) => file.filename).join(',')}]` : ''} • stream=${body.stream !== false}`,
   )
 
   const abort = new AbortController()
@@ -596,7 +674,8 @@ async function handleChat(req, res) {
 
   let upstream
   try {
-    upstream = await upstreamChat(mapping.request, INFERENCE_PATH, abort.signal, mapping.media)
+    if (mapping.route === 'classic' && mapping.files.length) mapping.documents = await readDocuments(mapping.files, abort.signal)
+    upstream = await sendChat(mapping.request, mapping, abort.signal)
   } catch (error) {
     return openaiError(res, error instanceof SignInError || error.signIn ? 401 : 502, error.message)
   }
