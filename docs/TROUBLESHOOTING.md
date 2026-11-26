@@ -12,7 +12,7 @@ tail -40 ~/.config/opencode/venice-web/proxy.log
 `doctor` checks node, the session file, the running proxy and the OpenCode provider. The log line for every request looks like this - if you see `->` but no `<-`, the upstream call is failing:
 
 ```
-2026-01-01T00:00:00.000Z -> deepseek-v4-1-flash-free • 4 msgs • 11 tools [edit,glob,…] • stream=true
+2026-01-01T00:00:00.000Z -> deepseek-v4-1-flash-uncensored • 4 msgs • 11 tools [edit,glob,…] • stream=true
 2026-01-01T00:00:02.000Z   <- tools: read({"path":"a.txt"})
 ```
 
@@ -55,6 +55,17 @@ node src/login.mjs --cookie "__client=…" --ua "Mozilla/5.0 (…) Chrome/… Sa
 ```
 
 The `--ua` must look like the browser that owns the cookie; generic user agents can trigger Cloudflare.
+
+## After an update: old models, old limits, "out of date" warning
+
+OpenCode keeps the model list and limits that the last sync wrote into its `opencode.json`. The proxy logs `OpenCode config … is out of date` at start-up, or `OpenCode asked for the old id …` / `a ~N-token prompt for …, which reads about …` on a request, when that config is from an older version. Run the sync where OpenCode runs and restart OpenCode:
+
+```sh
+node src/sync.mjs            # or venice-web-sync; ./install.sh does it too
+node src/doctor.mjs          # "opencode provider matches this version"
+```
+
+A base URL pointing at another machine is kept; `--base-url <url>` sets it.
 
 ## Model missing from `/models` in OpenCode
 

@@ -2,6 +2,195 @@
 
 ## Unreleased
 
+- **A series of tool images is numbered, and the newest are kept.** In a
+  Codex edit loop (generate vN, `view_image` it, repeat) every picture lands
+  in the last user message, so the model saw five images with nothing saying
+  which was which; with the Codex dump of a real loop (44 messages, 5 images,
+  `deepseek-v4-1-flash-uncensored`) the tool results only said "1
+  attachment(s) ... attached". Each tool result now says
+  `[attached to the last user message as image #4 of 5]`, and with two or
+  more images a note lists them in order: whose each is, the tool call it
+  answers, the image file the call named, and which is the newest. Past
+  `MAX_IMAGES` (10) the request's images and the **newest** tool images are
+  sent and the oldest become `[image]`; before, the first ten were kept and
+  every later result was dropped, so a long loop showed the model only old
+  pictures. `promptTokens()` counts the same selection (`planImages()`).
+
+- **`reasoning_effort: low` now turns reasoning off**, and
+  `VENICE_WEB_REASONING=disabled|adaptive|enabled` forces one mode for every
+  chat request. Clients without a `minimal` level (Codex desktop offers
+  low / medium / high and up) had no way to turn reasoning off, and with
+  reasoning on the agent-route models call tools natively in 11-27% of first
+  attempts (1 step in 389 requests without). `medium` stays `adaptive`,
+  `high` and every other value `enabled`; effort strings are read
+  case-insensitively.
+
+- **Images returned by a tool reach the model.** An image inside a
+  `role: "tool"` message (`image_url` parts) used to become `[image]` text, and
+  the model, asked for its colour, described a picture it had never seen (1 of
+  15 right). It is now sent like the user's own images, on the last user
+  message, with `TOOL_IMAGE_NOTE` saying it is the tool's output; the tool
+  result says how many were attached. A user message holding an image right
+  after a tool result (Codex's `view_image` on chat completions) counts as that
+  tool's output: it is written as a `tool_result`, the after-tool reminder is
+  used, a reply without a tool call goes to the judge instead of two
+  "envelope without tool calls" retries (30 of 30 replies before), and the
+  judge reads the real request. After: 45 of 45 colours right, no wasted
+  retries, 59 of 60 `exec_command` calls where one was asked (the 60th timed
+  out upstream). `IMAGE_NOTE` / `FILE_NOTE` no longer claim there is no tool
+  for viewing images.
+- **Venice tool loop: native calls come with reasoning.** With
+  `reasoning_effort` set (Codex sends one), the model sometimes calls tools
+  natively (`exec_command`, `functions.exec_command`, `exec`), Venice answers
+  "Tool not found" and the model may end the turn with "my shell tool is
+  unavailable"; without reasoning there was 1 native step in 389 requests, with it 11-27% of first attempts had one. The stream
+  now stops at the first native step (was the fourth), the retry names the
+  call and the client tool it meant (`functions.exec_command` / `exec` →
+  `exec_command`, only when one tool fits), every later attempt of that turn
+  goes without reasoning, and a judge retry cut off by a loop is retried for
+  the loop instead of ending the turn.
+  Measured on Codex-style requests (90 per arm, `high` and `medium`): 87 →
+  89 expected calls, giving-up replies 1 → 0, a turn with native calls 11.6 s
+  → 5.2 s on average. The `low` → `enabled` mapping of `reasoningMode()` is
+  unchanged.
+
+- **Token estimate no longer counts base64 as text.** `usage.prompt_tokens`
+  and the context-window warning used `countTokens(JSON.stringify(messages))`,
+  so one screenshot (a few MB of base64) counted as hundreds of thousands of
+  tokens and set off the "prompt past the window" warning. `promptTokens()`
+  now counts text and tool calls by their text, images of the latest user
+  message by their pixel size (tile estimate, never their bytes), documents by
+  their text (or the classic route's extracted text, or a share of a binary
+  file's bytes), and older attachments by their `[image]` / `[file: …]`
+  placeholder, which is what the proxy sends.
+
+- **`GET /v1/images/models`.** Clients can discover the image models of the
+  instance: generation and edit apart, each with id, name, `default`, `nsfw`
+  and the controls it really takes on the active route (type, default, limits,
+  options). Built from `IMAGE_MODELS` / `EDIT_MODELS` and the validation
+  constants (`src/lib/image-catalog.mjs`); with `VENICE_WEB_IMAGE_ROUTE=agent`
+  only the agent's models and controls. `/v1/models` is unchanged.
+- **NSFW marked on the image models** (`nsfw` in models.mjs, from the
+  catalogue's `apiUncensored` / `trainedOnAdultContent`): `chroma`,
+  `wai-illu`, `krea-2-turbo`, `lustify-sdxl`, `lustify-v8` and
+  `qwen-edit-uncensored`; not `z-image-turbo`, `stable-diffusion-3.5-rev2` or
+  `firered-image-edit`. Studio pictures stay blurred unless `safe_mode: false`.
+- The prompt limit is now checked on the agent route and on edits too (1500
+  characters for both edit models, the catalogue's `promptCharacterLimit`).
+
+- **Classic-route variants of DeepSeek 1017 and GLM 5.3 Flash.**
+  `deepseek-v4-1-flash-classic` and `z-ai-glm-5-3-flash-classic` send the same
+  model through the classic route (`upstream` in models.mjs; the override
+  `VENICE_WEB_CHAT_ROUTE` does not move them): ~540k / ~570k tokens of context
+  instead of ~580k / ~640k on the agent route, but `temperature`, `top_p` and
+  `max_tokens` work, there is no hidden agent prompt and the first token comes
+  sooner. The existing ids keep the agent route. No variant for DeepSeek
+  Uncensored (~36k tokens on the classic route). Rerun the sync.
+
+- **Upgrading: rerun the sync.** This version changes the model list, ids,
+  context limits and input types that OpenCode reads from its own
+  `opencode.json`. Run `./install.sh` again, or `venice-web-sync` (`node
+  src/sync.mjs`) on the machine where OpenCode runs, then restart OpenCode.
+  Until then OpenCode keeps the old list and lets prompts grow past what the
+  models really read. The proxy now warns: at start-up when the local
+  `opencode.json` differs from this version (`configDrift()`), and once per
+  model on a request with an old id or a prompt past the model's window
+  (`staleConfigHint()`), which also covers OpenCode on another machine; the
+  doctor checks it too. The sync keeps a `baseURL` that points at another
+  machine instead of resetting it to `127.0.0.1`, and takes `--base-url`.
+
+- **Measured limits for the three agent-route models.** The agent route never
+  truncates a long prompt and never answers 413: past about 77% of the
+  catalogue context (by its own count, characters / 3.2) it first runs a
+  `veniceai:compaction` step, and a little further the model sees only a
+  ~5k-character summary of the prompt. Largest prompts read whole:
+  `deepseek-v4-1-flash-uncensored` 1.24M characters (~300k tokens, catalogue
+  524k), `deepseek-v4-1-flash` 2.36M (~550k, catalogue 1M),
+  `z-ai-glm-5-3-flash` 2.57M (~600k, catalogue 1M). The sync now gives OpenCode
+  those as the context limit (300k / 580k / 640k in the proxy's own token
+  count) instead of the catalogue's, and the proxy warns when Venice compacts.
+  On the classic route the same models keep the last ~36k / ~550k / ~580k
+  tokens; that is `classicWindow`, used when `VENICE_WEB_CHAT_ROUTE=classic`.
+  Output: 131072 tokens on both routes (classic: `maxResponseTokens`, honoured
+  above it too; DeepSeek Uncensored wrote ~291k on the agent route). The
+  classic route ends every stream after 900 seconds with
+  `stream_over_activity_timeout`, which the proxy reports as an error.
+  PROTOCOL §2d.
+
+- **Every model now really is the model you picked.** The agent route the proxy
+  used for all chat runs only `deepseek-v4-1-flash-uncensored`,
+  `deepseek-v4-1-flash` and `z-ai-glm-5-3-flash`; for the other 24 models it
+  answered with DeepSeek V4.1 Flash Uncensored and said so only in the stream's
+  `model_id`. Those models now use the classic chat route
+  (`/api/inference/chat`), which serves the model asked for. Tool emulation,
+  images, documents, retries and the judge work the same on both. Each model
+  has a `route` in `src/lib/models.mjs`; `VENICE_WEB_CHAT_ROUTE=agent|classic`
+  forces one. The proxy warns when Venice answers with another model.
+  PROTOCOL §2d.
+- **Real limits per model.** The classic route reads about 40k tokens on most
+  models (150k on `qwen-3-8-27b`, 20k/12k on three TEE models) and drops the
+  start of longer prompts silently. The sync now gives OpenCode those limits
+  (`window`), so it compacts in time. `temperature`, `top_p` and `max_tokens`
+  are honoured on the classic route.
+- **Image input only where the model reads it.** On the classic route Venice
+  answers an image for a text-only model with Qwen 3.5 35B, so 14 models are
+  now `vision: false` (the earlier "all 27 read images" result was DeepSeek on
+  every row). PDFs and other documents still work on every model: on the
+  classic route the proxy sends their text (extracted by Venice).
+- **Judge model is now `deepseek-v4-1-flash-uncensored`**, the model the judge
+  measurements really ran on (they asked for Qwen 3.5, which the agent route
+  served as DeepSeek).
+- **`e2ee-qwen3-8-27b` removed** (HTTP 500 on every classic request); the id
+  is an alias of `qwen-3-8-27b`.
+
+- **`deepseek-v4-1-flash-free` is now `deepseek-v4-1-flash-uncensored`**, the id
+  Venice uses for it today ("free" was misleading: the model is the uncensored
+  DeepSeek V4.1 Flash, not a free tier of `deepseek-v4-1-flash`). The old id is
+  still accepted, and `venice-web-sync` moves `model` / `small_model` over to
+  the new one. All other ids already match the web catalogue.
+
+- **Document attachments.** OpenAI chat `file` parts (what OpenCode sends for an
+  attached PDF) now reach Venice as `input_file` parts with their bytes, under
+  their own file name, and Venice reads them server side. pdf, txt, md, csv,
+  json, xml, rtf, office and OpenDocument formats and epub are accepted; other
+  types, `file_id` references and URLs are a 400 with the reason instead of
+  being dropped. Measured: a PDF on all 27 models, .txt/.md on three, and real
+  `opencode run -f report.pdf`. The sync now advertises `pdf` input on every
+  model; rerun `venice-web-sync`. PROTOCOL §2c.
+- **Image input on the models added 2026-11-25**, measured with a test picture
+  (all nine answered); they now carry `vision: true`.
+- **Image settings.** `/v1/images/generations` now uses the web app's Studio
+  route (`/api/inference/image`), which takes the model and its settings
+  directly: `seed`, `negative_prompt`, `aspect_ratio`, `resolution`, `steps`,
+  `cfg_scale`, `style_preset`, `hide_watermark` (on by default), `safe_mode`,
+  `output_format`, `embed_exif`. Settings a model does not take are a 400. New
+  free image models on this route: `krea-2-turbo`, `stable-diffusion-3.5-rev2`,
+  `lustify-sdxl`, `lustify-v8`. `VENICE_WEB_IMAGE_ROUTE=agent` keeps the old
+  agent route. PROTOCOL §5c.
+- **Image settings measured per model (2026-11-25).** Seeds go up to
+  999999999 (larger ones were refused, so random seeds failed about half the
+  time). Sizes are scaled to Venice's limit of 1344 per side and 1.5 MP, which
+  makes `krea-2-turbo` at `2K` and wide aspect ratios work. The reported size is
+  read from the picture (`chroma` and `lustify-v8` return 1.5x). `steps` is
+  refused on `z-image-turbo`, `chroma` and `krea-2-turbo`, which ignore it, and
+  prompts longer than the model's limit (1500 to 7500 characters) are a 400.
+  README has the per-model table.
+
+- **Catalogue refreshed against the web catalogue (2026-11-25).** Added the free
+  (`usesCredits: false`) models that were missing: `zai-org-glm-4.7-app`, `olafangensan-glm-4.7-flash-heretic`,
+  `qwen3-coder-480b-a35b-instruct-turbo`, `qwen3-vl-235b-a22b`,
+  `nvidia-nemotron-3-ultra-550b-a55b`, `nvidia-nemotron-3-nano-30b-a3b` and
+  `venice-uncensored-role-play` (text only until measured with a picture).
+  `zai-org-glm-4.6` is gone from the web catalogue and was removed. Output limits
+  follow the catalogue (`deepseek-v4-1-flash-uncensored` 131072, Gemma 4 31B 16384).
+  Also added `z-ai-glm-5-3-flash` (GLM 5.3 Flash) and `deepseek-v4-1-flash`
+  (DeepSeek V4.1 Flash 1017): Pro-only, `usesCredits: false` in the live
+  catalogue (re-read from a Pro session on 2026-11-25), and both answer on the
+  web endpoint.
+  GLM 5.3 (full) stays out, it is pay-per-use in the picker. GLM 5.1 and GLM 5
+  are free but marked as being discontinued soon, so they were not added.
+  Rerun `venice-web-sync`.
+
 - **Image generation and editing**: `POST /v1/images/generations` and
   `POST /v1/images/edits` in OpenAI's shape, on the free web models
   (`z-image-turbo`, `chroma`, `wai-illu`; edits on `firered-image-edit`,

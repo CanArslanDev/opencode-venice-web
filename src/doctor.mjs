@@ -6,11 +6,9 @@
  *   node src/doctor.mjs --fix    # also (re)generate the OpenCode provider entry
  */
 import { existsSync, readFileSync } from 'node:fs'
-import os from 'node:os'
-import path from 'node:path'
-import { host, port, providerID, sessionFile, transport } from './lib/config.mjs'
+import { chatRoute, host, opencodeConfig, port, providerID, sessionFile, transport } from './lib/config.mjs'
 import { curlTlsArgs, findCurl } from './lib/curl.mjs'
-import { MODELS } from './lib/models.mjs'
+import { MODELS, configDrift, describeDrift, routeFor } from './lib/models.mjs'
 import { log, warn } from './lib/log.mjs'
 
 const args = process.argv.slice(2)
@@ -59,11 +57,15 @@ async function main() {
     check(false, `proxy on ${host}:${port}`, `not reachable (${error.message}); start it or install the service`)
   }
 
-  const configPath = process.env.OPENCODE_CONFIG ?? path.join(os.homedir(), '.config', 'opencode', 'opencode.json')
+  const configPath = opencodeConfig
   const configured = existsSync(configPath)
     ? JSON.parse(readFileSync(configPath, 'utf8')).provider?.[providerID]
     : undefined
   check(!!configured, `opencode provider "${providerID}" in ${configPath}`, configured ? `${Object.keys(configured.models ?? {}).length} models` : 'run the sync command')
+  if (configured) {
+    const drift = describeDrift(configDrift(configured.models, (id) => routeFor(id, chatRoute)))
+    check(!drift, 'opencode provider matches this version', drift ? `${drift}; run the sync command (or --fix)` : '')
+  }
 
   check(Object.keys(MODELS).length > 0, 'model catalogue')
 

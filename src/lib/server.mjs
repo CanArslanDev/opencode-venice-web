@@ -10,18 +10,21 @@
  */
 import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
-import { apiBase, debug, dumpFile, host, judgeEnabled, judgeModel, judgeTimeoutMs, port, providerID } from './config.mjs'
+import { apiBase, chatRoute, debug, dumpFile, host, imageRoute, judgeEnabled, judgeModel, judgeTimeoutMs, port, providerID, reasoningOverride } from './config.mjs'
 import {
   applyFallback,
   buildJudgeRequest,
   countTokens,
+  promptTokens,
   inspectCalls,
+  isToolOutputMessage,
   judgeDecision,
   parseJudgeVerdict,
   parseToolReply,
   preferAnswer,
   serverLoopMessage,
   shouldRetry,
+  AttachmentError,
   MAX_IMAGES,
   imageFromBytes,
   imageFromDataUrl,
@@ -29,13 +32,25 @@ import {
   toVeniceRequest,
   withRetryReminder,
 } from './emulate.mjs'
-import { MODELS } from './models.mjs'
+import { DEFAULT_MODEL, EDIT_MODELS, IMAGE_MODELS, MODELS, resolveModelId, routeFor, staleConfigHint, upstreamId } from './models.mjs'
+import {
+  CLASSIC_PATH,
+  answerStarted,
+  classicReader,
+  decodeTextDocument,
+  documentExtractionRequest,
+  isTextDocument,
+  parsedDocument,
+  samplingOptions,
+  toClassicRequest,
+} from './classic.mjs'
 import { debugRaw, log, preview, warn } from './log.mjs'
 import { deepStripNulls, repairJsonControlChars } from './sanitize.mjs'
 import { AGENT_IMAGE_PATH, INFERENCE_PATH, SignInError, loadSession, resetSessionCache, upstreamChat } from './venice.mjs'
 import {
   ImageRequestError,
   agentRequest,
+  checkPromptLimit,
   editInstruction,
   generationInstruction,
   imageCollector,
@@ -47,6 +62,8 @@ import {
   pickImageModel,
   seedsFor,
 } from './imagegen.mjs'
+import { imageModelCatalog } from './image-catalog.mjs'
+import { STUDIO_IMAGE_PATH, parseStudioOptions, imageSize, studioImageMeta, studioImageRequest, studioSeeds } from './studio.mjs'
 
 const json = (res, status, payload) => {
   res.writeHead(status, { 'content-type': 'application/json' })
@@ -113,11 +130,13 @@ function modelList() {
  * The returned generator resolves to the collected state. With `stopServerLoop`
  * it stops early when Venice's own agent loop runs past `SERVER_LOOP_STEPS` and
  * sets `serverLoop` (see the comment in `apply`).
- * @returns {AsyncGenerator<object, {text: string, answer: string, reasoning: string, terminal: boolean, chunks: object[], steps: Set<string>, nativeTools: Set<string>, serverLoop: boolean}>}
+ * @returns {AsyncGenerator<object, {text: string, answer: string, reasoning: string, terminal: boolean, chunks: object[], steps: Set<string>, nativeTools: Set<string>, serverLoop: boolean, compacted: ?{originalTokens: ?number, summaryChars: number}}>}
  */
 export async function* collectStream(upstreamBody, mapping, chunk, { stopServerLoop = false } = {}) {
   const reader = upstreamBody.getReader()
-  const stream = sseReader()
+  // the classic route streams one JSON object per line; classicReader() turns
+  // those into the agent route's event names
+  const stream = mapping.route === 'classic' ? classicReader() : sseReader()
   const state = {
     text: '',
     answer: '',
@@ -128,6 +147,8 @@ export async function* collectStream(upstreamBody, mapping, chunk, { stopServerL
     nativeTools: new Set(),
     serverLoop: false,
     events: {},
+    servedModel: null,
+    compacted: null,
   }
   const itemTypes = new Map()
 
@@ -135,8 +156,22 @@ export async function* collectStream(upstreamBody, mapping, chunk, { stopServerL
     if (event.type === 'error' || event.type === 'response.failed') {
       throw new Error(event.message ?? event.response?.error?.message ?? 'Venice generation failed')
     }
+    // the model that really answered: `servingModelId` on the classic route,
+    // the finished message item's `model_id` on the agent route (§2d)
+    if (event.type === 'veniceai:serving_model' && event.model) state.servedModel = event.model
+    if (event.type === 'response.output_item.done' && event.item?.type === 'message' && event.item.model_id) {
+      state.servedModel = event.item.model_id
+    }
     if (event.type === 'response.output_item.added' && event.item?.type) {
       itemTypes.set(event.output_index, event.item.type)
+    }
+    // The agent route compacts a prompt that is too long for it: once Venice's
+    // own estimate (characters / 3.2) passes about 77% of the model's context it
+    // runs a `veniceai:compaction` item first, and past a little more the model
+    // sees only that item's ~5k-character summary instead of the prompt (§2d).
+    // Nothing else in the stream says so, so it is reported here.
+    if (event.type === 'response.output_item.done' && event.item?.type === 'veniceai:compaction') {
+      state.compacted = { originalTokens: event.item.original_token_count ?? null, summaryChars: String(event.item.summary ?? '').length }
     }
     // Venice runs its own agent loop inside one response. When the model calls a
     // tool natively instead of through the envelope, Venice tries to run it
@@ -152,16 +187,19 @@ export async function* collectStream(upstreamBody, mapping, chunk, { stopServerL
         debugRaw(`${mapping.request.modelId} server item ${event.item.type}`, JSON.stringify(event.item).slice(0, 2000))
       }
     }
-    if (event.type === 'veniceai:tool_call_generation.in_progress') {
+    const stepProgress = event.type === 'veniceai:tool_call_generation.in_progress'
+    if (stepProgress) {
       for (const tool of event.detected_tools ?? []) if (tool?.name) state.nativeTools.add(tool.name)
+      if (event.item_id) state.steps.add(event.item_id)
     }
-    if (event.item?.type === 'veniceai:tool_call_generation' && event.item.id) {
-      state.steps.add(event.item.id)
-      if (stopServerLoop && mapping.emulatedTools && state.steps.size > SERVER_LOOP_STEPS) {
-        state.serverLoop = true
-        state.terminal = true
-        return STOP
-      }
+    if (event.item?.type === 'veniceai:tool_call_generation' && event.item.id) state.steps.add(event.item.id)
+    // checked once the step names its native call (in_progress) or ends, so the
+    // retry reminder can name the call
+    const stepSeen = stepProgress || (event.type === 'response.output_item.done' && event.item?.type === 'veniceai:tool_call_generation')
+    if (stepSeen && stopServerLoop && mapping.emulatedTools && state.steps.size > SERVER_LOOP_STEPS) {
+      state.serverLoop = true
+      state.terminal = true
+      return STOP
     }
     if (event.type === 'response.output_text.delta') {
       const delta = event.delta ?? ''
@@ -208,12 +246,72 @@ export async function* collectStream(upstreamBody, mapping, chunk, { stopServerL
 const STOP = Symbol('stop')
 
 /**
- * Venice agent steps allowed in one response before the proxy stops it. One
- * step is a normal reply; a second or third is the model recovering from one
- * native call; past that it is looping on "Tool not found" (measured: every
- * 10-step response gave up without a result).
+ * Venice agent steps allowed in one response before the proxy stops it. A
+ * normal reply has none; each step is one native call that Venice answers
+ * with "Tool not found". The model rarely recovers from one (2026-11-26,
+ * reasoning on: 0 of 3 responses with 2-3 steps ended in a usable call, 1 of 3
+ * with one step, and a one-step reply "the shell tool is unavailable" survived
+ * two judge retries), while the retry without reasoning came back clean in 17
+ * of 20, so the first step stops it (it was 3, with every 10-step response
+ * giving up, 2026-11-05).
  */
-const SERVER_LOOP_STEPS = 3
+const SERVER_LOOP_STEPS = 0
+
+/**
+ * Sends one chat request on the mapping's route. The request is always built in
+ * the agent route's shape (retries append to it); the classic route gets it
+ * converted, with images as data URLs and documents as their text.
+ */
+function sendChat(request, mapping, signal) {
+  if (mapping.route === 'classic') {
+    const classic = toClassicRequest(request, { images: mapping.images, documents: mapping.documents, sampling: mapping.sampling })
+    return upstreamChat(classic, CLASSIC_PATH, signal)
+  }
+  return upstreamChat(request, INFERENCE_PATH, signal, mapping.media)
+}
+
+/**
+ * The text of each document, for the classic route (which takes no file bytes).
+ * Text types are decoded here; the others go once to the agent route, which
+ * parses them server side (`veniceai:document_parsing`, §2c), and the stream is
+ * dropped as soon as the parsing is done, before any answer is generated.
+ * @returns {Promise<Map<string, {filename: string, text: string}>>}
+ */
+async function readDocuments(files, signal) {
+  const documents = new Map()
+  const binary = []
+  for (const file of files) {
+    if (isTextDocument(file.mimeType)) documents.set(file.mediaId, { filename: file.filename, text: decodeTextDocument(file.data) })
+    else binary.push(file)
+  }
+  if (!binary.length) return documents
+  const response = await upstreamChat(documentExtractionRequest(binary, DEFAULT_MODEL), INFERENCE_PATH, signal, binary)
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new Error(`could not read the attached document(s): HTTP ${response.status} ${text.slice(0, 200)}`)
+  }
+  const reader = response.body.getReader()
+  const stream = sseReader()
+  try {
+    outer: for (;;) {
+      const { value, done } = await reader.read()
+      for (const event of stream.feed(value, done)) {
+        const parsed = parsedDocument(event)
+        if (parsed) {
+          const file = binary.find((item) => item.mediaId === parsed.mediaId)
+          documents.set(parsed.mediaId, { filename: file?.filename ?? parsed.filename, text: parsed.text })
+        }
+        if (answerStarted(event) || binary.every((item) => documents.has(item.mediaId))) break outer
+      }
+      if (done) break
+    }
+  } finally {
+    await reader.cancel().catch(() => {})
+  }
+  const missing = binary.filter((item) => !documents.get(item.mediaId)?.text)
+  if (missing.length) warn(`   ~ no text extracted from ${missing.map((item) => item.filename).join(', ')}`)
+  return documents
+}
 
 /**
  * Asks the judge whether a reply without tool calls may end the turn. Any
@@ -223,18 +321,15 @@ const SERVER_LOOP_STEPS = 3
 async function askJudge(body, message, signal) {
   const model = judgeModel || body.model
   const timeout = AbortSignal.timeout(judgeTimeoutMs)
+  const route = routeFor(model, chatRoute)
   try {
-    const response = await upstreamChat(
-      buildJudgeRequest(body, message, model),
-      INFERENCE_PATH,
-      signal ? AbortSignal.any([signal, timeout]) : timeout,
-    )
+    const response = await sendChat(buildJudgeRequest(body, message, model), { route, images: [], media: [] }, signal ? AbortSignal.any([signal, timeout]) : timeout)
     if (!response.ok) {
       await response.body?.cancel()
       warn(`  ~ judge: HTTP ${response.status}, keeping the reply`)
       return null
     }
-    const collected = collectStream(response.body, { emulatedTools: true }, () => null)
+    const collected = collectStream(response.body, { emulatedTools: true, route }, () => null)
     let step
     do step = await collected.next()
     while (!step.done)
@@ -287,16 +382,21 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
       )
       if (collected.serverLoop) {
         log(`  ~ venice tool loop stopped after ${collected.steps.size} steps (native calls: ${[...collected.nativeTools].join(', ') || '?'})`)
-        return serverLoopMessage()
+        return serverLoopMessage(collected.nativeTools)
       }
       const parsed = parseToolReply(text)
       for (const rename of inspectCalls(parsed, mapping.toolSchemas)) log(`  ~ tool name ${rename}`)
       return parsed
     }
     message = read(state.text, state)
-    const last = [...(body.messages ?? [])].reverse().find((item) => item.role !== 'system' && item.role !== 'developer')
+    const lastIndex = (body.messages ?? []).findLastIndex((item) => item?.role !== 'system' && item?.role !== 'developer')
+    // a user message that only carries a tool's images (Codex's view_image) ends a tool turn, not a user turn
+    const last = isToolOutputMessage(body.messages, lastIndex) ? { role: 'tool' } : body.messages?.[lastIndex]
     let judged = 0
     let formatRetries = 0
+    // set once Venice looped on native calls: those come with reasoning, so
+    // every later attempt of this turn goes without it (docs/PROTOCOL.md §4.7)
+    let noReasoning = false
 
     // Up to two extra attempts while the reply is unhelpful. Every trigger is
     // structural (see shouldRetry); a reply that ends the turn right after a tool
@@ -304,8 +404,12 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
     // they were shared, two format retries used everything up and the answer the
     // last retry produced reached the user without the judge ever seeing it
     // (a made-up "the tools all returned Tool not found", 2026-11-05).
+    // a retry that Venice's tool loop cut off leaves its own decision here, so
+    // the next attempt answers the loop instead of ending the turn
+    let pending = null
     for (;;) {
-      let decision = shouldRetry({ message, lastRole: last?.role, available })
+      let decision = pending ?? shouldRetry({ message, lastRole: last?.role, available })
+      pending = null
       if (decision.judge) {
         if (!judgeEnabled || judged >= 2) break
         judged++
@@ -319,7 +423,10 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
       log(`  ~ ${decision.reason}, retrying...`)
       try {
         // the retry resends the same image parts, so their bytes go along again
-        const retryResponse = await upstreamChat(withRetryReminder(mapping.request, decision.reminder), INFERENCE_PATH, signal, mapping.images)
+        if (decision.disableReasoning) noReasoning = true
+        const retryRequest = withRetryReminder(mapping.request, decision.reminder)
+        if (noReasoning) retryRequest.reasoningMode = 'disabled'
+        const retryResponse = await sendChat(retryRequest, mapping, signal)
         if (!retryResponse.ok) break
         // the last allowed retry runs to the end, so the turn always gets an answer
         const retryState = yield* collectStream(retryResponse.body, mapping, chunk, {
@@ -332,7 +439,10 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
           log('  ~ retry improved the reply')
         } else {
           log('  ~ retry did not improve the reply, keeping the first')
-          if (decision.reason.startsWith('judge:')) break
+          // a judge retry cut off by native calls is retried for the loop (a
+          // "my shell tool is unavailable" answer stayed otherwise, 2026-11-26)
+          if (retryMessage.serverLoop) pending = shouldRetry({ message: retryMessage, lastRole: last?.role, available })
+          else if (decision.reason.startsWith('judge:')) break
         }
       } catch (error) {
         warn('  ~ retry failed:', error.message)
@@ -345,6 +455,10 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
   }
 
   if (!state.terminal) throw new Error('the Venice stream ended before response.completed')
+  if (state.servedModel && state.servedModel !== upstreamId(body.model)) warn(`   ~ asked for ${upstreamId(body.model)}, Venice answered with ${state.servedModel}`)
+  if (state.compacted) {
+    warn(`   ~ Venice compacted the prompt of ${body.model} (${state.compacted.originalTokens ?? '?'} estimated tokens, summary of ${state.compacted.summaryChars} characters)`)
+  }
   for (const buffered of state.chunks) yield buffered
 
   let finish = 'stop'
@@ -365,7 +479,7 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
     }
   }
 
-  const prompt = countTokens(JSON.stringify(body.messages ?? []))
+  const prompt = promptTokens(body.messages, { texts: documentTexts(mapping.documents) })
   const completion = countTokens(contentForUsage) + countTokens(state.reasoning)
   yield chunk({}, finish, {
     usage: { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion },
@@ -445,14 +559,59 @@ function imageJson(raw) {
   }
 }
 
+/** Runs one Studio image request (docs/PROTOCOL.md §5c) and returns its picture. */
+async function studioRequest(body, signal, size = body) {
+  let upstream
+  try {
+    upstream = await upstreamChat(body, STUDIO_IMAGE_PATH, signal)
+  } catch (error) {
+    throw new UpstreamImageError(error instanceof SignInError || error.signIn ? 401 : 502, error.message)
+  }
+  const meta = studioImageMeta(upstream.headers)
+  const data = Buffer.from(await upstream.arrayBuffer().catch(() => new ArrayBuffer(0)))
+  if (!upstream.ok || !String(upstream.headers.get('content-type') ?? '').startsWith('image/') || !data.length) {
+    const text = data.toString('utf8')
+    throw new UpstreamImageError(upstream.ok ? 502 : upstream.status, `${apiBase} responded HTTP ${upstream.status}: ${text.slice(0, 400) || 'no image'}`)
+  }
+  if (meta.model && meta.model !== body.modelId) warn(`   ~ asked for ${body.modelId}, Venice used ${meta.model}`)
+  if (meta.flags.is_blurred || meta.flags.is_content_violation) warn(`   ~ Venice flagged an image: ${JSON.stringify(meta.flags)}`)
+  const real = imageSize(data) ?? size
+  return { data, mimeType: meta.mimeType, width: real.width, height: real.height, model: meta.model, prompt: null, flags: meta.flags }
+}
+
+/** Generation on the Studio route: one request per picture, in parallel. */
+async function answerStudioImages(res, prompt, model, n, body, format) {
+  const options = parseStudioOptions(body, model, IMAGE_MODELS[model])
+  const seeds = studioSeeds(n, options.seed)
+  log(`-> image ${model} • n=${n} • ${options.width}x${options.height}${options.negativePrompt ? ' • negative' : ''} • seed ${seeds[0]} • ${preview(prompt, 80)}`)
+  const abort = new AbortController()
+  res.on('close', () => abort.abort())
+  let images
+  try {
+    images = await Promise.all(seeds.map((seed) => studioRequest(studioImageRequest({ prompt, model, options, seed }), abort.signal, options)))
+  } catch (error) {
+    abort.abort()
+    if (error instanceof UpstreamImageError) return openaiError(res, error.status, error.message)
+    throw error
+  }
+  log(`   <- ${images.length} image(s) • ${images.map((image) => `${image.width}x${image.height} ${image.data.length} B`).join(', ')}`)
+  const answer = imagesResponse(images, format)
+  answer.data.forEach((item, index) => {
+    item.seed = seeds[index]
+  })
+  return json(res, 200, answer)
+}
+
 /** `POST /v1/images/generations` (OpenAI shape) on the free image models. */
 async function handleImageGenerations(req, res) {
   const body = imageJson(await readRaw(req, MAX_IMAGE_BODY))
   if (typeof body.prompt !== 'string' || !body.prompt.trim()) throw new ImageRequestError('prompt is required')
-  const model = pickImageModel(body.model)
+  const model = pickImageModel(body.model, { route: imageRoute })
   const n = parseCount(body.n)
-  const size = parseSize(body.size)
   const format = parseResponseFormat(body.response_format)
+  if (imageRoute === 'studio') return answerStudioImages(res, body.prompt, model, n, body, format)
+  checkPromptLimit(body.prompt, IMAGE_MODELS[model], model)
+  const size = parseSize(body.size)
   log(`-> image ${model} • n=${n}${size ? ` • ${size.width}x${size.height}` : ''} • ${preview(body.prompt, 80)}`)
   const instructions = seedsFor(n).map((seed) => generationInstruction({ prompt: body.prompt, model, size, seed }))
   return answerImages(res, 'image generation', instructions, [], model, format)
@@ -507,6 +666,7 @@ async function handleImageEdits(req, res) {
   }
   if (typeof fields.prompt !== 'string' || !fields.prompt.trim()) throw new ImageRequestError('prompt is required')
   const model = pickEditModel(fields.model)
+  checkPromptLimit(fields.prompt, EDIT_MODELS[model], model)
   const n = parseCount(fields.n)
   const format = parseResponseFormat(fields.response_format)
   const images = await editImages(values)
@@ -515,9 +675,31 @@ async function handleImageEdits(req, res) {
   return answerImages(res, 'image edit', instructions, images, model, format)
 }
 
+/** mediaId -> extracted text of the documents the classic route already read, for the token estimate. */
+function documentTexts(documents) {
+  const texts = new Map()
+  for (const [mediaId, document] of documents ?? []) if (typeof document?.text === 'string') texts.set(mediaId, document.text)
+  return texts
+}
+
+/** Warned once per reason, so a stale OpenCode config does not flood the log. */
+const staleWarned = new Set()
+
 async function handleChat(req, res) {
   const body = await readJson(req)
-  const mapping = toVeniceRequest(body)
+  const requested = body.model
+  body.model = resolveModelId(body.model)
+  const mapping = toVeniceRequest(body, { reasoning: reasoningOverride })
+  mapping.route = routeFor(body.model, chatRoute)
+  const stale = staleConfigHint(requested, promptTokens(body.messages), mapping.route)
+  const staleKey = stale && (MODELS[requested] ? `window:${requested}` : `alias:${requested}`)
+  if (stale && !staleWarned.has(staleKey)) {
+    staleWarned.add(staleKey)
+    warn(`   ~ ${stale}. If OpenCode's config is from an older version, rerun venice-web-sync (node src/sync.mjs) where OpenCode runs and restart OpenCode.`)
+  }
+  // honoured on the classic route only; the agent route ignores them
+  mapping.sampling = samplingOptions(body, MODELS[body.model])
+  mapping.documents = new Map()
 
   // Venice rejects null bytes ("String must not contain null bytes", HTTP 400)
   // and a nested leak in the system prompt breaks the whole session, so scrub
@@ -530,8 +712,10 @@ async function handleChat(req, res) {
 
   if (dumpFile) {
     try {
-      const images = mapping.images.map(({ mediaId, mimeType, data }) => ({ mediaId, mimeType, bytes: data.length }))
-      writeFileSync(dumpFile, JSON.stringify({ body, mapping: { ...mapping, images } }, null, 1))
+      const strip = ({ mediaId, mimeType, data, filename }) => ({ mediaId, mimeType, filename, bytes: data.length })
+      const images = mapping.images.map(strip)
+      const files = mapping.files.map(strip)
+      writeFileSync(dumpFile, JSON.stringify({ body, mapping: { ...mapping, images, files, media: undefined } }, null, 1))
     } catch {
       /* ignore */
     }
@@ -539,7 +723,7 @@ async function handleChat(req, res) {
 
   const names = [...mapping.toolNames]
   log(
-    `-> ${body.model} • ${body.messages?.length ?? 0} msgs • ${names.length} tools${names.length ? ` [${names.join(',')}]` : ''}${mapping.images.length ? ` • ${mapping.images.length} image(s)` : ''} • stream=${body.stream !== false}`,
+    `-> ${body.model} (${mapping.route}) • ${body.messages?.length ?? 0} msgs • ${names.length} tools${names.length ? ` [${names.join(',')}]` : ''}${mapping.images.length ? ` • ${mapping.images.length} image(s)` : ''}${mapping.files.length ? ` • ${mapping.files.length} file(s) [${mapping.files.map((file) => file.filename).join(',')}]` : ''} • stream=${body.stream !== false}`,
   )
 
   const abort = new AbortController()
@@ -547,7 +731,8 @@ async function handleChat(req, res) {
 
   let upstream
   try {
-    upstream = await upstreamChat(mapping.request, INFERENCE_PATH, abort.signal, mapping.images)
+    if (mapping.route === 'classic' && mapping.files.length) mapping.documents = await readDocuments(mapping.files, abort.signal)
+    upstream = await sendChat(mapping.request, mapping, abort.signal)
   } catch (error) {
     return openaiError(res, error instanceof SignInError || error.signIn ? 401 : 502, error.message)
   }
@@ -631,6 +816,10 @@ export function createServer() {
         return json(res, 200, modelList())
       }
 
+      if (req.method === 'GET' && (url.pathname === '/v1/images/models' || url.pathname === '/images/models')) {
+        return json(res, 200, imageModelCatalog(imageRoute))
+      }
+
       if (req.method === 'POST' && url.pathname.endsWith('/images/generations')) {
         return await handleImageGenerations(req, res)
       }
@@ -652,7 +841,7 @@ export function createServer() {
       openaiError(res, 404, `unknown endpoint: ${req.method} ${url.pathname}`, 'not_found')
     } catch (error) {
       if (error instanceof SignInError) return openaiError(res, 401, error.message)
-      if (error instanceof ImageRequestError) return openaiError(res, error.status ?? 400, error.message, 'invalid_request_error')
+      if (error instanceof ImageRequestError || error instanceof AttachmentError) return openaiError(res, error.status ?? 400, error.message, 'invalid_request_error')
       warn('request error:', error.stack ?? error.message)
       if (!res.headersSent) openaiError(res, 500, error.message)
       else res.end()

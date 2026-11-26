@@ -36,11 +36,28 @@ function pickModel(requested, models, fallback, kind) {
   throw new ImageRequestError(`unknown ${kind} model: ${requested}. Known: ${Object.keys(models).join(', ')}`)
 }
 
-/** The model for a generation; missing or an OpenAI name means the default. */
-export const pickImageModel = (requested) => pickModel(requested, IMAGE_MODELS, DEFAULT_IMAGE_MODEL, 'image')
+/**
+ * The model for a generation; missing or an OpenAI name means the default. On
+ * the agent route only the models the agent runs are accepted.
+ */
+export function pickImageModel(requested, { route = 'studio' } = {}) {
+  const model = pickModel(requested, IMAGE_MODELS, DEFAULT_IMAGE_MODEL, 'image')
+  if (route === 'agent' && !IMAGE_MODELS[model].agent) {
+    const agentModels = Object.keys(IMAGE_MODELS).filter((id) => IMAGE_MODELS[id].agent)
+    throw new ImageRequestError(`${model} only runs on the Studio route (unset VENICE_WEB_IMAGE_ROUTE). Agent models: ${agentModels.join(', ')}`)
+  }
+  return model
+}
 
 /** The model for an edit; missing or an OpenAI name means the default. */
 export const pickEditModel = (requested) => pickModel(requested, EDIT_MODELS, DEFAULT_EDIT_MODEL, 'edit')
+
+/** Each side of a requested `size`, before a route's own limits. */
+export const MIN_SIDE = 256
+export const MAX_REQUEST_SIDE = 2048
+
+/** OpenAI's `response_format` values; `url` is answered as a data URL. */
+export const RESPONSE_FORMATS = ['b64_json', 'url']
 
 /** `"1024x768"` -> `{ width, height }`; missing or `auto` -> null (the model's default). */
 export function parseSize(size) {
@@ -48,8 +65,8 @@ export function parseSize(size) {
   const match = /^(\d{2,5})x(\d{2,5})$/.exec(String(size))
   if (!match) throw new ImageRequestError(`size must look like 1024x1024 or be auto, got ${JSON.stringify(size)}`)
   const [width, height] = [Number(match[1]), Number(match[2])]
-  if (width < 256 || height < 256 || width > 2048 || height > 2048) {
-    throw new ImageRequestError(`size must be between 256 and 2048 on each side, got ${size}`)
+  if (width < MIN_SIDE || height < MIN_SIDE || width > MAX_REQUEST_SIDE || height > MAX_REQUEST_SIDE) {
+    throw new ImageRequestError(`size must be between ${MIN_SIDE} and ${MAX_REQUEST_SIDE} on each side, got ${size}`)
   }
   return { width, height }
 }
@@ -66,9 +83,16 @@ export function parseCount(n) {
 
 /** `b64_json` (default) or `url`, which is answered as a data URL: the proxy hosts no files. */
 export function parseResponseFormat(format) {
-  if (format == null || format === '' || format === 'b64_json') return 'b64_json'
-  if (format === 'url') return 'url'
-  throw new ImageRequestError(`response_format must be b64_json or url, got ${JSON.stringify(format)}`)
+  if (format == null || format === '') return RESPONSE_FORMATS[0]
+  if (RESPONSE_FORMATS.includes(format)) return format
+  throw new ImageRequestError(`response_format must be ${RESPONSE_FORMATS.join(' or ')}, got ${JSON.stringify(format)}`)
+}
+
+/** The model's prompt limit (`promptLimit`, the catalogue's `promptCharacterLimit`), on every route. */
+export function checkPromptLimit(prompt, info, model) {
+  if (info?.promptLimit && typeof prompt === 'string' && prompt.length > info.promptLimit) {
+    throw new ImageRequestError(`${model} takes a prompt of at most ${info.promptLimit} characters, got ${prompt.length}`)
+  }
 }
 
 /**

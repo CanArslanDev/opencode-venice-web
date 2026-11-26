@@ -194,4 +194,4 @@ fi
 
 say ""
 say "finished. verify with:  node $INSTALL_DIR/src/doctor.mjs"
-say "then restart OpenCode and choose a model such as venice-web/deepseek-v4-1-flash-free"
+say "then restart OpenCode and choose a model such as venice-web/deepseek-v4-1-flash-uncensored"

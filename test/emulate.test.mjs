@@ -37,7 +37,7 @@ import {
   toVeniceRequest,
   withRetryReminder,
 } from '../src/lib/emulate.mjs'
-import { MODELS } from '../src/lib/models.mjs'
+import { DEFAULT_MODEL, MODELS } from '../src/lib/models.mjs'
 import * as real from './fixtures/real-replies.mjs'
 
 const tool = (name) => ({ type: 'function', function: { name, description: name, parameters: { type: 'object' } } })
@@ -100,6 +100,22 @@ test('reasoningMode maps effort values onto the web switches', () => {
   assert.deepEqual(reasoningMode({ reasoning_effort: 'none' }), { reasoningMode: 'disabled' })
   assert.deepEqual(reasoningMode({ reasoning_effort: 'medium' }), { reasoningMode: 'adaptive' })
   assert.deepEqual(reasoningMode({ reasoning_effort: 'high' }), { reasoningMode: 'enabled' })
+  // low is off: clients without "minimal" (Codex desktop) have no other way to turn reasoning off
+  assert.deepEqual(reasoningMode({ reasoning_effort: 'low' }), { reasoningMode: 'disabled' })
+  assert.deepEqual(reasoningMode({ reasoning_effort: 'minimal' }), { reasoningMode: 'disabled' })
+  assert.deepEqual(reasoningMode({ reasoning_effort: 'Medium' }), { reasoningMode: 'adaptive' })
+  for (const effort of ['xhigh', 'max', 'ultra', 'whatever']) assert.deepEqual(reasoningMode({ reasoning_effort: effort }), { reasoningMode: 'enabled' })
+  assert.deepEqual(reasoningMode({ reasoning: { effort: 'low' } }), { reasoningMode: 'disabled' })
+})
+
+test('VENICE_WEB_REASONING forces the mode whatever the request asks', () => {
+  assert.deepEqual(reasoningMode({ reasoning_effort: 'high' }, { force: 'disabled' }), { reasoningMode: 'disabled' })
+  assert.deepEqual(reasoningMode({}, { force: 'enabled' }), { reasoningMode: 'enabled' })
+  assert.deepEqual(reasoningMode({ reasoning_effort: 'low' }, { force: 'adaptive' }), { reasoningMode: 'adaptive' })
+  // an unknown value is ignored
+  assert.deepEqual(reasoningMode({ reasoning_effort: 'high' }, { force: 'off' }), { reasoningMode: 'enabled' })
+  const forced = toVeniceRequest({ model: DEFAULT_MODEL, reasoning_effort: 'high', messages: [{ role: 'user', content: 'hi' }] }, { reasoning: 'disabled' })
+  assert.equal(forced.request.reasoningMode, 'disabled')
 })
 
 test('textOf flattens content parts and marks images', () => {
@@ -515,7 +531,7 @@ test('preferAnswer: executable calls beat calls with problems', () => {
 
 test('toVeniceRequest keeps each tool schema for validation', () => {
   const mapping = toVeniceRequest({
-    model: 'deepseek-v4-1-flash-free',
+    model: 'deepseek-v4-1-flash-uncensored',
     messages: [{ role: 'user', content: 'hi' }],
     tools: [{ type: 'function', function: { name: 'read', parameters: { type: 'object', required: ['path'] } } }],
   })
@@ -567,7 +583,7 @@ test('the tool prompt defines status and the multi-line script rule', () => {
 
 test('buildJudgeRequest carries the request, the newest tool outputs and the reply', () => {
   const body = {
-    model: 'deepseek-v4-1-flash-free',
+    model: 'deepseek-v4-1-flash-uncensored',
     messages: [
       { role: 'system', content: 'sys' },
       { role: 'user', content: 'old request' },

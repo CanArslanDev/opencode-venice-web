@@ -14,9 +14,10 @@ OpenCode ──HTTP──> 127.0.0.1:3456  ──HTTPS + your session cookie─�
 ```
 
 - No API key, no credits, no password stored: only the browser's long-lived Clerk `__client` cookie.
-- 19 free web models (DeepSeek, Qwen, GLM, Gemma, Aion, TEE-hosted variants).
+- 27 web models included in Pro (DeepSeek, Qwen, GLM, Gemma, NVIDIA Nemotron, Aion, TEE-hosted variants).
 - Tool calling works: OpenCode's `read`/`write`/`edit`/`shell`/`glob`/`grep` tools are emulated through a JSON envelope (see [docs/PROTOCOL.md](docs/PROTOCOL.md)).
 - Images work: attach a screenshot in OpenCode and the model sees it, also while it works through tool calls.
+- Documents work: attach a PDF (`opencode run -f report.pdf`, or drag it in) and Venice reads it server side; .txt, .md, .csv, .json, .docx, .xlsx and the other formats the web app takes go the same way.
 - Zero runtime dependencies. Node 22+ and the system `curl` (preinstalled on macOS and most Linux distributions).
 
 ---
@@ -33,7 +34,20 @@ That installs the code to `~/.local/share/opencode-venice-web`, adds the `venice
 
 Add `--with-nul-plugin` if you also use other providers from OpenCode (see [NUL bytes](#nul-bytes-and-400-invalid-request)).
 
-Then **restart OpenCode** and pick a model such as `venice-web/deepseek-v4-1-flash-free`.
+Then **restart OpenCode** and pick a model such as `venice-web/deepseek-v4-1-flash-uncensored`.
+
+### Updating
+
+Pull the new version and run `./install.sh` again (it reruns the sync). Updating by hand (`git pull`, `npm install -g .`), run the sync **on the machine where OpenCode runs** and restart OpenCode:
+
+```sh
+git pull
+venice-web-sync          # or: node src/sync.mjs
+```
+
+OpenCode reads the model list, the context limits and the input types from its own `opencode.json`, not from the proxy, so until the sync runs it keeps the old ones (old ids, limits larger than the models really read). The proxy says so: at start-up it checks the `opencode.json` on its own machine, and on each request it warns once about an old model id or a prompt past the model's real limit, which also covers OpenCode on another machine. `venice-web-doctor` reports it too.
+
+If the proxy runs on another machine (a VM, a server) and OpenCode reaches it at `http://<that-host>:3456/v1`, set the address once with `venice-web-sync --base-url http://<that-host>:3456/v1`; later syncs keep a base URL that does not point at this machine. The proxy then needs `VENICE_WEB_HOST=0.0.0.0` (or that host's address) to accept the connection.
 
 Or without cloning:
 
@@ -68,7 +82,7 @@ curl -s 127.0.0.1:3456/health
 | Session cookie | `venice.ai` cookie jar | long-lived Clerk `__client`, read straight out of the browser |
 | Session JWT | `POST clerk.venice.ai/v1/client/sessions/<id>/tokens` | ~60 s lifetime, refreshed by the proxy, single-flight |
 | Client attestation | `POST outerface.venice.ai/api/app/user/client_attestation/mint` | short-lived token, cached 5 minutes |
-| Inference | `POST outerface.venice.ai/api/inference/chat/agents/ad-hoc` | newline-delimited SSE |
+| Inference | `POST outerface.venice.ai/api/inference/chat/agents/ad-hoc` (agent route) or `/api/inference/chat` (classic route) | per model, see [Models](#models) |
 | Tool calls | emulated | the web endpoint does not accept OpenAI `tools` |
 
 The proxy exposes:
@@ -86,19 +100,50 @@ Full details, including the exact request/response shapes and the tool-emulation
 
 ## Models
 
-Only models the web catalogue marks as free (`usesCredits: false`) are exposed - picking a credit-billed model through this proxy would silently spend your API balance, so they are left out on purpose.
+Only models the web catalogue marks as free (`usesCredits: false`) are exposed - picking a credit-billed model through this proxy would silently spend your API balance, so they are left out on purpose. Two exceptions, `z-ai-glm-5-3-flash` and `deepseek-v4-1-flash`: the catalogue flags them as billed, but the web model picker shows them to Pro accounts with no pay-per-use price (checked 2026-11-25). Keep an eye on your credit balance the first time you use them.
 
 | Family | Model ids |
 | --- | --- |
-| DeepSeek | `deepseek-v4-1-flash-free`, `deepseek-ai-DeepSeek-V3.2` |
-| Qwen | `qwen-3-8-27b`, `qwen3-6-27b`, `qwen3-5-35b-a3b` |
-| GLM | `zai-org-glm-5.2`, `zai-org-glm-4.6` |
+| DeepSeek | `deepseek-v4-1-flash-uncensored`, `deepseek-v4-1-flash` (1017), `deepseek-v4-1-flash-classic`, `deepseek-ai-DeepSeek-V3.2` |
+| Qwen | `qwen-3-8-27b`, `qwen3-6-27b`, `qwen3-5-35b-a3b`, `qwen3-coder-480b-a35b-instruct-turbo`, `qwen3-vl-235b-a22b` |
+| GLM | `z-ai-glm-5-3-flash`, `z-ai-glm-5-3-flash-classic`, `zai-org-glm-5.2`, `zai-org-glm-4.7-app`, `olafangensan-glm-4.7-flash-heretic` |
+| NVIDIA | `nvidia-nemotron-3-ultra-550b-a55b`, `nvidia-nemotron-3-nano-30b-a3b` |
 | Gemma | `google-gemma-4-31b-it`, `google-gemma-4-26b-a4b-it`, `gemma4-uncensored` |
-| Venice | `venice-uncensored-1-2` |
+| Venice | `venice-uncensored-1-2`, `venice-uncensored-role-play` |
 | Aion | `aion-labs-aion-3-0`, `aion-labs-aion-3-0-mini` |
-| TEE / E2EE hosted | `e2ee-qwen3-8-27b`, `e2ee-gpt-oss-120b-p`, `e2ee-qwen3-6-35b-a3b`, `e2ee-gemma-4-26b-a4b-uncensored-p`, `e2ee-qwen-2-5-7b-p`, `e2ee-qwen3-vl-30b-a3b-p` |
+| TEE / E2EE hosted | `e2ee-gpt-oss-120b-p`, `e2ee-qwen3-6-35b-a3b`, `e2ee-gemma-4-26b-a4b-uncensored-p`, `e2ee-qwen-2-5-7b-p`, `e2ee-qwen3-vl-30b-a3b-p` |
 
-All of them take images: each one read a test picture correctly through this proxy, so the sync marks them with image input and OpenCode lets you attach pictures. Rerun `venice-web-sync` after updating if OpenCode says a model does not support images.
+### Which model to pick
+
+Picked by what was measured through this proxy (2026-11-25/26): the context each model really reads, whether it reads images itself, and how it did with tool calls. This is not a quality benchmark; try two or three on your own work.
+
+| Use | Model | Context it really reads | Output | Reasoning | Images | Route |
+| --- | --- | --- | --- | --- | --- | --- |
+| Long coding sessions (best overall) | `deepseek-v4-1-flash` (DeepSeek V4.1 Flash 1017) | ~580k | 131k | yes | yes | agent |
+| Long sessions, the largest context | `z-ai-glm-5-3-flash` (GLM 5.3 Flash) | ~640k | 131k | yes | yes | agent |
+| Default, fewest refusals | `deepseek-v4-1-flash-uncensored` | ~300k | 131k | yes | yes | agent |
+| Large context with `temperature` / `max_tokens` | `zai-org-glm-5.2` (GLM 5.2) | ~470k | 131k | yes | no | classic |
+| DeepSeek 1017 / GLM 5.3 Flash with `temperature` / `max_tokens`, faster first token | `deepseek-v4-1-flash-classic`, `z-ai-glm-5-3-flash-classic` | ~540k / ~570k | 131k | yes | yes | classic |
+| Medium sessions with images | `qwen-3-8-27b` (Qwen 3.8 27B) | ~150k | 65k | yes | yes | classic |
+| Short coding tasks | `qwen3-coder-480b-a35b-instruct-turbo` (Qwen 3 Coder 480B) | ~40k | 65k | no | no | classic |
+| Reading screenshots and pictures | `qwen3-vl-235b-a22b` (Qwen3 VL 235B) | ~40k | 16k | no | yes | classic |
+| Titles and summaries (`small_model`) | `qwen3-5-35b-a3b` (Qwen 3.5 35B) | ~40k | 16k | yes | yes | classic |
+
+All 28 model ids take tool calls and documents (PDF, .md, office files). The three agent-route models passed 27/27 tool-call checks; the classic-route models passed the basic checks, but the stress suite has not been run on them yet. Less suited for OpenCode: the Aion models (they sometimes answer with nothing, the proxy retries), the small-context TEE models (`e2ee-qwen3-6-35b-a3b` and `e2ee-qwen-2-5-7b-p` ~20k, `e2ee-qwen3-vl-30b-a3b-p` ~12k) and `venice-uncensored-role-play` (4k output). Every other model reads about 40k tokens; the table in [docs/PROTOCOL.md §2d](docs/PROTOCOL.md) lists them all.
+
+**Both routes for DeepSeek 1017 and GLM 5.3 Flash.** `deepseek-v4-1-flash` and `z-ai-glm-5-3-flash` use the agent route; `deepseek-v4-1-flash-classic` and `z-ai-glm-5-3-flash-classic` are the same models on the classic route. The classic ones read a little less (~540k / ~570k instead of ~580k / ~640k) and stop a response after 15 minutes, but honour `temperature`, `top_p` and `max_tokens`, skip Venice's ~3k-token hidden agent prompt and answer the first token faster (0.6-0.8 s instead of 0.9-1.3 s). DeepSeek 1017 refused a little more on the classic route in testing. DeepSeek Uncensored has no classic variant: the classic route reads only ~36k tokens of it.
+
+**Which route a model uses.** Venice has two chat routes. The agent route (the web app's agentic chat) really runs only `deepseek-v4-1-flash-uncensored`, `deepseek-v4-1-flash` and `z-ai-glm-5-3-flash`; asked for any other model it quietly answers with DeepSeek V4.1 Flash Uncensored. Every other model therefore goes through the classic route (the web app's ordinary chat), which serves the model you picked. The proxy logs a warning whenever Venice says it answered with a different model. `VENICE_WEB_CHAT_ROUTE=agent` or `classic` forces one route for all models. Measurements: [docs/PROTOCOL.md §2d](docs/PROTOCOL.md).
+
+What that means for each model:
+
+- **Context.** The classic route reads far less than the catalogue says: about 40k tokens for most models (about 150k for `qwen-3-8-27b`, 20k or 12k for some TEE models), and it drops the start of a longer prompt without saying so. The agent route does not truncate but **compacts**: past about 77% of the catalogue context (Venice counts characters / 3.2) it replaces the prompt with a ~5k-character summary, again without an error. Measured limits of the three agent models: `deepseek-v4-1-flash-uncensored` ~300k (catalogue 524k), `deepseek-v4-1-flash` ~580k (1M), `z-ai-glm-5-3-flash` ~640k (1M). The sync gives OpenCode these real limits, so OpenCode compacts the conversation in time, and the proxy logs a warning if Venice compacts anyway. `zai-org-glm-5.2` reads its full context; for long coding sessions use it or one of the three agent models.
+- **Output.** The three agent models write up to 131072 tokens (DeepSeek Uncensored even past that on the agent route); the catalogue limit is what OpenCode gets, capped at a fifth of the context window.
+- **Images.** Only models that read a picture themselves are marked with `image` input: the three DeepSeek/GLM agent models, `qwen-3-8-27b`, `qwen3-6-27b`, `qwen3-5-35b-a3b`, `qwen3-vl-235b-a22b`, `venice-uncensored-1-2`, the three Gemma models and `e2ee-qwen3-vl-30b-a3b-p`. Venice answers an image sent to any other model with Qwen 3.5 35B instead.
+- **Documents.** Every model takes PDFs and the other document types. On the classic route the proxy sends the document's text (Venice extracts it from the PDF first).
+- **Sampling.** `temperature`, `top_p` and `max_tokens` work on classic-route models; the agent route ignores them.
+
+`e2ee-qwen3-8-27b` is gone: it failed on every request on the classic route. The old id now points at `qwen-3-8-27b`. Rerun `venice-web-sync` after updating so OpenCode gets the new limits and input types (see [Updating](#updating)).
 
 The catalogue lives in [`src/lib/models.mjs`](src/lib/models.mjs); edit it and rerun `venice-web-sync` if Venice adds models. If the web catalogue ships a model you want, run `GET /v1/models` (or `venice-web-doctor`) after adding it to verify it is reachable.
 
@@ -120,13 +165,53 @@ curl -s 127.0.0.1:3456/v1/images/edits -F image=@photo.png -F 'prompt=make the s
 
 | | models |
 | --- | --- |
-| generate | `z-image-turbo` (default), `chroma`, `wai-illu` (anime) |
+| generate | `z-image-turbo` (default), `chroma`, `wai-illu` (anime), `krea-2-turbo`, `stable-diffusion-3.5-rev2`, `lustify-sdxl`, `lustify-v8` |
 | edit | `firered-image-edit` (default), `qwen-edit-uncensored` |
 
-- The prompt is used as written; the answer's `revised_prompt` is what the model actually got.
-- Sizes from 256 to 2048 per side are accepted. Each model rounds to its own resolution and keeps the aspect ratio (`1792x1024` comes back as 1344x768).
-- `n` up to 4 runs that many generations in parallel. Only `chroma` gives a different picture each time; `z-image-turbo` and `wai-illu` return the same picture for the same prompt.
-- Edits take PNG, JPEG, WebP or GIF as a file or a base64 data URL; image URLs are not downloaded. `mask` is not supported: describe the change in the prompt.
+Generation goes through the web app's Studio route, which takes the model and its settings directly. Extra fields on `/v1/images/generations`, all optional:
+
+| field | what it does |
+| --- | --- |
+| `seed` | fixed seed (0 to 999999999); with `n` > 1 the pictures get `seed`, `seed+1`, … The seed used comes back on each `data[]` item |
+| `negative_prompt` | what to keep out of the picture (`wai-illu`, `stable-diffusion-3.5-rev2`, `lustify-*`) |
+| `aspect_ratio` | `1:1`, `5:4`, `4:3`, `3:2`, `16:9`, `21:9`, `4:5`, `3:4`, `2:3`, `9:16`, `9:21`; instead of `size` |
+| `resolution` | `1K` or `2K`, for `krea-2-turbo` (fixed sizes) |
+| `steps` | sampling steps, up to the model's maximum (30 for `wai-illu`/SD35, 50 for `lustify-*`); `z-image-turbo`, `chroma` and `krea-2-turbo` run a fixed number and refuse it |
+| `cfg_scale` | prompt adherence, for the models that have it (`wai-illu`, SD35, Lustify) |
+| `style_preset` | a style name from the web app's style list, e.g. `Cinematic` |
+| `hide_watermark` | `true` by default |
+| `safe_mode` | Venice's mature filter, `true` by default (adult content is blurred); `false` turns it off |
+| `output_format` | `png` (default) or `webp` |
+| `embed_exif` | `false` by default |
+
+A setting the model does not take is answered with a 400 instead of being dropped (Venice itself ignores it silently).
+
+**Discovering the models.** `GET /v1/images/models` lists this instance's image models, generation and edit apart, each with its id, name, whether it is the default, `nsfw`, and the controls it really takes on the active route, with defaults, limits and options. It is built from the same tables and constants the validation uses, so whatever it lists is accepted. With `VENICE_WEB_IMAGE_ROUTE=agent` it lists only the agent's models and the agent's controls (`prompt`, `n`, `size`, `response_format`). `/v1/models` stays the chat model list.
+
+```sh
+curl -s 127.0.0.1:3456/v1/images/models | python3 -m json.tool | head -40
+```
+
+What each model takes, measured one setting at a time against the same seed (2026-11-25):
+
+| model | NSFW | seed | steps | negative_prompt | cfg_scale | style_preset | watermark | webp | prompt limit | notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `z-image-turbo` | no | yes | no | no | no | yes | yes | yes | 7500 | |
+| `chroma` | yes | yes | no | no | no | yes | yes | yes | 7500 | output 1.5x the size asked for |
+| `wai-illu` | yes (anime) | yes | yes | yes | yes | yes | yes | yes | 1500 | |
+| `krea-2-turbo` | yes | yes | no | no | no | yes | yes | yes | 5000 | size from `aspect_ratio` + `resolution` |
+| `stable-diffusion-3.5-rev2` | no | yes | yes | yes | yes | yes | yes | yes | 1500 | |
+| `lustify-sdxl` | yes | yes | yes | yes | yes | yes | yes | yes | 1500 | |
+| `lustify-v8` | yes | yes | yes | yes | yes | yes | yes | yes | 1500 | output 1.5x the size asked for |
+
+**NSFW** is what Venice's catalogue says (`apiUncensored`, and for generation `trainedOnAdultContent`, read 2026-11-26). For edits, `qwen-edit-uncensored` is uncensored and `firered-image-edit` is not. On the Studio route adult pictures come back blurred unless the request sends `safe_mode: false`; the other models are not trained for adult content and are the better pick for everything else.
+
+The same seed gives the same picture (byte for byte on most models; `wai-illu` and `lustify-sdxl` vary slightly from run to run). `VENICE_WEB_IMAGE_ROUTE=agent` switches back to Venice's agent route (only `z-image-turbo`, `chroma`, `wai-illu`, and none of the settings above).
+
+- The prompt is used as written.
+- Sizes from 256 to 2048 per side are accepted, rounded to the model's step (8 or 16 pixels) and scaled down to Venice's limit of 1344 per side and 1.5 MP (`krea-2-turbo` at `2K` still returns up to 2688 pixels: there the size comes from `aspect_ratio` + `resolution`). The size reported back is the picture's own.
+- `n` up to 4 runs that many generations in parallel.
+- Edits take PNG, JPEG, WebP or GIF as a file or a base64 data URL; image URLs are not downloaded. `mask` is not supported: describe the change in the prompt. Edits still go through the agent route, so the settings above do not apply to them.
 - `response_format: "url"` returns a `data:` URL, because the proxy stores nothing.
 - OpenAI model names (`dall-e-3`, `gpt-image-1`) get the default model.
 
@@ -141,6 +226,7 @@ curl -s 127.0.0.1:3456/v1/images/edits -F image=@photo.png -F 'prompt=make the s
 | `node src/sync.mjs` | add/update the OpenCode provider |
 | `node src/sync.mjs --default` | also set `model` and `small_model` |
 | `node src/sync.mjs --remove` | remove the provider again |
+| `node src/sync.mjs --base-url <url>` | point OpenCode at a proxy on another machine (kept by later syncs) |
 | `node src/doctor.mjs` | diagnose node/session/proxy/config |
 | `npm test` | unit tests for the parser and translator |
 | `node test/smoke.mjs` | end-to-end smoke test against a running proxy |
@@ -166,7 +252,9 @@ All environment variables are optional; the defaults are what the installer uses
 | `VENICE_WEB_CURL_TLS_ARGS` | auto | extra TLS flags for curl, space separated; auto is `--tlsv1.3` for an OpenSSL build (Linux) and nothing otherwise, empty sends none |
 | `VENICE_WEB_TIMEOUT` | `900000` | per-request upstream timeout (ms) |
 | `VENICE_WEB_JUDGE` | on | `0` turns off the judge that checks whether a turn may end |
-| `VENICE_WEB_JUDGE_MODEL` | `qwen3-5-35b-a3b` | model for the judge (empty: the request's own model) |
+| `VENICE_WEB_JUDGE_MODEL` | `deepseek-v4-1-flash-uncensored` | model for the judge (empty: the request's own model) |
+| `VENICE_WEB_CHAT_ROUTE` | `auto` | chat route: `auto` (each model's own), `classic`, `agent` |
+| `VENICE_WEB_REASONING` | follow the request | force the reasoning switch of every chat request: `disabled`, `adaptive`, `enabled` |
 | `VENICE_WEB_JUDGE_TIMEOUT` | `45000` | judge timeout (ms); a late judge keeps the reply |
 | `VENICE_WEB_MIDDLEFACE` | `0.1.1128` | `x-venice-middleface-version` header |
 | `VENICE_WEB_CLERK_VERSION` | pinned | Clerk frontend API version query |
@@ -186,10 +274,13 @@ All environment variables are optional; the defaults are what the installer uses
 ## Limitations (read these)
 
 - **Not the official API.** The web endpoints are undocumented and may change. `middleface` version headers are pinned to what the current web client sends.
+- **Reasoning and tool calls.** `reasoning_effort` maps onto Venice's switch: nothing, `none`, `minimal` and `low` turn reasoning off, `medium` is `adaptive`, `high` and anything above it is `enabled`; `VENICE_WEB_REASONING` overrides it for every request. With reasoning on, the agent-route models sometimes call a tool with their own native syntax instead of the JSON envelope; Venice answers that with "Tool not found" inside the response. Measured with Codex-style requests: 11-27% of first attempts with reasoning, 1 step in 389 requests without. The proxy stops such a response at the first native call and asks again without reasoning (89 of 90 expected tool calls came through), but each one costs a few seconds, so for tool-heavy work set the effort to `low` or `VENICE_WEB_REASONING=disabled`. Details: [docs/PROTOCOL.md §4.7](docs/PROTOCOL.md).
 - **Tool calls are emulated.** The web endpoint ignores OpenAI `tools`, so the model answers with a JSON envelope that the proxy turns into `tool_calls`. This is reliable in practice (see [docs/PROTOCOL.md](docs/PROTOCOL.md) for the measured technique) but it is a prompt contract, not a native feature: `tool_choice: required` is advisory, and with tools in the request the answer arrives buffered rather than token-by-token (reasoning still streams live).
-- **No sampling controls.** `temperature`, `top_p` and `max_tokens` are not applied by this endpoint.
+- **Sampling controls only on the classic route.** `temperature`, `top_p` and `max_tokens` are applied for classic-route models and ignored on the agent route (`deepseek-v4-1-flash-uncensored`, `deepseek-v4-1-flash`, `z-ai-glm-5-3-flash`).
+- **Small context on most models.** The classic route reads about 40k tokens on most models and cuts longer prompts from the start silently; the agent route summarises prompts past ~300k (DeepSeek Uncensored) or ~600k tokens (the other two). See [Models](#models).
 - **Unlimited, not infinite.** Venice's fair-use and Cloudflare bot checks apply. A Cloudflare challenge surfaces as HTTP 401 with a "refresh the cookies" message.
 - **Images: what is sent.** The images of your latest message go to the model as images, on every step of the work they start. Images from earlier messages stay in the history as `[image]` and are not sent again. Only pictures inside the request (data URLs, which is what OpenCode sends) are used, up to 10 per message; the proxy never downloads an image from a URL.
+- **Documents: what is sent.** OpenAI `file` parts (`{"type":"file","file":{"filename","file_data"}}`, what OpenCode sends for a PDF) of your latest message go to Venice with their bytes, up to 10 per message and 100 MB each, and Venice extracts the text. Accepted: pdf, txt, md, csv, json, xml, rtf, doc, docx, xls, xlsx, ppt, pptx, odt, ods, odp, epub and any `text/*`. Anything else (a zip, a `file_id` reference, a URL) is answered with a 400 that says why, instead of being dropped silently. Files from earlier messages stay in the history as `[file: name]`.
 - **Web session, not API route.** Anything that needs the official API surface (embeddings, video, `/responses`) still has to use `api.venice.ai` with an API key. Both can coexist in OpenCode - the installer only *adds* a provider.
 
 ### NUL bytes and `400 Invalid request parameters`
@@ -213,7 +304,7 @@ Common ones:
 
 ```sh
 node src/login.mjs                       # everything auth related
-node src/sync.mjs                        # provider missing from /models
+node src/sync.mjs                        # provider missing from /models, or after an update
 tail -f ~/.config/opencode/venice-web/proxy.log   # see each request and tool call
 launchctl kickstart -k gui/$(id -u)/ai.opencode.venice-web   # macOS: restart the service
 systemctl --user restart ai.opencode.venice-web               # Linux
@@ -237,7 +328,7 @@ Use it from any git repository:
 /opencode-orchestrator add input validation to the signup form and test it
 ```
 
-Without a task it continues the backlog in `.orchestrator/STATUS.md` (or asks what to do). Claude asks for the worker model at the start of the session; set it yourself with `export ORCH_MODEL=venice-web/deepseek-v4-1-flash-free`.
+Without a task it continues the backlog in `.orchestrator/STATUS.md` (or asks what to do). Claude asks for the worker model at the start of the session; set it yourself with `export ORCH_MODEL=venice-web/deepseek-v4-1-flash-uncensored`.
 
 What the scripts guard against (each of these cost hours in real sessions):
 

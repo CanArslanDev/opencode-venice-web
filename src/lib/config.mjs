@@ -46,6 +46,9 @@ export const attestationTtlMs = 5 * 60 * 1000
 /** OpenCode provider id written by `sync.mjs`. */
 export const providerID = process.env.VENICE_WEB_PROVIDER_ID ?? 'venice-web'
 
+/** The OpenCode config file that `sync` writes and the proxy and doctor check. */
+export const opencodeConfig = process.env.OPENCODE_CONFIG ?? path.join(os.homedir(), '.config', 'opencode', 'opencode.json')
+
 export const debug = !!process.env.VENICE_WEB_DEBUG
 export const dumpFile = process.env.VENICE_WEB_DUMP
 
@@ -61,10 +64,35 @@ export const transport = process.env.VENICE_WEB_TRANSPORT ?? 'auto'
  * The judge: a second model call that decides whether a reply without tool
  * calls may end the turn (see emulate.mjs `buildJudgeRequest`). `VENICE_WEB_JUDGE=0`
  * turns it off; `VENICE_WEB_JUDGE_MODEL` picks the model (an empty value means the
- * request's own model). Qwen 3.5 35B A3B was the most accurate of four measured
- * candidates (docs/PROTOCOL.md §4.7). A judge that fails or times out never blocks
- * the reply.
+ * request's own model). The default is the model the judge measurements in
+ * docs/PROTOCOL.md §4.7 really ran on: they asked for Qwen 3.5 35B A3B, which the
+ * agent route served as DeepSeek V4.1 Flash Uncensored (§2d). A judge that fails
+ * or times out never blocks the reply.
  */
 export const judgeEnabled = process.env.VENICE_WEB_JUDGE !== '0'
-export const judgeModel = process.env.VENICE_WEB_JUDGE_MODEL ?? 'qwen3-5-35b-a3b'
+export const judgeModel = process.env.VENICE_WEB_JUDGE_MODEL ?? 'deepseek-v4-1-flash-uncensored'
 export const judgeTimeoutMs = Number(process.env.VENICE_WEB_JUDGE_TIMEOUT ?? 45_000)
+
+/**
+ * Which upstream route makes images: `studio` (default) is the web app's Studio
+ * route, which takes the model and every setting directly (docs/PROTOCOL.md
+ * §5c); `agent` is Venice's agent (§5b), the route used before, kept as a
+ * fallback. Edits always go through the agent.
+ */
+export const imageRoute = process.env.VENICE_WEB_IMAGE_ROUTE === 'agent' ? 'agent' : 'studio'
+
+/**
+ * Which chat route text models use. `auto` (default) follows each model's
+ * `route` in models.mjs: the agent route (`/agents/ad-hoc`) for the three models
+ * it really runs, the classic route (`/api/inference/chat`) for the rest, which
+ * the agent route would silently answer with another model (docs/PROTOCOL.md
+ * §2d). `classic` or `agent` forces one route for every model.
+ */
+/**
+ * Forces the reasoning switch of every chat request: `disabled`, `adaptive`
+ * or `enabled`. Unset (or anything else) follows each request's
+ * `reasoning_effort` (emulate.mjs `reasoningMode`).
+ */
+export const reasoningOverride = ['disabled', 'adaptive', 'enabled'].includes(process.env.VENICE_WEB_REASONING) ? process.env.VENICE_WEB_REASONING : undefined
+
+export const chatRoute = ['classic', 'agent'].includes(process.env.VENICE_WEB_CHAT_ROUTE) ? process.env.VENICE_WEB_CHAT_ROUTE : 'auto'

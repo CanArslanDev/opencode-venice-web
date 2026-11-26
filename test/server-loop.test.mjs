@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { collectStream } from '../src/lib/server.mjs'
-import { NATIVE_CALL_REMINDER, preferAnswer, serverLoopMessage, shouldRetry } from '../src/lib/emulate.mjs'
+import { NATIVE_CALL_REMINDER, clientToolFor, nativeCallReminder, preferAnswer, serverLoopMessage, shouldRetry } from '../src/lib/emulate.mjs'
 
 const sse = (events, { close = true } = {}) => {
   const text = events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join('')
@@ -41,21 +41,22 @@ async function drain(generator) {
 const mapping = { emulatedTools: true, request: { modelId: 'm' } }
 const chunk = (delta) => ({ delta })
 
-test('collectStream stops a Venice tool loop past three steps', async () => {
+test('collectStream stops a Venice tool loop at its first native step', async () => {
   const events = [...step(0), ...step(1), ...step(2), ...step(3), ...step(4), ...message(5, 'gave up')]
   const { body, wasCancelled } = sse(events, { close: false })
   const state = await drain(collectStream(body, mapping, chunk, { stopServerLoop: true }))
   assert.equal(state.serverLoop, true)
-  assert.equal(state.steps.size, 4)
+  assert.equal(state.steps.size, 1)
   assert.deepEqual([...state.nativeTools], ['bash'])
   assert.equal(state.text, '')
   assert.equal(wasCancelled(), true)
 })
 
-test('collectStream lets a short recovery through', async () => {
-  const events = [...step(0), ...step(1), ...message(2, '{"content":"","status":"continue","tool_calls":[]}')]
+test('collectStream lets a reply without native steps through', async () => {
+  const events = [...message(0, '{"content":"","status":"continue","tool_calls":[]}')]
   const state = await drain(collectStream(sse(events).body, mapping, chunk, { stopServerLoop: true }))
   assert.equal(state.serverLoop, false)
+  assert.equal(state.steps.size, 0)
   assert.equal(state.terminal, true)
   assert.match(state.text, /status/)
 })
@@ -67,12 +68,38 @@ test('collectStream reads a loop to the end when stopping is off (last retry)', 
   assert.equal(state.text, 'gave up')
 })
 
-test('shouldRetry: a stopped Venice loop is retried with the native-call reminder', () => {
+test('shouldRetry: a stopped Venice loop is retried with the native-call reminder and without reasoning', () => {
   assert.deepEqual(shouldRetry({ message: serverLoopMessage(), lastRole: 'tool' }), {
     retry: true,
     reason: 'venice tool loop',
     reminder: NATIVE_CALL_REMINDER,
+    disableReasoning: true,
   })
+  const named = shouldRetry({ message: serverLoopMessage(new Set(['functions.exec_command'])), lastRole: 'tool', available: ['exec_command', 'view_image'] })
+  assert.equal(named.disableReasoning, true)
+  assert.ok(named.reminder.startsWith(NATIVE_CALL_REMINDER))
+  assert.match(named.reminder, /called "functions.exec_command" with native function calling/)
+  assert.match(named.reminder, /"functions.exec_command" is the tool "exec_command": write {"name":"exec_command","arguments":{...}}/)
+})
+
+test('clientToolFor maps the native names seen in real loops to the client tool, only when one fits', () => {
+  const codex = ['exec_command', 'write_stdin', 'view_image', 'apply_patch', 'image_gen__imagegen']
+  assert.equal(clientToolFor('exec_command', codex), 'exec_command')
+  assert.equal(clientToolFor('functions.exec_command', codex), 'exec_command')
+  assert.equal(clientToolFor('exec', codex), 'exec_command')
+  assert.equal(clientToolFor('functions.exec', codex), 'exec_command')
+  assert.equal(clientToolFor('imagegen', codex), 'image_gen__imagegen')
+  assert.equal(clientToolFor('image_gen__imagegen', codex), 'image_gen__imagegen')
+  // two candidates, or none: no guess
+  assert.equal(clientToolFor('exec', ['exec_command', 'exec_python']), null)
+  assert.equal(clientToolFor('view_media', codex), null)
+  assert.equal(clientToolFor('', codex), null)
+})
+
+test('nativeCallReminder names an unknown native call without inventing a tool', () => {
+  assert.equal(nativeCallReminder([], ['bash']), NATIVE_CALL_REMINDER)
+  const text = nativeCallReminder(['view_media', 'exec'], ['exec_command'])
+  assert.match(text, /"view_media" is not a tool name; "exec" is the tool "exec_command"/)
 })
 
 test('preferAnswer: any real reply beats a stopped loop', () => {

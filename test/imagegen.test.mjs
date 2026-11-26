@@ -27,8 +27,10 @@ test('pickImageModel: default for none or an OpenAI name, the id when known, 400
   assert.equal(pickImageModel('gpt-image-1'), DEFAULT_IMAGE_MODEL)
   assert.equal(pickImageModel('chroma'), 'chroma')
   assert.throws(() => pickImageModel('nope'), ImageRequestError)
-  // in the free catalogue, but the agent cannot run it
-  assert.throws(() => pickImageModel('lustify-sdxl'), /unknown image model/)
+  // free, runs on the Studio route; the agent refuses it and swaps the model
+  assert.equal(pickImageModel('lustify-sdxl'), 'lustify-sdxl')
+  assert.throws(() => pickImageModel('lustify-sdxl', { route: 'agent' }), /only runs on the Studio route/)
+  assert.equal(pickImageModel('chroma', { route: 'agent' }), 'chroma')
 })
 
 test('pickEditModel names the edit models when a generate model is asked to edit', () => {

@@ -69,7 +69,7 @@ Body (responses-API flavoured, not chat-completions):
 
 ```jsonc
 {
-  "modelId": "deepseek-v4-1-flash-free",
+  "modelId": "deepseek-v4-1-flash-uncensored",
   "systemPrompt": { "instructions": "…all system messages joined…" },
   "messages": [
     { "id": "<uuid>", "type": "message", "status": "completed", "role": "user",
@@ -85,7 +85,8 @@ Notes:
 
 * `modelId` uses the web catalogue's dotted ids (`zai-org-glm-5.2`), not the API's dashed ids.
 * `tools` and `clientTools` are what the web *agent* uses. Sending `tools: []` does not disable Venice's built-in server tools - the model may still call `view_media`/`get_attachment`.
-* The endpoint ignores `temperature`, `top_p` and `max_tokens`.
+* The endpoint ignores `temperature`, `top_p` and `max_tokens` (the classic route, §2d, honours them).
+* This route runs only three models; any other `modelId` is answered by DeepSeek V4.1 Flash Uncensored. See §2d.
 * Requests with `attestationToken` minted are required for `/api/inference/*`; the mint call needs the same headers (sans attestation).
 
 ## 2b. Images
@@ -104,11 +105,204 @@ Measured shortcuts:
 
 So the proxy uploads nothing. Each image of the user's latest message gets an id derived from its bytes, the request goes out as multipart with the bytes in `media.<id>`, and Venice reads them straight from the request: no upload endpoint (which rate-limits with `429`), no id cache, nothing stored on disk. `upstreamChat(…, files)` builds the multipart body with `multipartBody()` (the encoder `fetch()` uses), so it travels through curl like any other body.
 
-Every model in `src/lib/models.mjs` answered "4719" and "red", including the ones the catalogue does not flag `supportsMultiModal`. PNG, a 2.5 MB 3000x2000 PNG, and two images in one message (both read) work too.
+Every model in `src/lib/models.mjs` answered "4719" and "red", including the ones the catalogue does not flag `supportsMultiModal` - but on this route all of them except three were DeepSeek V4.1 Flash Uncensored (§2d); vision per model on the classic route is measured there. PNG, a 2.5 MB 3000x2000 PNG, and two images in one message (both read) work too.
 
 **The image has to be in the last user message.** Venice shows the model an image directly only when it sits in the last user message; anywhere earlier the model calls Venice's own `view_media` to look at it (2/2, both answered after that server call). With emulated tools that call is written into the envelope, where nothing runs it: 5 of 5 image questions ended in an invalid `view_media` call and then an unrelated `bash`. The format and retry reminders are user messages that come after the user's own, so `withImagesLast()` moves the image parts onto the last user message with a line saying whose they are. After that: 5/5 answered with tools on, 0 `view_media` calls, and in a tool loop the model still sees the picture (`write code.txt "4719"` after a tool result), on macOS and Linux, through the proxy and through real `opencode run -f`.
 
-Only the latest user message's images are sent. In a tool loop that is the message that started the work, so the picture stays visible on every step; after the user's next message it is history and stays `[image]`.
+Only the request's images (the latest user message that is not a tool output, below) and those of the tool outputs after it are sent. In a tool loop the request is the message that started the work, so the picture stays visible on every step; after the user's next message it is history and stays `[image]`.
+
+**Images from tool results.** Measured 2026-11-26 (Windows, through the proxy, `stream: false`, tools `exec_command` + `view_image`, a solid red 64x64 PNG, 5 runs per model on `deepseek-v4-1-flash-uncensored`, `deepseek-v4-1-flash` and `z-ai-glm-5-3-flash`). A tool that returns a picture (Codex's `view_image`, screenshot tools) reaches the proxy in one of two shapes: inside the `role: "tool"` message as `image_url` parts, or as a user message holding the image right after the tool result (Codex on chat completions). Before, the first became `[image]` text inside the tool result, and the model, asked for the colour, described a picture it had never seen ("dark blue boats", "deep navy"): 1 of 15 said red. The second was treated as a new user request: the model's answer without a tool call was retried twice as "envelope without tool calls" (30 of 30 replies, 2 wasted retries each) and the format reminder told it "call those tools now - do not answer yet".
+
+Now `attachmentIndexes()` sends the images of the request and of every tool output after it; `isToolOutputMessage()` marks a user message with an image that comes straight after a tool result (or after another such message) as tool output, so it is written as a `tool_result`, the after-tool reminder is picked, the judge path is used and the judge reads the real request. A user message after a tool result *without* an image stays a user turn. The tool result says `[N attachment(s) from this tool output are attached to the last user message]`, and the parts get `TOOL_IMAGE_NOTE` ("the output of the tool call(s) above, not part of the user's request") instead of `IMAGE_NOTE`. Notes now move with the parts on a retry. `IMAGE_NOTE` / `FILE_NOTE` no longer say "there is no tool for viewing images": the client may have one.
+
+| shape (15 runs each, 3 models) | before | after |
+| --- | --- | --- |
+| image in the tool message, "dominant colour?" | 1/15 red (the rest invented a picture) | 15/15 red |
+| image in a user message after the tool result, "dominant colour?" | 15/15 red, 30 wasted retries | 15/15 red, no wasted retry |
+| two images that way, "colour of each?" | 15/15 red+blue, 30 wasted retries | 15/15 red+blue, no wasted retry |
+| same three shapes, "say the colour and run `echo hi`" | 45/45 `exec_command` | 44/45 (the 45th: no answer from upstream within 300 s) |
+
+**A series of tool images.** In an edit loop through Codex (2026-11-26: generate `vN`, `view_image` it, compare, repeat) the request reached 5 images, all on the format reminder, while each tool result only said "1 attachment(s) ... attached to the last user message", so nothing told the model which picture answered which call. `planImages()` numbers the images in message order (a copy keeps the first copy's number); each tool result says `[attached to the last user message as image #N of M]`, and with two or more images `imageOrderNote()` adds one line after the notes (`IMAGE_ORDER_PREFIX`): `#1 from the user's request; #2 output of tool call <id> (cushion-v1.png); ... #5 ... - the newest`. The file name is the last image file the call's arguments mention. The line moves with the parts on a retry. Past `MAX_IMAGES` the request's images go first and then the newest tool outputs; the oldest become `[image]` (the first ten used to be kept, which hid every later result). The model in that dump tracked v1 to v8 correctly but did not stop on its own: the task ("add a cushion and keep comparing variations") had no end, so the proxy cannot end it either. Checked live through Codex after the change (`deepseek-v4-1-flash-uncensored`, `VENICE_WEB_REASONING=disabled`): three distinct images opened one by one with `view_image` and named in order, 3/3 right, images accumulating 1, 2, 3 per request, no native-call loop. Identical bytes are one image (the id is a hash of the bytes), so a test with one PNG repeated shows `#1 of 1` everywhere.
+
+## 2c. Documents
+
+Measured 2026-11-25 (Windows, through this proxy and through real `opencode run -f`).
+
+A user message part `{ "type": "input_file", "media_id": "<id>", "filename": "<name>" }` refers to a document; the bytes travel exactly like an image's, as the multipart field `media.<media_id>`. **Venice takes the file name from the multipart field's file name**, not from the part: with the old fixed name `image` the parsing item said `"filename":"image"`, so `upstreamChat()` now sends each file under its own name. The stream then carries one extra output item before the answer:
+
+```
+response.output_item.added   { "type": "veniceai:document_parsing", "source_media_id", "status": "in_progress", "filename", "mime_type", "extracted_text": "" }
+veniceai:document_parsing.in_progress / .done
+response.output_item.done    { …, "status": "completed", "extracted_text": "<the document's text>" }
+```
+
+then the usual `message` item. The extracted text is not an `output_text` delta and the item is not a `veniceai:tool_call_generation`, so `collectStream()` neither forwards it nor counts it as a server tool step.
+
+The web client accepts csv, doc, docx, epub, json, md, odp, ods, odt, pdf, ppt, pptx, rtf, txt, xls, xlsx, xml (and `text/*`, the matching office types), up to 100 MB. OpenCode (`@ai-sdk/openai-compatible`) sends an attached PDF as `{ "type": "file", "file": { "filename": "report.pdf", "file_data": "data:application/pdf;base64,…" } }` (captured from `opencode run -f report.pdf`); it inlines .md/.txt itself as text. Before this the proxy turned that part into empty text, and the model only got the answer by shelling out to `pdftotext`.
+
+Measured with a PDF, a .txt and a .md each holding a unique code word ("What is the secret code word in the attached file?"):
+
+| request | result |
+| --- | --- |
+| PDF, all 27 models | 27/27 answered the code word (24 of them were DeepSeek V4.1 Flash Uncensored, §2d) |
+| .txt and .md, `deepseek-v4-1-flash-uncensored`, `z-ai-glm-5-3-flash`, `qwen3-coder-480b-a35b-instruct-turbo` | 6/6 |
+| `opencode run -f report.pdf` on `deepseek-v4-1-flash-uncensored`, `z-ai-glm-5-3-flash`, `deepseek-v4-1-flash` (sync config, `pdf` input) | 3/3, no tool call |
+| a zip | 400 from the proxy, with the list of accepted types |
+
+`attachmentFromFilePart()` reads the part (image types go the image way), `withImagesLast()` moves `input_file` parts to the last user message like images (with `FILE_NOTE` instead of `IMAGE_NOTE` when the reminder receives them), and the OpenCode config advertises `modalities.input` `pdf` on every model (`openCodeModel()`).
+
+## 2d. Two chat routes: agent and classic
+
+Measured 2026-11-25 (Windows, Pro session) with every model in `src/lib/models.mjs`, straight against upstream and then through the proxy.
+
+**The agent route runs only three models.** `/agents/ad-hoc` takes any `modelId` and answers, but the finished message item names the model that really ran:
+
+```
+response.output_item.done  { "item": { "type": "message", "id": "agent-node:llm:0", "status": "completed", "model_id": "deepseek-v4-1-flash-uncensored", … } }
+response.output_text.done  { …, "context_metadata": { "total_tokens": 2989, "max_context_length": 524288 } }
+```
+
+`response.created` / `response.completed` carry no model. For 24 of the 27 models then listed, `model_id` was `deepseek-v4-1-flash-uncensored` and `max_context_length` was that model's 524288; only `deepseek-v4-1-flash-uncensored`, `deepseek-v4-1-flash` (1000000) and `z-ai-glm-5-3-flash` (1048576) ran as themselves. These are the models of the web app's agentic model picker (its fourth entry is "Auto"). The fingerprint agrees: asked "What model are you, and which company made you?", the agent route answered "Claude, made by Anthropic" (or "an undisclosed model") for almost every id, while the classic route answered with each model's own maker (Alibaba/Tongyi for Qwen, Z.ai for GLM, NVIDIA for Nemotron, Google for Gemma, Mistral for the Venice models, OpenAI for GPT OSS, DeepSeek for DeepSeek). `total_tokens` 2989 for a one-word prompt also shows that the agent route adds about 3k tokens of its own system prompt.
+
+So every measurement in this file that was taken on the agent route with another model id (vision and documents on "all 27 models" in §2b/§2c, the judge candidates in §4.7) was in fact DeepSeek V4.1 Flash Uncensored.
+
+**The classic route** is what the web app's ordinary chat uses:
+
+```
+POST https://outerface.venice.ai/api/inference/chat
+(same auth, attestation, middleface and timestamp headers; no accept: text/event-stream, as on the agent route)
+```
+
+```jsonc
+{
+  "requestId": "a1b2c3d",            // any short id
+  "modelId": "qwen3-5-35b-a3b",
+  "prompt": [
+    { "role": "system" | "user" | "assistant", "content": "…",
+      "imagePath": ["data:image/png;base64,…"],   // optional, must be an array
+      "isFile": true }                             // optional: this message is a document's text
+  ],
+  "systemPrompt": "…",               // a string; an object is a 400
+  "includeVeniceSystemPrompt": false,
+  "reasoning": false,                // true: reasoning deltas (models that have them)
+  "enableLargeContextChat": true,    // see "Context" below
+  "maxResponseTokens": 2048,         // honoured
+  "temperature": 0.7,                // honoured, 0-2 (above 2: 400)
+  "topP": 0.9,
+  "webEnabled": false, "webScrapeEnabled": false, "xSearchEnabled": false,
+  "conversationType": "text",
+  "isCharacter": false
+}
+```
+
+The answer is **not SSE**: one JSON object per line (the response even says `content-type: text/html`), streamed as it is generated (267 chunks over 6 s for a 400-word story):
+
+```
+{"kind":"meta","references":[],"servingModelId":"qwen3-5-35b-a3b","servingModelName":"Qwen 3.5 35B A3B"}
+{"kind":"meta","augmented":false,"references":[],"completion_id":"chatcmpl-…"}
+{"kind":"meta","augmented":false,"references":[],"thinking":true}
+{"kind":"content","content":"","reasoning_content":"…"}     reasoning delta (reasoning: true)
+{"content":"P","kind":"content"}                             answer delta
+{"kind":"status","content":"processing"}                     on long prompts, before the first token
+{"kind":"meta","references":[],"servingModelId":"qwen3-5-35b-a3b","servingModelName":"Qwen 3.5 35B A3B"}
+```
+
+There is no terminal event: the stream simply ends. Errors are an HTTP status with a JSON body (`{"error":"Invalid request","details":…}` 400, `{"error":"modelOverloaded"}` 429, `{"error":"userPromptTooLong"}` 413, `{"error":"Internal server error"}` 500). No `x-venice-tee-model-pub-key` header came back for the TEE models; their answers were plain text like the others.
+
+Measured on the classic route:
+
+| check | result |
+| --- | --- |
+| "Reply with exactly: PONG", every model | 26/27 `PONG`, `servingModelId` = the model asked for every time; `e2ee-qwen3-8-27b` HTTP 500 on 6 of 6 tries (now an alias of `qwen-3-8-27b`) |
+| fingerprint question | each model named its own maker (see above) |
+| `temperature` | 0: the same invented name 3/3; 2: unreadable token soup; 9: 400 "less than or equal to 2" |
+| `maxResponseTokens: 20` | 88 characters instead of 1761 |
+| `systemPrompt` string, `role: "system"` message, multi-turn history | all followed |
+| several user messages in a row | **only the last one is read**: "code word two: LIME-77" followed by the question was forgotten (2/2 models), joined into one message both were named. An `isFile` message is not dropped and keeps the message before it |
+| `imagePath: [dataURL]` | read (a red apple). A string instead of an array is a 400 |
+| image sent to a text-only model | answered by **`qwen3-5-35b-a3b`** (`servingModelId` says so) on 14 models; HTTP 500 on `venice-uncensored-role-play`; read by the model itself on `qwen-3-8-27b`, `qwen3-6-27b`, `qwen3-5-35b-a3b`, `qwen3-vl-235b-a22b`, `venice-uncensored-1-2`, the three Gemma models and `e2ee-qwen3-vl-30b-a3b-p` |
+| document bytes (multipart, or a PDF data URL in `imagePath`) | 400 "Required" / not read. The route takes documents only as text, in a message with `isFile: true` |
+| median time to first byte, short prompt | 0.87 s (agent route 0.49 s); total time about the same as the agent route |
+
+**Context.** Without `enableLargeContextChat` the route keeps only the end of a long prompt and drops the start silently (GLM 5.2: a code word at the start of 120k characters found, of 200k characters not; with the flag, found at 1.6M characters, ~470k tokens). Even with the flag most models read far less than their catalogue `maxContextLength`. Measured with a marker line every ~5k tokens in a ~355k-token prompt, asking for the first marker the model sees, then confirmed with a code word at the start of prompts of known size:
+
+| models | prompt read on the classic route |
+| --- | --- |
+| `zai-org-glm-5.2` | all of it (470k tokens) |
+| `deepseek-v4-1-flash`, `z-ai-glm-5-3-flash` | ~550k / ~580k, far below the catalogue's 1M (see below) |
+| `qwen-3-8-27b` | ~150k (118k found, 177k not) |
+| 18 others (`qwen3-5-35b-a3b`: 38k found, 47k not) | ~40k |
+| `e2ee-qwen3-6-35b-a3b`, `e2ee-qwen-2-5-7b-p` | ~20k |
+| `e2ee-qwen3-vl-30b-a3b-p` | ~12k; above that HTTP 413 `userPromptTooLong` instead of truncation |
+| `deepseek-v4-1-flash-uncensored` | ~36k (36k read, 38k not; the agent route reads ~300k, see below) |
+
+The system prompt survives the truncation (a `systemPrompt` saying "reply ZEBRA" was obeyed under a 400k-character prompt). The cut is silent, so these numbers are the models' `window` in `src/lib/models.mjs` and what the sync gives OpenCode as the context limit (with the output limit capped at a fifth of it, since OpenCode compacts at context minus output); OpenCode compacts before Venice drops anything. `nvidia-nemotron-3-nano-30b-a3b` once answered the marker question by reciting a "CONTENT MODERATION RULES" system prompt, so some models get a Venice prompt even with `includeVeniceSystemPrompt: false`.
+
+**Limits of the three agent-route models, on both routes.** Measured 2026-11-25 with the same prompt shape (a code word at the very start, a marker line every ~5k tokens, and a question asking for the code word, the first and last marker seen, and one record about 3% in copied word for word, which no summary keeps), at increasing sizes up to and past the catalogue context. Token sizes are this English filler's tokens (4.29 characters each, from the agent route's `context_metadata.total_tokens`); `servingModelId` / `model_id` was the model asked for in every run.
+
+The agent route never truncates and never answers an HTTP error, even past the catalogue context. Instead it **compacts**: the stream starts with
+
+```
+veniceai:context_compaction.in_progress   { "message_count": 1 }
+response.output_item.done  { "item": { "type": "veniceai:compaction", "summary": "## Summary …", "original_token_count": 469383, "message_count": 1 } }
+veniceai:context_compaction.done          { "messages_compacted": 1, "media_count": 0 }
+```
+
+`original_token_count` is the prompt's characters / 3.2 (1502024 characters gave 469383), not the model's tokenizer. Compaction starts once that estimate passes about 77% of `max_context_length`. Just past that the "summary" is still the whole prompt (1.29M characters long on DeepSeek Uncensored at 300k tokens) and the model reads everything; a little further it is a ~5k-character summary, `total_tokens` drops to ~4.3k, the code word survives sometimes and the details never do.
+
+Agent route (`/api/inference/chat/agents/ad-hoc`):
+
+| model (catalogue context) | read whole, no compaction | compaction, prompt still whole | summary only (start and details lost) |
+| --- | --- | --- | --- |
+| `deepseek-v4-1-flash-uncensored` (524288) | up to 290k tokens, 1.24M characters (estimate 389k) | 300k (estimate 402k) | from 350k (estimate 469k); at 420k the code word was gone too; 530k (past the catalogue) the same, HTTP 200 |
+| `deepseek-v4-1-flash` (1000000) | up to 550k, 2.36M characters (estimate 737k) | 600k-650k (estimate 805k-872k) | from 700k (estimate 939k); 1010k the same, HTTP 200 |
+| `z-ai-glm-5-3-flash` (1048576) | up to 600k, 2.57M characters (estimate 805k) | 650k-700k (estimate 872k-939k) | from 750k (estimate 1006k); 1060k the same, HTTP 200 |
+
+Classic route (`/api/inference/chat`, `enableLargeContextChat: true`); the route reports no token counts, so sizes are the same prompts' sizes:
+
+| model | read whole | longer prompts |
+| --- | --- | --- |
+| `deepseek-v4-1-flash-uncensored` | up to 36k | the start dropped silently, the last ~30-36k tokens kept (first marker seen at 518k: 98) |
+| `deepseek-v4-1-flash` | up to 540k | the last ~550k kept (first marker seen: 41 at 750k, 81 at 950k, 89 at 990k) |
+| `z-ai-glm-5-3-flash` | up to 570k | the last ~580k kept (34 at 750k, 75 at 950k, 91 at 1030k) |
+
+No HTTP error on either route at any size (up to 4.4M characters). The record copied word for word was sometimes wrong even when everything was read (DeepSeek 1017 at 550k on the agent route, both models at 540k-570k on the classic route): that is recall at that length, not a limit. So every limit here was **reached**: on the classic route by truncation, on the agent route by compaction; none of the three reads its catalogue context on either route.
+
+`window` in `src/lib/models.mjs` is the agent-route limit in the proxy's own token count (characters / 4, `countTokens()`, what OpenCode compacts on), rounded down: 300000, 580000 and 640000. The compaction trigger counts characters, as the proxy does, so this holds for code as well as prose. `classicWindow` (35000, 540000, 570000) applies when `VENICE_WEB_CHAT_ROUTE=classic`. `collectStream()` records a `veniceai:compaction` item in `state.compacted` and the proxy logs `Venice compacted the prompt of …`.
+
+Output length, asked for a numbered list of 30000 lines (or 60000 bare numbers, with a system prompt saying long output is supported, for models that refused the first one); token counts from the agent route's `total_tokens`, with the output sent back as a prompt:
+
+| model | agent route | classic route |
+| --- | --- | --- |
+| `deepseek-v4-1-flash-uncensored` | ~291k tokens, all 30000 lines, `response.completed`: no 131072 cap | 131072 exactly, with `maxResponseTokens: 131072` and without it (cut mid-line); 200001 with `maxResponseTokens: 200000` |
+| `deepseek-v4-1-flash` | refused the list ("exceeds the maximum output length"); the bare numbers stopped at 131076 tokens mid-number, `response.completed` | 131072 exactly (`maxResponseTokens: 131072`) |
+| `z-ai-glm-5-3-flash` | refused the list; the bare numbers stopped at ~131.1k tokens (`total_tokens` 133989), `response.completed`; one earlier run ended at 47k with `response.failed` `workflow_failed` "LLM stream failed > Request error" | refused the list; bare numbers 131060 tokens (`maxResponseTokens: 131072`); with `maxResponseTokens: 200000` 193836 tokens, then the stream ended with `{"kind":"error","code":"stream_over_activity_timeout","error":"Streaming request exceeded the 900 second wall-clock limit."}` |
+
+No finish reason marks the cut on either route (the agent route says `completed`, the classic stream just ends). `maxResponseTokens` up to 1000000 is accepted (no 400) and honoured past the catalogue's 131072, but **the classic route stops every stream after 900 seconds** with the error line above (`classicReader()` turns it into an error, so the turn fails visibly); GLM writes ~215 tokens/s there, DeepSeek ~570. The agent route ran 476 s for DeepSeek Uncensored's 291k tokens without such a limit.
+
+Other differences on the same model (direct, then through the proxy):
+
+| check | agent route | classic route |
+| --- | --- | --- |
+| emulated tool calls through the proxy (one call, two parallel calls, answer after a tool result; 3 runs each) | 27/27 on the three models | 27/27 |
+| PDF (code word) | 3/3, Venice parses it (`veniceai:document_parsing`) | 3/3 through the proxy (text extracted by one agent-route call) |
+| image (red circle, "4719") | 3/3, `model_id` unchanged | 3/3, `servingModelId` unchanged |
+| reasoning | a `reasoning` item on all three | `reasoning_content` on all three |
+| `temperature: 0` (same prompt 4x) | ignored: 4 different sentences (DeepSeek Uncensored, GLM) | honoured: 4/4 identical on GLM, 3/4 on DeepSeek Uncensored |
+| `temperature: 2` | ignored (coherent text) | token soup on DeepSeek Uncensored (289k characters); DeepSeek 1017 and GLM stayed readable |
+| max tokens 20 | ignored (`max_output_tokens`, `maxOutputTokens`, `maxResponseTokens` in the body; ~1.5k characters) | honoured (75-106 characters) |
+| median time to first token, "Reply with exactly: PONG", 5 runs | 1.18 s / 1.34 s / 0.87 s | 0.72 s / 0.84 s / 0.60 s |
+| hidden prompt (`total_tokens` for a one-word prompt) | 2989 / 2989 / 2835 tokens | not reported (`includeVeniceSystemPrompt: false`) |
+| lock-picking how-to | answered by all three | refused by `deepseek-v4-1-flash` ("I can't provide instructions for picking locks"), answered by the other two |
+| profane pirate rant | written by all three | written by all three |
+
+(Times and token counts: DeepSeek Uncensored / DeepSeek 1017 / GLM 5.3 Flash.) Every response named the model asked for; none mentioned credits.
+
+The three models stay on the agent route: its usable context is as large as or larger than the classic route's (much larger on DeepSeek Uncensored), PDFs need no extra call, and it keeps the tool-emulation measurements of §4. The classic route answers faster and honours sampling settings; `VENICE_WEB_CHAT_ROUTE=classic` switches to it, with `classicWindow` as the limit. `deepseek-v4-1-flash-classic` and `z-ai-glm-5-3-flash-classic` are the classic route for one model each (`upstream` is the id sent, `window` its `classicWindow`), so both routes can be picked per session; DeepSeek Uncensored has none, at ~36k tokens it is not worth one.
+
+**What the proxy does.** Each model has a `route` (`routeFor()` in `src/lib/models.mjs`): `agent` for the three models the agent route runs (on DeepSeek Uncensored it reads more context than the classic route, and it keeps the measured behaviour of §4), `classic` for the rest. `VENICE_WEB_CHAT_ROUTE=classic|agent` forces one route for every model. The request is still built in the agent shape by `toVeniceRequest()` (tool emulation is text, so it is the same on both routes), and `toClassicRequest()` in `src/lib/classic.mjs` converts it at send time, retries included: text parts joined, consecutive messages of one role joined into one (`mergeRuns()`; the request and the format reminder, or a tool result and the reminder, would otherwise lose everything but the reminder), `input_image` parts as data URLs in `imagePath`, `systemPrompt` as a string, `reasoning` from `reasoningMode`, `enableLargeContextChat: true`, and the OpenAI `temperature` / `top_p` / `max_tokens` (clamped to 0-2, 0-1 and the model's output limit). `classicReader()` turns the lines into the agent route's event names, so `collectStream()` reads both. The proxy logs `asked for X, Venice answered with Y` whenever `servingModelId` or `model_id` differs from the model asked for. There is no Venice agent loop on the classic route, so the tool-loop guard (§4.7) never triggers there.
+
+Documents on the classic route: text types (`text/*`, JSON, XML) are decoded locally; other types (PDF, office, epub) are sent once to the agent route with a one-line prompt, and the proxy stops reading that stream as soon as the `veniceai:document_parsing` items are done (§2c), before any answer is generated. The text then goes as an `isFile` message right after the message that carried the file (before it when that is the format reminder, which stays last). The wording matters: with only the file name and text, before the question, Qwen 3.5 found the code word 1/4 times and otherwise said it "cannot access attached files"; with "The user attached the file "report.pdf". Its text was extracted for you …" after the question, 4/4 (Qwen 3 Coder 4/4 either way).
 
 ## 3. Inference response
 
@@ -203,9 +397,11 @@ Judge measurement: 29 labelled turn endings from real sessions (13 early stops, 
 | --- | --- | --- | --- | --- |
 | `qwen3-5-35b-a3b` (default) | 27/29 | 1 | 1 | 1.6 s |
 | `zai-org-glm-5.2` | 25/29 | 1 | 3 | 1.6 s |
-| `deepseek-v4-1-flash-free` | 24/29 | 2 | 3 | 1.5 s |
+| `deepseek-v4-1-flash-free` (now `deepseek-v4-1-flash-uncensored`) | 24/29 | 2 | 3 | 1.5 s |
 | `kimi-k2-5` | 24/29 | 2 | 3 | 2.0 s |
 | old word lists | 16/29 | 13 | 0 | - |
+
+> These runs asked for each judge model on the agent route, which served `qwen3-5-35b-a3b`, `zai-org-glm-5.2` and `kimi-k2-5` as DeepSeek V4.1 Flash Uncensored (§2d). The differences are run-to-run spread of one model, and the judge default is now `deepseek-v4-1-flash-uncensored`, the model that really produced the 27/29.
 
 Over 3 more runs Qwen scored 76/87 (4 missed stops, 7 needless retries; all translated cases right in 17 of 18). Most disagreements are borderline labels (a summary that ends with "two notes remain", an honest "1 test still fails" report). A needless retry costs one upstream call: `preferAnswer()` keeps the first answer when the retry is not better.
 
@@ -223,9 +419,36 @@ What the stream shows (debug mode logs it): one `veniceai:tool_call_generation` 
 | 2-3 | a few | the model recovered and sent a proper envelope |
 | 10 (Venice's cap) | 12 of 86 replies | gave up without the result, every time |
 
-Fix: `collectStream()` stops reading once a response starts a 4th step (`SERVER_LOOP_STEPS = 3`), and the request is sent again with `NATIVE_CALL_REMINDER` ("your tools work; the only way to call a tool is `tool_calls`"). It counts as a format retry; the last allowed retry runs to the end so the turn always gets an answer. Format retries and judge checks now have separate budgets (2 each): with a shared budget, two format retries used it up and the last reply reached the user without the judge seeing it. The judge also treats "my tools are unavailable" as `stopped_early` when the tool results it sees worked.
+Fix: `collectStream()` stops reading once a response starts a 4th step (`SERVER_LOOP_STEPS = 3`, now 0: see "Native calls come with reasoning" below), and the request is sent again with `NATIVE_CALL_REMINDER` ("your tools work; the only way to call a tool is `tool_calls`"). It counts as a format retry; the last allowed retry runs to the end so the turn always gets an answer. Format retries and judge checks now have separate budgets (2 each): with a shared budget, two format retries used it up and the last reply reached the user without the judge seeing it. The judge also treats "my tools are unavailable" as `stopped_early` when the tool results it sees worked.
 
 Measured on the two tasks that triggered it (OpenCode, 6 runs each): before, 2 of 8 and 2 of 12 runs ended with a "tools are broken" answer and the result only came after "Sonucu söyle."; after, 12 of 12 delivered the result in the final message, with 10 loops stopped and retried along the way.
+
+**Native calls come with reasoning** (2026-11-26, Codex-style requests). A Codex desktop session (`deepseek-v4-1-flash-uncensored`) logged 43 "venice tool loop stopped after 4 steps" in an hour, almost all `native calls: exec`, some `functions.exec`, `exec_command`, `image_gen__imagegen`. Scripted requests through the proxy with Codex-style tools (`exec_command`, `write_stdin`, `view_image`, `apply_patch`, `update_plan`, `image_gen__imagegen`) and a system prompt that names them `functions.<name>`: **without `reasoning_effort`, 1 native step in 389 requests** (one unnamed step on GLM; short and 30-step histories, with and without images, even when the user asked for "the exec tool" or "built-in function calling"). With `reasoning_effort` `high` or `medium` (Codex sends one; it becomes `reasoningMode` `enabled` / `adaptive`), 18 of 120 requests had native steps (`exec_command`, `functions.exec_command`, `view_image`, `update_plan`), and the `NATIVE_CALL_REMINDER` retry looped again in 5 of 16 stops. The names are the ones the system prompt uses, with or without its `functions.` prefix, or shortened (`exec`); Venice reports only the name, never the arguments.
+
+The bad ends were not the 4-step loops: the last retry runs unstopped and usually recovered. They were responses with 1-3 steps, below the old threshold: 0 of 3 responses with 2-3 steps and 1 of 3 with one step ended in a usable call. One (`deepseek-v4-1-flash`, image in the tool message, before the fix in §2b) answered "the screenshot came back as an unrendered placeholder, and the shell command I tried came back as an unavailable tool" with `status: ask`, and the judge's two retries did not change it - the reported symptom.
+
+Fix: `SERVER_LOOP_STEPS = 0` (the stream stops at the first native step, once its `in_progress` event has named the call; each step costs ~2.5 s), the retry reminder names the native calls and the client tool each meant (`nativeCallReminder()`, `clientToolFor()`: `functions.exec_command` → `exec_command`, `exec` → `exec_command` when it is the only `exec_*` tool, `imagegen` → `image_gen__imagegen`; no guess when two tools fit), and once a turn has looped every later attempt of it goes with `reasoningMode: "disabled"` (`disableReasoning` from `shouldRetry()`), and a judge retry that a loop cut off is followed by the loop's own retry instead of ending the turn with the first answer (the "shell tool unavailable" reply above survived two judge retries that way in a run with the stop at the second step).
+
+Share of first attempts with a native step, Codex-style shapes (a first turn, after a command's output, after `view_image` with the image in the tool message, and in a user message after it), all runs before and after the fix (the first attempt is the same request either way):
+
+| model | `reasoningMode` disabled (no effort) | adaptive (`medium`) | enabled (`high`) |
+| --- | --- | --- | --- |
+| `deepseek-v4-1-flash-uncensored` | 0/20 | 11/45 (24%) | 16/60 (27%) |
+| `deepseek-v4-1-flash` | 0/20 | not measured | 14/59 (24%) |
+| `z-ai-glm-5-3-flash` | 1/20 (unnamed step) | 5/45 (11%) | 16/60 (27%) |
+
+The rate drifted between runs (enabled: 8/59 in the first hour, 20/60 and 18/60 later), so it is the outcome per native run that compares:
+
+| 90 runs each (`high` 60 + `medium` 30) | before | stop at the 2nd step, named reminder, no reasoning on retry | final (stop at the 1st step, loop after a judge retry retried) |
+| --- | --- | --- | --- |
+| expected `exec_command` call | 87 | 88 | 89 |
+| reply giving up ("tool unavailable", no call) | 1 | 1 | 0 |
+| no answer within 300 s (upstream) | 2 | 1 | 1 |
+| runs with native steps | 11 | 25 | 26 |
+| average time of those (answered) | 11.6 s | 5.3 s | 5.2 s |
+| "Tool not found" in the reply | 0 | 0 | 0 |
+
+The 300 s cases are upstream: one was a model repeating the same `exec_command` call hundreds of times until its output limit, the others a retry that took two minutes to answer.
 
 #### "Done" without the result
 
@@ -256,7 +479,7 @@ OpenAI → Venice:
 | `assistant` text | envelope `{"content": …, "tool_calls": []}` |
 | `assistant.tool_calls` | envelope with `tool_calls: [{ id, name, arguments }]` |
 | `tool` message | `user` message with `{"tool_result": {…}}` |
-| `reasoning_effort` | `reasoningMode`: `none|minimal|disabled` → `disabled`, `medium|auto|adaptive` → `adaptive`, else `enabled` |
+| `reasoning_effort` | `reasoningMode`: none given, `none|minimal|low|off|disabled` → `disabled`, `medium|auto|adaptive` → `adaptive`, `high` and any other value → `enabled`; `VENICE_WEB_REASONING` forces one for every request. `low` was `enabled` until 2026-11-26: Codex desktop offers no level below `low`, and reasoning brings native tool calls (§4.7) |
 | `tools` | prompt text (see §4) |
 | `stream` | response framing (upstream is always a stream) |
 
@@ -300,9 +523,47 @@ What was measured:
 
 So the proxy sends one agent call per requested image, in parallel, with a seed each when `n > 1`. `mask` is refused (the edit tool has no mask; describe the change in the prompt). `response_format: url` is answered with a data URL, since the proxy hosts no files. OpenAI model names (`dall-e-3`, `gpt-image-1`, …) map to the default model; any other unknown name is a 400.
 
+## 5c. Image generation on the Studio route
+
+Read from the web app's bundle on 2026-11-25 (the request schema of the Studio page, `venice.ai/studio/image`), then measured through this proxy on the same day (all seven free models, Windows, curl 8.x Schannel).
+
+```
+POST /api/inference/image          (JSON, same auth and attestation headers as chat)
+{ "requestId", "modelId", "prompt", "width", "height", "seed", "steps",
+  "hideWatermark", "matureFilter", "embedExifMetadata", "format": "png"|"webp", "type": "image",
+  "aspectRatio"?, "resolution"?, "negativePrompt"?, "cfgScale"?, "stylePreset"?, "variants"? (1-4),
+  "loraStrength"?, "styleReferences"? [{ "url": data URL, "strength" }], "quality"?, "transparentBackground"? }
+```
+
+`seed`, `steps`, `width`, `height`, `hideWatermark` and `matureFilter` are required by the schema. The answer is the picture's bytes (`image/png|webp|jpeg`); the headers say what happened: `x-venice-model-id`, `x-venice-model-name`, `x-venice-is-blurred`, `x-venice-is-content-violation`, `x-venice-is-adult-content`, `x-venice-is-adult-model-content-violation`, plus `x-ratelimit-*`. `seed` must be at most 999999999 (`Number must be less than or equal to 999999999`).
+
+Which settings a model takes comes from the catalogue (`GET /api/app/models`, section `image`): `supportsNegativePrompts`, `supportsSeed`, `supportsSteps`, `settings.steps.max`, `settings.cfgScale.scale`, `settings.widthHeightDivisor`, and for fixed-size models `settings.aspectRatio` + `settings.resolution` + `settings.customSizeMapping`. The web app drops settings the model does not take; the proxy answers 400 instead.
+
+Schema limits measured on 2026-11-25, the same for every model: `width` and `height` at most 1344 each and 1,500,000 pixels in total ("Number must be less than or equal to 1344", "Total pixel count (width × height) must not exceed 1,500,000"); `prompt` at most the model's `promptCharacterLimit` ("String must contain at most 1500 character(s)" on SD35, while `z-image-turbo` takes 1600). On fixed-size models (`krea-2-turbo`) the picture's size comes from `aspectRatio` + `resolution` only: 16:9 at 2K returns 2560x1440 whatever `width`/`height` say, as long as those pass the limits. `chroma` and `lustify-v8` (`settings.outputScale: 1.5`) return 1.5x the size asked for (1024 → 1536).
+
+Per-model effect, measured with one setting changed against the same seed (mean pixel difference to the base picture; the same request twice differs by 0 to 7):
+
+| model | other seed | steps 4 | negativePrompt | cfgScale | stylePreset |
+| --- | --- | --- | --- | --- | --- |
+| z-image-turbo | 53 | 0 | 1 | 0 | 63 |
+| chroma | 62 | 0 | 0 | 0 | 70 |
+| wai-illu | 70 | 34 | 35 | 21 | 74 |
+| krea-2-turbo | 65 | 0 | 0 | 0 | 113 |
+| stable-diffusion-3.5-rev2 | 125 | 56 | 20 | 18 | 34 |
+| lustify-sdxl | 48 | 31 | 22 | 41 | 39 |
+| lustify-v8 | 60 | 20 | 22 | 28 | 38 |
+
+None of these fields is refused upstream: a model that does not take one ignores it. `hideWatermark: false` adds the "Venice" mark in the bottom-left corner on every model, and `format: "webp"` returns WebP on every model, `krea-2-turbo` included (its catalogue says `supportsFormatSelection: false`). `src/lib/models.mjs` mirrors those values.
+
+Unlike the agent route this one takes `modelId` directly, so the free models the agent refuses (SD35, Lustify) are offered here. The proxy warns when `x-venice-model-id` differs from the model asked for.
+
+**Catalogue fields per image model** (`GET /api/app/models`, sections `image` and `inpaint`, read 2026-11-26): `apiUncensored` (true on `chroma`, `wai-illu`, `krea-2-turbo`, `lustify-sdxl`, `lustify-v8`, `qwen-edit-uncensored`), `trainedOnAdultContent` (the same generation models; `wai-illu` also `trainedOnHentaiContent`), `supportsSteps` / `supportsNegativePrompts` / `supportsStylePresents` (they agree with the measured table: steps and negative prompts only on `wai-illu`, SD35 and Lustify, style presets everywhere), `settings.promptCharacterLimit` (1500 on both free edit models), `settings.cfgScale.scale`, `settings.steps`, `settings.widthHeightDivisor` and, for `krea-2-turbo`, `settings.customSizeMapping`. `IMAGE_MODELS` / `EDIT_MODELS` carry these as `nsfw`, `promptLimit`, `steps`, `cfg`, `divisor` and `sizes`; `GET /v1/images/models` (`src/lib/image-catalog.mjs`) publishes them with the controls of the active route.
+
+Edits on the Studio page use `POST /api/inference/multi-edit` (multipart: the fields of `{ modelId, prompt, requestId, aspectRatio?, resolution?, thinkingLevel?, … }` each as its own form field, the pictures as `files`, an optional `mask`) and answer bytes the same way. The proxy does not use it yet: edits stay on the agent route (§5b).
+
 ## 6. Free-model catalogue
 
-`src/lib/models.mjs` mirrors the web catalogue entries flagged `usesCredits: false`. The web app fetches that list from `GET /api/app/models` and `GET /api/v2/agents/configuration_options` with the same session; both are useful if you want to regenerate the list automatically (the proxy currently ships a static copy so it works offline and with a dead session).
+`src/lib/models.mjs` mirrors the web catalogue entries flagged `usesCredits: false`, plus the measured `route`, `window` and `vision` of each (§2d). The web app fetches that list from `GET /api/app/models` and `GET /api/v2/agents/configuration_options` with the same session; both are useful if you want to regenerate the list automatically (the proxy currently ships a static copy so it works offline and with a dead session).
 
 ## 7. Version pins
 

@@ -13,7 +13,7 @@
  *     convert deltas into OpenAI streaming chunks.
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { MODELS } from './models.mjs'
+import { MODELS, upstreamId } from './models.mjs'
 import { readLenient } from './lenient-json.mjs'
 import { repairJsonControlChars } from './sanitize.mjs'
 
@@ -49,31 +49,189 @@ export const REMINDER_AFTER_TOOL =
 /**
  * Goes with the images when they are moved past the user's own message (see
  * `withImagesLast`), so the model knows whose they are and does not look for a
- * tool to open them.
+ * tool to open them. It must not say that no image tool exists: the client may
+ * have one (Codex's `view_image`), and the model would then be told two
+ * opposite things.
  */
 export const IMAGE_NOTE =
-  'The image(s) attached here belong to the user\'s request above and are visible to you now: read them directly. There is no tool for viewing images.'
+  'The image(s) attached here belong to the user\'s request above and are visible to you now: read them directly, without calling a tool to open them.'
+
+/** The same note when files (documents) are among the attachments. */
+export const FILE_NOTE =
+  'The file(s) attached here belong to the user\'s request above and their contents are available to you now: read them directly, without calling a tool to open them.'
 
 /**
- * Moves every `input_image` part to the last user message. Venice shows the
+ * The note for attachments a tool returned (an image-viewing tool, a
+ * screenshot): they are the output of the calls above, not the user's.
+ */
+export const TOOL_IMAGE_NOTE =
+  'The image(s) attached here are the output of the tool call(s) above (see the tool_result that mentions them), not part of the user\'s request. They are visible to you now: read them directly instead of calling a tool to open them again.'
+
+const NOTES = new Set([IMAGE_NOTE, FILE_NOTE, TOOL_IMAGE_NOTE])
+
+/** A tool result as `toVeniceRequest` writes it into the request. */
+const isToolResultText = (text) => typeof text === 'string' && text.startsWith('{"tool_result"')
+const firstText = (message) => (Array.isArray(message?.content) ? message.content.find((part) => part?.type === 'output_text')?.text : undefined)
+
+/** An OpenAI message part that holds an image. */
+const isImagePart = (part) => part?.type === 'image_url' || (part?.type === 'file' && /^data:image\//.test(part.file?.file_data ?? ''))
+
+/**
+ * A user message that carries a tool's output rather than a new request: it
+ * holds an image and comes straight after a tool result (or after another such
+ * message). Codex sends `view_image` output this way on chat completions. A
+ * user message after a tool result without an image stays a user message (a
+ * user who interrupted the turn).
+ */
+export function isToolOutputMessage(messages, index) {
+  const message = messages?.[index]
+  if (message?.role !== 'user' || !Array.isArray(message.content) || !message.content.some(isImagePart)) return false
+  for (let i = index - 1; i >= 0; i--) {
+    const role = messages[i]?.role
+    if (role === 'system' || role === 'developer') continue
+    return role === 'tool' || isToolOutputMessage(messages, i)
+  }
+  return false
+}
+
+/** Index of the user message that asked for the current work: the newest that is not a tool output, or -1. */
+export function requestIndex(messages) {
+  if (!Array.isArray(messages)) return -1
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === 'user' && !isToolOutputMessage(messages, i)) return i
+  }
+  return -1
+}
+
+/**
+ * Indexes of the messages whose attachments travel as bytes: the request, and
+ * every tool output after it (tool messages and the user messages that carry
+ * a tool's images). Older messages keep `[image]` / `[file: …]`.
+ */
+export function attachmentIndexes(messages) {
+  const request = requestIndex(messages)
+  const indexes = new Set(request >= 0 ? [request] : [])
+  for (const [index, message] of (messages ?? []).entries()) {
+    if (index > request && (message?.role === 'tool' || isToolOutputMessage(messages, index))) indexes.add(index)
+  }
+  return indexes
+}
+
+/**
+ * Which images of the sent messages (`attachmentIndexes()`) travel as bytes,
+ * and their numbers in the last user message. Past `MAX_IMAGES` the request's
+ * own images go first, then the **newest** tool outputs: in a loop that views
+ * one result after another the model must see the latest, and keeping the
+ * oldest instead froze it on the first ten. Numbers follow message order
+ * (1 is the oldest); a copy of an image keeps the first copy's number.
+ *
+ * @returns {{ sent: Set<number>, splits: Map<number, ReturnType<typeof splitImages>>, numbers: Map<string, number> }}
+ */
+export function planImages(messages) {
+  const sent = attachmentIndexes(messages)
+  const request = requestIndex(messages)
+  const splits = new Map([...sent].map((index) => [index, splitImages(messages[index].content)]))
+  const keep = new Set()
+  const take = (index) => {
+    for (const image of splits.get(index)?.images ?? []) if (keep.size < MAX_IMAGES) keep.add(image.mediaId)
+  }
+  if (splits.has(request)) take(request)
+  for (const index of [...sent].filter((index) => index !== request).sort((a, b) => b - a)) take(index)
+  const numbers = new Map()
+  for (const index of [...sent].sort((a, b) => a - b)) {
+    for (const image of splits.get(index).images) {
+      if (keep.has(image.mediaId) && !numbers.has(image.mediaId)) numbers.set(image.mediaId, numbers.size + 1)
+    }
+  }
+  return { sent, splits, numbers }
+}
+
+/** The tool call a tool output answers: its own `tool_call_id`, or the tool result it follows (Codex's view_image user message). */
+function toolCallOf(messages, index) {
+  for (let i = index; i >= 0; i--) {
+    if (messages[i]?.role === 'tool') return messages[i].tool_call_id ?? null
+    if (i !== index && !isToolOutputMessage(messages, i) && messages[i]?.role !== 'system' && messages[i]?.role !== 'developer') break
+  }
+  return null
+}
+
+/** The last image file name a tool call's arguments mention (`…/cushion-v3.png`), to name the picture it returned. */
+function imageNameOf(messages, callId) {
+  if (!callId) return null
+  for (const message of messages) {
+    for (const call of message?.tool_calls ?? []) {
+      if (call?.id !== callId) continue
+      const names = String(call.function?.arguments ?? '').match(/[\w.-]+\.(?:png|jpe?g|webp|gif|bmp)\b/gi)
+      return names?.at(-1) ?? null
+    }
+  }
+  return null
+}
+
+/** Starts the note that lists the attached images in order (`imageOrderNote()`). */
+export const IMAGE_ORDER_PREFIX = 'Order of the images attached here:'
+
+/**
+ * One line naming every attached image when there are two or more: whose it
+ * is, the tool call it came from and the file it shows, newest marked. All of
+ * them sit in the last user message, so without it the model cannot tell the
+ * fifth result of a series from the first (it reported "the first image came
+ * out" on every step of an edit loop, 2026-11-26). Null for fewer than two.
+ */
+export function imageOrderNote(origins, messages) {
+  if (origins.size < 2) return null
+  const numbers = [...origins.keys()].sort((a, b) => a - b)
+  const newest = numbers.filter((number) => !origins.get(number).request).at(-1)
+  const items = numbers.map((number) => {
+    const origin = origins.get(number)
+    if (origin.request) return `#${number} from the user's request`
+    const name = imageNameOf(messages, origin.tool)
+    const source = origin.tool ? `output of tool call ${origin.tool}` : 'tool output'
+    return `#${number} ${source}${name ? ` (${name})` : ''}${number === newest ? ' - the newest' : ''}`
+  })
+  return `${IMAGE_ORDER_PREFIX} ${items.join('; ')}.`
+}
+
+/**
+ * Moves every `input_image` and `input_file` part to the last user message. Venice shows the
  * model an image directly only when it sits in the last user message; anywhere
  * earlier the model has to call Venice's `view_media`, and with emulated tools
  * that call lands in the envelope where nothing runs it (docs/PROTOCOL.md §2b).
  * The format and retry reminders are user messages that come after the user's
- * own, so the images are moved onto them.
+ * own, so the images are moved onto them, with a note saying whose they are:
+ * the user's (`IMAGE_NOTE` / `FILE_NOTE`) or a tool's (`TOOL_IMAGE_NOTE`, for
+ * parts that sat in a tool result). The notes move with the parts on a retry.
  */
 export function withImagesLast(messages) {
-  const images = messages.flatMap((message) => (Array.isArray(message.content) ? message.content : []).filter((part) => part?.type === 'input_image'))
+  const isMedia = (part) => part?.type === 'input_image' || part?.type === 'input_file'
+  const isNote = (part) => part?.type === 'output_text' && (NOTES.has(part.text) || part.text?.startsWith?.(IMAGE_ORDER_PREFIX))
+  const images = []
+  const notes = []
+  const origin = { user: false, tool: false, files: false }
+  for (const message of messages) {
+    if (!Array.isArray(message.content)) continue
+    const media = message.content.filter(isMedia)
+    images.push(...media)
+    notes.push(...message.content.filter(isNote).map((part) => part.text))
+    if (!media.length) continue
+    origin[isToolResultText(firstText(message)) ? 'tool' : 'user'] = true
+    if (media.some((part) => part.type === 'input_file')) origin.files = true
+  }
   if (!images.length) return messages
   const lastUser = messages.findLastIndex((message) => message.role === 'user')
+  const ownImages = !!messages[lastUser]?.content?.some?.(isMedia) && !isToolResultText(firstText(messages[lastUser]))
+  // a reminder that receives the attachments says whose they are; notes that
+  // were written before move along with the parts
+  if (!notes.length) {
+    if (origin.user && !ownImages) notes.push(origin.files ? FILE_NOTE : IMAGE_NOTE)
+    if (origin.tool) notes.push(TOOL_IMAGE_NOTE)
+  }
   return messages.map((message, index) => {
     if (!Array.isArray(message.content)) return message
-    const rest = message.content.filter((part) => part?.type !== 'input_image')
+    const rest = message.content.filter((part) => !isMedia(part) && !isNote(part))
     if (index !== lastUser) return rest.length === message.content.length ? message : { ...message, content: rest }
-    const ownImages = rest.length !== message.content.length
-    // a reminder that receives the images says whose they are
-    const note = ownImages ? [] : [{ type: 'output_text', text: IMAGE_NOTE, annotations: [] }]
-    return { ...message, content: [...images, ...rest, ...note] }
+    const noteParts = [...new Set(notes)].map((text) => ({ type: 'output_text', text, annotations: [] }))
+    return { ...message, content: [...images, ...rest, ...noteParts] }
   })
 }
 
@@ -113,9 +271,38 @@ export const RESULT_REMINDER =
 export const NATIVE_CALL_REMINDER =
   'your tools work. Do not use built-in function calling or any native tool-call syntax: the ONLY way to call a tool is the "tool_calls" array of your JSON reply. Ignore any earlier "Tool not found" message and call the tool you need now in tool_calls with "status":"continue".'
 
+/**
+ * The client tool a native call meant, or null. The model writes the names its
+ * system prompt uses (`functions.exec_command`) or shortens them (`exec` for
+ * `exec_command`); Venice reports only the name, never the arguments, so the
+ * call itself cannot be forwarded - but the retry can name the right tool.
+ */
+export function clientToolFor(native, available) {
+  const names = [...(available ?? [])]
+  if (typeof native !== 'string' || !native) return null
+  const bare = native.replace(/^(?:functions|default_api|tools|multi_tool_use)[.:]/, '')
+  if (names.includes(bare)) return bare
+  const alias = normalizeToolName(bare, new Set(names))
+  if (alias !== bare) return alias
+  // `exec` -> `exec_command`, `imagegen` -> `image_gen__imagegen`, only when one tool fits
+  const fits = names.filter((name) => name.startsWith(`${bare}_`) || name.endsWith(`__${bare}`) || name.endsWith(`.${bare}`))
+  return fits.length === 1 ? fits[0] : null
+}
+
+/** `NATIVE_CALL_REMINDER`, naming the native calls Venice could not run and the tools they meant. */
+export function nativeCallReminder(nativeTools = [], available = []) {
+  const tried = [...new Set(nativeTools)].filter(Boolean)
+  if (!tried.length) return NATIVE_CALL_REMINDER
+  const meant = tried.map((name) => [name, clientToolFor(name, available)])
+  const named = meant
+    .map(([name, tool]) => (tool ? `"${name}" is the tool "${tool}": write {"name":"${tool}","arguments":{...}}` : `"${name}" is not a tool name`))
+    .join('; ')
+  return `${NATIVE_CALL_REMINDER} Your last reply called ${tried.map((name) => `"${name}"`).join(', ')} with native function calling, which nothing executes - that is the only reason for "Tool not found". In tool_calls use the exact names from the tool list (${named}).`
+}
+
 /** A reply cut off because Venice was looping on native tool calls. */
-export function serverLoopMessage() {
-  return { content: '', tool_calls: null, sawEnvelope: false, serverLoop: true }
+export function serverLoopMessage(nativeTools = []) {
+  return { content: '', tool_calls: null, sawEnvelope: false, serverLoop: true, nativeTools: [...nativeTools] }
 }
 
 /** Builds the reminder for tool calls the agent cannot execute. */
@@ -152,7 +339,11 @@ export const EMPTY_MARKER = '(empty reply)'
  * @returns {{ retry: boolean, reason?: string, reminder?: string, judge?: boolean }}
  */
 export function shouldRetry({ message, lastRole, available = [] }) {
-  if (message.serverLoop) return { retry: true, reason: 'venice tool loop', reminder: NATIVE_CALL_REMINDER }
+  // native calls come with reasoning (1 step in 389 requests without it, 11-27%
+  // of first attempts with it), so the retry goes without reasoning
+  if (message.serverLoop) {
+    return { retry: true, reason: 'venice tool loop', reminder: nativeCallReminder(message.nativeTools, available), disableReasoning: true }
+  }
   if (isEmptyAnswer(message) && !message.brokenEnvelope) {
     return { retry: true, reason: 'empty reply', reminder: EMPTY_RETRY_REMINDER }
   }
@@ -244,7 +435,8 @@ const tail = (text, max) => (text.length > max ? `…${text.slice(-max)}` : text
  */
 export function buildJudgeRequest(body, message, model) {
   const messages = body.messages ?? []
-  const request = [...messages].reverse().find((item) => item.role === 'user')
+  // a user message that only carries a tool's images is not the request
+  const request = messages[requestIndex(messages)] ?? [...messages].reverse().find((item) => item.role === 'user')
   const toolOutputs = messages.filter((item) => item.role === 'tool').slice(-2)
   const evidence = toolOutputs.length
     ? toolOutputs.map((item, index) => `[${index + 1}] ${tail(textOf(item.content), 1500)}`).join('\n\n')
@@ -255,7 +447,7 @@ export function buildJudgeRequest(body, message, model) {
     `AGENT REPLY (declared status: ${message.status ?? 'none'}):\n${tail((message.content ?? '').trim(), 3000) || '(empty)'}`,
   ].join('\n\n')
   return {
-    modelId: model,
+    modelId: upstreamId(model),
     systemPrompt: { instructions: JUDGE_PROMPT },
     messages: [
       {
@@ -350,6 +542,93 @@ const IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif
 /** Images per turn; the web catalogue's `maxImages` is 10 for every model that states one. */
 export const MAX_IMAGES = 10
 
+/** A request the proxy refuses with a 400 (an attachment it cannot send). */
+export class AttachmentError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'AttachmentError'
+    this.status = 400
+  }
+}
+
+/**
+ * Documents Venice reads (`input_file` parts, parsed server side into text: the
+ * stream shows a `veniceai:document_parsing` item, docs/PROTOCOL.md §2c). The
+ * extensions and types are the web client's upload list (2026-11-25); any
+ * `text/*` type is taken too.
+ */
+export const DOCUMENT_EXTENSIONS = {
+  csv: 'text/csv',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  epub: 'application/epub+zip',
+  json: 'application/json',
+  md: 'text/markdown',
+  odp: 'application/vnd.oasis.opendocument.presentation',
+  ods: 'application/vnd.oasis.opendocument.spreadsheet',
+  odt: 'application/vnd.oasis.opendocument.text',
+  pdf: 'application/pdf',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  rtf: 'application/rtf',
+  txt: 'text/plain',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  xml: 'application/xml',
+}
+const DOCUMENT_TYPES = new Set([...Object.values(DOCUMENT_EXTENSIONS), 'text/xml'])
+
+/** Files per turn, and bytes per file (the web client's upload limit). */
+export const MAX_FILES = 10
+export const MAX_FILE_BYTES = 100 * 1024 * 1024
+
+function mediaIdOf(data) {
+  const hex = createHash('sha256').update(data).digest('hex')
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
+}
+
+/**
+ * The document type to send for `mimeType` and `filename`, or null when Venice
+ * does not read it. A missing or generic type (`application/octet-stream`) is
+ * taken from the extension.
+ */
+export function documentType(mimeType, filename) {
+  const type = String(mimeType ?? '').split(';')[0].trim().toLowerCase()
+  if (type.startsWith('text/') || DOCUMENT_TYPES.has(type)) return type
+  if (type && type !== 'application/octet-stream') return null
+  const extension = /\.([a-z0-9]+)$/i.exec(String(filename ?? ''))?.[1]?.toLowerCase()
+  return (extension && DOCUMENT_EXTENSIONS[extension]) ?? null
+}
+
+/**
+ * Reads an OpenAI chat `file` part (`{ type: "file", file: { filename,
+ * file_data } }`, what @ai-sdk/openai-compatible sends for a PDF) into an image
+ * or a document. Anything the proxy cannot send is an `AttachmentError` (a
+ * 400) instead of being dropped, so the client sees why.
+ */
+export function attachmentFromFilePart(part) {
+  const file = part?.file ?? {}
+  const filename = typeof file.filename === 'string' && file.filename.trim() ? file.filename.trim() : 'attachment'
+  if (file.file_id) throw new AttachmentError(`${filename}: file_id references are not supported; send the bytes as file_data`)
+  const raw = typeof file.file_data === 'string' ? file.file_data : ''
+  const match = /^data:([^;,]*)((?:;[^;,]*)*);base64,(.*)$/s.exec(raw)
+  if (raw && !match && !/^[A-Za-z0-9+/=\s]+$/.test(raw)) throw new AttachmentError(`${filename}: file_data must be base64 or a base64 data URL`)
+  const data = Buffer.from(match ? match[3] : raw, 'base64')
+  if (!data.length) throw new AttachmentError(`${filename}: the file is empty`)
+  if (data.length > MAX_FILE_BYTES) throw new AttachmentError(`${filename}: larger than ${MAX_FILE_BYTES / 1024 / 1024} MB`)
+  const declared = match ? match[1] : ''
+  const image = imageFromBytes(declared, data)
+  if (image) return { kind: 'image', mediaId: image.mediaId, image }
+  const mimeType = documentType(declared, filename)
+  if (!mimeType) {
+    throw new AttachmentError(
+      `${filename} (${declared || 'unknown type'}) cannot be sent: Venice reads images (png, jpeg, webp, gif) and documents (${Object.keys(DOCUMENT_EXTENSIONS).join(', ')}, any text/*)`,
+    )
+  }
+  const mediaId = mediaIdOf(data)
+  return { kind: 'file', mediaId, file: { mediaId, mimeType, data, filename } }
+}
+
 /** The URL of an OpenAI `image_url` part (`{ url }` or a bare string), or null. */
 function imageUrlOf(part) {
   if (part?.type !== 'image_url') return null
@@ -373,21 +652,31 @@ export function imageFromDataUrl(url) {
 export function imageFromBytes(type, data) {
   const mimeType = String(type ?? '').split(';')[0].trim().toLowerCase()
   if (!IMAGE_TYPES.has(mimeType) || !data?.length) return null
-  const hex = createHash('sha256').update(data).digest('hex')
-  const mediaId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`
-  return { mediaId, mimeType, data }
+  return { mediaId: mediaIdOf(data), mimeType, data }
 }
 
 /**
- * Splits a user message into the images that travel as bytes and the text that
- * is left. Images the proxy cannot send (a remote URL, an unknown type, past
+ * Splits a user message into the images and files that travel as bytes and the
+ * text that is left. A `file` part the proxy cannot send is an `AttachmentError`. Images the proxy cannot send (a remote URL, an unknown type, past
  * `MAX_IMAGES`) stay in the text as `[image]`, like every older turn's do.
  */
 export function splitImages(content) {
-  if (!Array.isArray(content)) return { images: [], text: textOf(content) }
+  if (!Array.isArray(content)) return { images: [], files: [], text: textOf(content) }
   const images = []
+  const files = []
   const rest = []
   for (const part of content) {
+    if (part?.type === 'file') {
+      const attachment = attachmentFromFilePart(part)
+      if (attachment.kind === 'image') {
+        if (images.length >= MAX_IMAGES) throw new AttachmentError(`at most ${MAX_IMAGES} images per message`)
+        if (!images.some((known) => known.mediaId === attachment.mediaId)) images.push(attachment.image)
+        continue
+      }
+      if (files.length >= MAX_FILES) throw new AttachmentError(`at most ${MAX_FILES} files per message`)
+      if (!files.some((known) => known.mediaId === attachment.mediaId)) files.push(attachment.file)
+      continue
+    }
     const image = images.length < MAX_IMAGES ? imageFromDataUrl(imageUrlOf(part)) : null
     if (!image) {
       rest.push(part)
@@ -395,7 +684,7 @@ export function splitImages(content) {
     }
     if (!images.some((known) => known.mediaId === image.mediaId)) images.push(image)
   }
-  return { images, text: textOf(rest) }
+  return { images, files, text: textOf(rest) }
 }
 
 export function textOf(content) {
@@ -403,15 +692,33 @@ export function textOf(content) {
   if (content == null) return ''
   if (!Array.isArray(content)) return String(content)
   return content
-    .map((part) => (part?.type === 'text' ? (part.text ?? '') : part?.type === 'image_url' ? '[image]' : ''))
+    .map((part) => {
+      if (part?.type === 'text') return part.text ?? ''
+      if (part?.type === 'image_url') return '[image]'
+      if (part?.type === 'file') return `[file: ${part.file?.filename ?? 'attachment'}]`
+      return ''
+    })
     .filter(Boolean)
     .join('\n')
 }
 
-/** OpenAI reasoning_effort -> the web endpoint's three-valued switch. */
-export function reasoningMode(body) {
-  const effort = body?.reasoning_effort ?? body?.reasoningEffort ?? body?.reasoning?.effort
-  if (!effort || ['none', 'minimal', 'disabled', 'off'].includes(effort)) return { reasoningMode: 'disabled' }
+/** The values of the web endpoint's reasoning switch. */
+export const REASONING_MODES = new Set(['disabled', 'adaptive', 'enabled'])
+
+/**
+ * OpenAI reasoning_effort -> the web endpoint's three-valued switch: nothing,
+ * `none`, `minimal`, `low` (and `off` / `disabled`) turn it off, `medium` (and
+ * `auto` / `adaptive`) is `adaptive`, `high` and anything above it is
+ * `enabled`. `low` is off because clients without a `minimal` level (Codex
+ * desktop offers low/medium/high/...) have no other way to turn it off, and
+ * reasoning is what brings the native tool calls that Venice answers with "Tool
+ * not found" (docs/PROTOCOL.md §4.7). `force` (VENICE_WEB_REASONING) wins.
+ */
+export function reasoningMode(body, { force } = {}) {
+  if (REASONING_MODES.has(force)) return { reasoningMode: force }
+  const raw = body?.reasoning_effort ?? body?.reasoningEffort ?? body?.reasoning?.effort
+  const effort = typeof raw === 'string' ? raw.trim().toLowerCase() : raw
+  if (!effort || ['none', 'minimal', 'low', 'disabled', 'off'].includes(effort)) return { reasoningMode: 'disabled' }
   if (['adaptive', 'auto', 'medium'].includes(effort)) return { reasoningMode: 'adaptive' }
   return { reasoningMode: 'enabled' }
 }
@@ -427,9 +734,9 @@ function safeJson(value) {
 /**
  * Builds the upstream request.
  *
- * @returns {{ request: object, toolNames: Set<string>, toolSchemas: Map<string, object>, emulatedTools: boolean, images: {mediaId: string, mimeType: string, data: Buffer}[] }}
+ * @returns {{ request: object, toolNames: Set<string>, toolSchemas: Map<string, object>, emulatedTools: boolean, images: {mediaId: string, mimeType: string, data: Buffer}[], files: {mediaId: string, mimeType: string, data: Buffer, filename: string}[], media: object[] }}
  */
-export function toVeniceRequest(body) {
+export function toVeniceRequest(body, { reasoning } = {}) {
   if (!MODELS[body.model]) {
     throw new Error(`unknown model: ${body.model}. Known: ${Object.keys(MODELS).join(', ')}`)
   }
@@ -447,15 +754,59 @@ export function toVeniceRequest(body) {
 
   const instructions = []
   const messages = []
-  // Only the newest user message carries its images as images: in a tool loop
-  // that is the message that asked for the work, so the picture stays visible
-  // on every step, and an older picture is not resent once the user moves on.
-  const newestUser = body.messages.findLastIndex((message) => message?.role === 'user')
-  let images = []
+  // Only the request (the newest user message that is not a tool's output) and
+  // the tool outputs after it carry their images as images: in a tool loop the
+  // request's picture stays visible on every step, a picture a tool returned
+  // reaches the model (as `[image]` text it made the model describe a picture
+  // it never saw), and an older picture is not resent once the user moves on.
+  const plan = planImages(body.messages)
+  const images = []
+  const files = []
+  const mediaParts = new Map()
+  // where each numbered image came from, for the order note
+  const origins = new Map()
 
   for (const [index, message] of body.messages.entries()) {
     let text = textOf(message.content)
-    if (index === newestUser) ({ images, text } = splitImages(message.content))
+    const toolOutput = message.role === 'tool' || isToolOutputMessage(body.messages, index)
+    if (plan.sent.has(index)) {
+      const split = plan.splits.get(index)
+      const own = []
+      const numbers = []
+      let dropped = 0
+      let ownFiles = 0
+      for (const image of split.images) {
+        const number = plan.numbers.get(image.mediaId)
+        if (!number) {
+          dropped++
+          continue
+        }
+        if (!numbers.includes(number)) numbers.push(number)
+        if (images.some((known) => known.mediaId === image.mediaId)) continue
+        images.push(image)
+        own.push({ type: 'input_image', media_id: image.mediaId, detail: 'auto' })
+        origins.set(number, toolOutput ? { tool: toolCallOf(body.messages, index) } : { request: true })
+      }
+      for (const file of split.files) {
+        if (files.some((known) => known.mediaId === file.mediaId)) continue
+        if (files.length >= MAX_FILES) throw new AttachmentError(`at most ${MAX_FILES} files per request`)
+        files.push(file)
+        own.push({ type: 'input_file', media_id: file.mediaId, filename: file.filename })
+        ownFiles++
+      }
+      const lines = [split.text]
+      // older tool pictures past MAX_IMAGES stay placeholders
+      for (let i = 0; i < dropped; i++) lines.push('[image]')
+      // the tool result says which of the attached pictures are its own, so the
+      // model can tell a series of results apart (all of them sit together in
+      // the last user message)
+      if (toolOutput && numbers.length) {
+        lines.push(`[attached to the last user message as ${numbers.length === 1 ? 'image' : 'images'} ${numbers.map((number) => `#${number}`).join(', ')} of ${plan.numbers.size}]`)
+      }
+      if (toolOutput && ownFiles) lines.push(`[${ownFiles} file(s) from this tool output are attached to the last user message]`)
+      text = lines.filter(Boolean).join('\n')
+      mediaParts.set(index, own)
+    }
     if (message.role === 'system' || message.role === 'developer') {
       instructions.push(text)
       continue
@@ -469,6 +820,10 @@ export function toVeniceRequest(body) {
       // Tool results travel as a user message in the agent's own envelope shape.
       role = 'user'
       content = JSON.stringify({ tool_result: { tool_call_id: message.tool_call_id, content: text } })
+    } else if (toolOutput) {
+      // a tool's images sent as a user message (Codex's view_image): still the
+      // tool's output, so it reads as one and the turn stays a tool turn
+      content = JSON.stringify({ tool_result: { content: text } })
     }
 
     if (message.role === 'assistant') {
@@ -490,7 +845,7 @@ export function toVeniceRequest(body) {
 
     const parts = [{ type: 'output_text', text: content, annotations: [] }]
     // the image parts go first, the order the web client uses
-    if (index === newestUser) parts.unshift(...images.map((image) => ({ type: 'input_image', media_id: image.mediaId, detail: 'auto' })))
+    if (mediaParts.get(index)?.length) parts.unshift(...mediaParts.get(index))
     messages.push({
       id: randomUUID(),
       type: 'message',
@@ -530,20 +885,30 @@ export function toVeniceRequest(body) {
     })
   }
 
+  const placed = withImagesLast(messages)
+  const order = imageOrderNote(origins, body.messages)
+  if (order) {
+    const last = placed.findLastIndex((message) => message.role === 'user')
+    placed[last] = { ...placed[last], content: [...placed[last].content, { type: 'output_text', text: order, annotations: [] }] }
+  }
+
   return {
     request: {
-      modelId: body.model,
+      modelId: upstreamId(body.model),
       systemPrompt: { instructions: instructions.filter(Boolean).join('\n\n') },
-      messages: withImagesLast(messages),
+      messages: placed,
       tools: [],
       clientTools: [],
-      ...reasoningMode(body),
+      ...reasoningMode(body, { force: reasoning }),
     },
     toolNames: names,
     toolSchemas: new Map(tools.map((tool) => [tool.function.name, tool.function.parameters ?? {}])),
     emulatedTools: tools.length > 0,
-    // bytes for the `input_image` parts above; they travel as multipart fields
+    // bytes for the `input_image` / `input_file` parts above; they travel as
+    // multipart fields (`media` is both lists, images first)
     images,
+    files,
+    media: [...images, ...files],
   }
 }
 
@@ -1077,6 +1442,120 @@ export function fallbackAnswerText(text) {
 export function countTokens(text) {
   if (!text) return 0
   return Math.max(1, Math.ceil(String(text).length / 4))
+}
+
+/**
+ * Width and height read from a PNG, JPEG, GIF or WebP header, or null. Some
+ * image models upscale on their own (`chroma`, `lustify-v8`: 1024x1024 asked,
+ * 1536x1536 returned, 2026-11-25), so sizes reported back come from here.
+ */
+export function imageDimensions(data) {
+  if (!data?.length) return null
+  if (data.length >= 24 && data.toString('latin1', 1, 4) === 'PNG') return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) }
+  if (data.length >= 10 && data.toString('latin1', 0, 4) === 'GIF8') return { width: data.readUInt16LE(6), height: data.readUInt16LE(8) }
+  if (data.length >= 30 && data.toString('latin1', 0, 4) === 'RIFF' && data.toString('latin1', 8, 12) === 'WEBP') {
+    const chunk = data.toString('latin1', 12, 16)
+    if (chunk === 'VP8X') return { width: 1 + data.readUIntLE(24, 3), height: 1 + data.readUIntLE(27, 3) }
+    if (chunk === 'VP8 ') return { width: data.readUInt16LE(26) & 0x3fff, height: data.readUInt16LE(28) & 0x3fff }
+    if (chunk === 'VP8L') {
+      const bits = data.readUInt32LE(21)
+      return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 }
+    }
+  }
+  if (data[0] === 0xff && data[1] === 0xd8) {
+    // walk the JPEG segments to the first start-of-frame marker
+    let offset = 2
+    while (offset + 9 < data.length && data[offset] === 0xff) {
+      const marker = data[offset + 1]
+      const length = data.readUInt16BE(offset + 2)
+      if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) {
+        return { width: data.readUInt16BE(offset + 7), height: data.readUInt16BE(offset + 5) }
+      }
+      offset += 2 + length
+    }
+  }
+  return null
+}
+
+/** Estimate for an image whose size cannot be read: a 1024x1024 picture. */
+export const UNKNOWN_IMAGE_TOKENS = 765
+
+/**
+ * Tokens for one image the model sees, from its pixel size and never from its
+ * bytes: metadata or compression change the bytes, not what the model reads.
+ * Venice reports no image tokens, so this follows the common tile estimate
+ * (fit in 2048x2048, short side to 768, 170 tokens per 512-pixel tile plus 85).
+ */
+export function imageTokens(data) {
+  const size = imageDimensions(data)
+  if (!size?.width || !size?.height) return UNKNOWN_IMAGE_TOKENS
+  let { width, height } = size
+  const fit = Math.min(1, 2048 / width, 2048 / height)
+  width *= fit
+  height *= fit
+  const short = Math.min(1, 768 / Math.min(width, height))
+  width *= short
+  height *= short
+  return 85 + 170 * Math.ceil(width / 512) * Math.ceil(height / 512)
+}
+
+/** Bytes of a binary document (PDF, office) per estimated token of the text Venice extracts from it. */
+export const DOCUMENT_BYTES_PER_TOKEN = 16
+
+/**
+ * Tokens for one document: text types by their text, binary ones by the text
+ * already extracted (`texts`, mediaId -> text, on the classic route) or else a
+ * rough share of their bytes. The base64 is never counted as text.
+ */
+function documentTokens(file, texts) {
+  const known = texts?.get?.(file.mediaId)
+  if (typeof known === 'string') return countTokens(known)
+  if (/^text\/|json|xml/.test(file.mimeType)) return countTokens(file.data.toString('utf8'))
+  return Math.ceil(file.data.length / DOCUMENT_BYTES_PER_TOKEN)
+}
+
+/**
+ * Estimated prompt tokens of an OpenAI `messages` array, as the proxy sends it
+ * on: text and tool calls by their text; images and files of the request and
+ * of the tool outputs after it (the only ones sent as bytes,
+ * `attachmentIndexes()`) by what the model reads; older images and files by their `[image]` / `[file: …]` placeholder.
+ * Base64 never counts as text. Used for `usage.prompt_tokens` and the context
+ * window check. `texts` optionally maps a document's mediaId to its extracted text.
+ */
+export function promptTokens(messages, { texts } = {}) {
+  if (!Array.isArray(messages)) return 0
+  let plan
+  try {
+    plan = planImages(messages)
+  } catch {
+    plan = null // an attachment the request will refuse anyway: count placeholders
+  }
+  const counted = new Set()
+  let total = 0
+  messages.forEach((message, index) => {
+    if (!message) return
+    total += 4 // role and message framing
+    const content = message.content
+    if (plan?.sent.has(index) && Array.isArray(content)) {
+      const split = plan.splits.get(index)
+      if (split) {
+        total += countTokens(split.text)
+        for (const image of split.images) {
+          // an image past MAX_IMAGES is sent as `[image]`, a copy only once
+          if (!plan.numbers.has(image.mediaId)) total += countTokens('[image]')
+          else if (!counted.has(image.mediaId)) total += imageTokens(image.data)
+          counted.add(image.mediaId)
+        }
+        for (const file of split.files) total += countTokens(file.filename) + documentTokens(file, texts)
+      } else total += countTokens(textOf(content))
+    } else {
+      total += countTokens(textOf(content))
+    }
+    if (Array.isArray(message.tool_calls)) {
+      for (const call of message.tool_calls) total += countTokens(call?.function?.name) + countTokens(call?.function?.arguments)
+    }
+  })
+  return total
 }
 
 /**

@@ -2,7 +2,7 @@
 /**
  * Runs the stress tasks through a real OpenCode session and the proxy.
  *
- *   node scripts/stress/run.mjs [--model venice-web/deepseek-v4-1-flash-free]
+ *   node scripts/stress/run.mjs [--model venice-web/deepseek-v4-1-flash-uncensored]
  *                            [--base-url http://127.0.0.1:3457/v1] [--only id,id] [--parallel 2]
  *
  * With --base-url, OpenCode is pointed at that proxy through a temporary config
@@ -21,7 +21,7 @@ const option = (name, fallback) => {
   const index = args.indexOf(`--${name}`)
   return index >= 0 ? args[index + 1] : fallback
 }
-const model = option('model', 'venice-web/deepseek-v4-1-flash-free')
+const model = option('model', 'venice-web/deepseek-v4-1-flash-uncensored')
 const baseURL = option('base-url')
 const only = option('only')?.split(',')
 const parallel = Number(option('parallel', '2'))

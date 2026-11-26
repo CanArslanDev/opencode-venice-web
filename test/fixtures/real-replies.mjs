@@ -1,5 +1,5 @@
 /**
- * Model replies captured from real OpenCode sessions (deepseek-v4-1-flash-free,
+ * Model replies captured from real OpenCode sessions (deepseek-v4-1-flash-free, now deepseek-v4-1-flash-uncensored,
  * 2026-10-31 .. 2026-11-04) that the proxy mishandled.
  *
  * Paths, names and file contents are shortened and anonymised, but the
