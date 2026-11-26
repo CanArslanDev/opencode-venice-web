@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Upgrading: rerun the sync.** This version changes the model list, ids,
+  context limits and input types that OpenCode reads from its own
+  `opencode.json`. Run `./install.sh` again, or `venice-web-sync` (`node
+  src/sync.mjs`) on the machine where OpenCode runs, then restart OpenCode.
+  Until then OpenCode keeps the old list and lets prompts grow past what the
+  models really read. The proxy now warns: at start-up when the local
+  `opencode.json` differs from this version (`configDrift()`), and once per
+  model on a request with an old id or a prompt past the model's window
+  (`staleConfigHint()`), which also covers OpenCode on another machine; the
+  doctor checks it too. The sync keeps a `baseURL` that points at another
+  machine instead of resetting it to `127.0.0.1`, and takes `--base-url`.
+
 - **Measured limits for the three agent-route models.** The agent route never
   truncates a long prompt and never answers 413: past about 77% of the
   catalogue context (by its own count, characters / 3.2) it first runs a

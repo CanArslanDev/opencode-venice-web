@@ -36,6 +36,19 @@ Add `--with-nul-plugin` if you also use other providers from OpenCode (see [NUL 
 
 Then **restart OpenCode** and pick a model such as `venice-web/deepseek-v4-1-flash-uncensored`.
 
+### Updating
+
+Pull the new version and run `./install.sh` again (it reruns the sync). Updating by hand (`git pull`, `npm install -g .`), run the sync **on the machine where OpenCode runs** and restart OpenCode:
+
+```sh
+git pull
+venice-web-sync          # or: node src/sync.mjs
+```
+
+OpenCode reads the model list, the context limits and the input types from its own `opencode.json`, not from the proxy, so until the sync runs it keeps the old ones (old ids, limits larger than the models really read). The proxy says so: at start-up it checks the `opencode.json` on its own machine, and on each request it warns once about an old model id or a prompt past the model's real limit, which also covers OpenCode on another machine. `venice-web-doctor` reports it too.
+
+If the proxy runs on another machine (a VM, a server) and OpenCode reaches it at `http://<that-host>:3456/v1`, set the address once with `venice-web-sync --base-url http://<that-host>:3456/v1`; later syncs keep a base URL that does not point at this machine. The proxy then needs `VENICE_WEB_HOST=0.0.0.0` (or that host's address) to accept the connection.
+
 Or without cloning:
 
 ```sh
@@ -110,7 +123,7 @@ What that means for each model:
 - **Documents.** Every model takes PDFs and the other document types. On the classic route the proxy sends the document's text (Venice extracts it from the PDF first).
 - **Sampling.** `temperature`, `top_p` and `max_tokens` work on classic-route models; the agent route ignores them.
 
-`e2ee-qwen3-8-27b` is gone: it failed on every request on the classic route. The old id now points at `qwen-3-8-27b`. Rerun `venice-web-sync` after updating so OpenCode gets the new limits and input types.
+`e2ee-qwen3-8-27b` is gone: it failed on every request on the classic route. The old id now points at `qwen-3-8-27b`. Rerun `venice-web-sync` after updating so OpenCode gets the new limits and input types (see [Updating](#updating)).
 
 The catalogue lives in [`src/lib/models.mjs`](src/lib/models.mjs); edit it and rerun `venice-web-sync` if Venice adds models. If the web catalogue ships a model you want, run `GET /v1/models` (or `venice-web-doctor`) after adding it to verify it is reachable.
 
@@ -185,6 +198,7 @@ The same seed gives the same picture (byte for byte on most models; `wai-illu` a
 | `node src/sync.mjs` | add/update the OpenCode provider |
 | `node src/sync.mjs --default` | also set `model` and `small_model` |
 | `node src/sync.mjs --remove` | remove the provider again |
+| `node src/sync.mjs --base-url <url>` | point OpenCode at a proxy on another machine (kept by later syncs) |
 | `node src/doctor.mjs` | diagnose node/session/proxy/config |
 | `npm test` | unit tests for the parser and translator |
 | `node test/smoke.mjs` | end-to-end smoke test against a running proxy |
@@ -260,7 +274,7 @@ Common ones:
 
 ```sh
 node src/login.mjs                       # everything auth related
-node src/sync.mjs                        # provider missing from /models
+node src/sync.mjs                        # provider missing from /models, or after an update
 tail -f ~/.config/opencode/venice-web/proxy.log   # see each request and tool call
 launchctl kickstart -k gui/$(id -u)/ai.opencode.venice-web   # macOS: restart the service
 systemctl --user restart ai.opencode.venice-web               # Linux

@@ -157,6 +157,54 @@ export function openCodeModel(model, route) {
 }
 
 /**
+ * How the `models` of an OpenCode provider entry differ from what the sync
+ * would write now, with `routeOf(id)` the route the proxy uses for `id`.
+ * Pure. An OpenCode config written by an older version keeps old ids, misses
+ * new models and advertises old limits until the sync runs again; the proxy
+ * and the doctor use this to say so.
+ * @returns {{missing: string[], removed: string[], changed: string[]}}
+ */
+export function configDrift(configured = {}, routeOf = (id) => routeFor(id)) {
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b)
+  const missing = []
+  const changed = []
+  for (const [id, model] of Object.entries(MODELS)) {
+    const entry = configured[id]
+    if (!entry) missing.push(id)
+    else {
+      const want = openCodeModel(model, routeOf(id))
+      if (!same(entry.limit, want.limit) || !same(entry.modalities ?? null, want.modalities ?? null)) changed.push(id)
+    }
+  }
+  const removed = Object.keys(configured).filter((id) => !MODELS[id])
+  return { missing, removed, changed }
+}
+
+/** One line for a drift, or null when the config is current. */
+export function describeDrift({ missing, removed, changed }) {
+  const parts = []
+  if (missing.length) parts.push(`${missing.length} new model(s) missing`)
+  if (removed.length) parts.push(`${removed.length} old id(s) still listed (${removed.slice(0, 3).join(', ')}${removed.length > 3 ? ', …' : ''})`)
+  if (changed.length) parts.push(`${changed.length} model(s) with outdated limits or input types`)
+  return parts.length ? parts.join('; ') : null
+}
+
+/**
+ * Signs in one chat request that the client's OpenCode config predates this
+ * version: an old model id, or a prompt longer than the model really reads
+ * (OpenCode compacts at the advertised limit, so an old config lets the prompt
+ * grow past it). Works when OpenCode runs on another machine, where the proxy
+ * cannot read its config. Pure; returns a reason or null.
+ */
+export function staleConfigHint(requested, promptTokens, route) {
+  if (MODEL_ALIASES[requested]) return `OpenCode asked for the old id ${requested} (now ${MODEL_ALIASES[requested]})`
+  const model = MODELS[requested]
+  const window = model && windowFor(model, route)
+  if (window && promptTokens > window) return `a ~${promptTokens}-token prompt for ${requested}, which reads about ${window} (Venice drops or summarises the rest)`
+  return null
+}
+
+/**
  * Image models that are free (`GET /api/app/models`, section `image`,
  * `usesCredits: false`, or shown without a price in the web model picker).
  *

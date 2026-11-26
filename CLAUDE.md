@@ -36,6 +36,7 @@ test/images.test.mjs          image input: data URLs, which images are sent, pla
 test/classic.test.mjs         classic route: routes per model, request conversion, stream reader, merged runs, limits
 test/files.test.mjs           document input: file parts -> input_file, accepted types, 400s, OpenCode pdf modality
 test/server-loop.test.mjs     Venice tool-loop detection in collectStream (fake SSE)
+test/sync.test.mjs            OpenCode config drift, stale-config hints, sync output and base URL
 test/smoke.mjs                end-to-end check against a running proxy
 scripts/stress/               multilingual OpenCode stress tasks with their own verification (not in npm test)
 docs/PROTOCOL.md              upstream protocol + why tools are emulated + measurements
@@ -94,7 +95,7 @@ VENICE_WEB_DUMP=/tmp/req.json node src/proxy.mjs
 
 ## Changing the model catalogue
 
-`src/lib/models.mjs` is curated to `usesCredits: false` web models only. Credit-billed models are excluded because the agent endpoint may silently serve a different (free) model for them. A new model needs a `route` (agent only if an agent-route run shows its own `model_id`), a measured `window` on the classic route, and `vision` only if `servingModelId` stays the same with an image attached. After editing, rerun `node src/sync.mjs` so the OpenCode config picks up the new list.
+`src/lib/models.mjs` is curated to `usesCredits: false` web models only. Credit-billed models are excluded because the agent endpoint may silently serve a different (free) model for them. A new model needs a `route` (agent only if an agent-route run shows its own `model_id`), a measured `window` on the classic route, and `vision` only if `servingModelId` stays the same with an image attached. After editing, rerun `node src/sync.mjs` so the OpenCode config picks up the new list. Users' configs drift the same way after an update; `configDrift()` / `staleConfigHint()` in models.mjs make the proxy and the doctor say so, so a change to `openCodeModel()` output shows up there without further work.
 
 ## Version pins
 

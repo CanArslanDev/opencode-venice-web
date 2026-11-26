@@ -10,12 +10,32 @@
 import { createServer as createHttpServer } from 'node:http'
 import { fileURLToPath } from 'node:url'
 import { createServer } from './lib/server.mjs'
-import { host, port, requestTimeoutMs, sessionFile } from './lib/config.mjs'
+import { existsSync, readFileSync } from 'node:fs'
+import { chatRoute, host, opencodeConfig, port, providerID, requestTimeoutMs, sessionFile } from './lib/config.mjs'
 import { log, warn } from './lib/log.mjs'
 import { loadSession, mintToken } from './lib/venice.mjs'
-import { modelIds } from './lib/models.mjs'
+import { configDrift, describeDrift, modelIds, routeFor } from './lib/models.mjs'
 
 const loginCmd = fileURLToPath(new URL('./login.mjs', import.meta.url))
+const syncCmd = fileURLToPath(new URL('./sync.mjs', import.meta.url))
+
+/**
+ * After an update the OpenCode config still holds the old model list and
+ * limits until the sync runs again; nothing else would tell the user. Only
+ * the config on this machine can be checked (OpenCode elsewhere: the proxy
+ * warns per request instead, see handleChat).
+ */
+function checkOpenCodeConfig() {
+  try {
+    if (!existsSync(opencodeConfig)) return
+    const provider = JSON.parse(readFileSync(opencodeConfig, 'utf8')).provider?.[providerID]
+    if (!provider) return
+    const drift = describeDrift(configDrift(provider.models, (id) => routeFor(id, chatRoute)))
+    if (drift) warn(`OpenCode config ${opencodeConfig} is out of date (${drift}) - run: node ${syncCmd}  (or venice-web-sync), then restart OpenCode`)
+  } catch (error) {
+    warn(`could not check ${opencodeConfig}:`, error.message)
+  }
+}
 
 const http = createHttpServer({ requestTimeout: 0, headersTimeout: 0 })
 const handler = createServer()
@@ -33,6 +53,7 @@ http.on('request', (req, res) => {
 http.listen(port, host, async () => {
   log(`venice-web proxy on http://${host}:${port}/v1 - ${modelIds.length} free web models`)
   log(`session: ${sessionFile}`)
+  checkOpenCodeConfig()
   const session = await loadSession().catch((error) => {
     warn('could not read the session:', error.message)
     return null

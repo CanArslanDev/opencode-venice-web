@@ -30,7 +30,7 @@ import {
   toVeniceRequest,
   withRetryReminder,
 } from './emulate.mjs'
-import { DEFAULT_MODEL, IMAGE_MODELS, MODELS, resolveModelId, routeFor } from './models.mjs'
+import { DEFAULT_MODEL, IMAGE_MODELS, MODELS, resolveModelId, routeFor, staleConfigHint } from './models.mjs'
 import {
   CLASSIC_PATH,
   answerStarted,
@@ -647,11 +647,21 @@ async function handleImageEdits(req, res) {
   return answerImages(res, 'image edit', instructions, images, model, format)
 }
 
+/** Warned once per reason, so a stale OpenCode config does not flood the log. */
+const staleWarned = new Set()
+
 async function handleChat(req, res) {
   const body = await readJson(req)
+  const requested = body.model
   body.model = resolveModelId(body.model)
   const mapping = toVeniceRequest(body)
   mapping.route = routeFor(body.model, chatRoute)
+  const stale = staleConfigHint(requested, countTokens(JSON.stringify(body.messages ?? [])), mapping.route)
+  const staleKey = stale && (MODELS[requested] ? `window:${requested}` : `alias:${requested}`)
+  if (stale && !staleWarned.has(staleKey)) {
+    staleWarned.add(staleKey)
+    warn(`   ~ ${stale}. If OpenCode's config is from an older version, rerun venice-web-sync (node src/sync.mjs) where OpenCode runs and restart OpenCode.`)
+  }
   // honoured on the classic route only; the agent route ignores them
   mapping.sampling = samplingOptions(body, MODELS[body.model])
   mapping.documents = new Map()

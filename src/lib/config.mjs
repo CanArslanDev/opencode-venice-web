@@ -46,6 +46,9 @@ export const attestationTtlMs = 5 * 60 * 1000
 /** OpenCode provider id written by `sync.mjs`. */
 export const providerID = process.env.VENICE_WEB_PROVIDER_ID ?? 'venice-web'
 
+/** The OpenCode config file that `sync` writes and the proxy and doctor check. */
+export const opencodeConfig = process.env.OPENCODE_CONFIG ?? path.join(os.homedir(), '.config', 'opencode', 'opencode.json')
+
 export const debug = !!process.env.VENICE_WEB_DEBUG
 export const dumpFile = process.env.VENICE_WEB_DUMP
 

@@ -7,11 +7,11 @@
  *   node src/sync.mjs --default       # also make it the default + small model
  *   node src/sync.mjs --remove        # remove provider (and default if ours)
  *   node src/sync.mjs --config <path> # target another config file
+ *   node src/sync.mjs --base-url <url> # proxy on another machine (kept on later syncs)
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import os from 'node:os'
-import { chatRoute, port, providerID } from './lib/config.mjs'
+import { chatRoute, opencodeConfig, port, providerID } from './lib/config.mjs'
 import { DEFAULT_MODEL, DEFAULT_SMALL_MODEL, MODEL_ALIASES, MODELS, openCodeModel, routeFor } from './lib/models.mjs'
 import { log, warn } from './lib/log.mjs'
 
@@ -21,9 +21,26 @@ const flag = (name, fallback) => {
   return index >= 0 ? args[index + 1] : fallback
 }
 
-const configPath = path.resolve(
-  flag('config') ?? process.env.OPENCODE_CONFIG ?? path.join(os.homedir(), '.config', 'opencode', 'opencode.json'),
-)
+const configPath = path.resolve(flag('config') ?? opencodeConfig)
+
+/**
+ * `--base-url` wins; else a base URL the user pointed at another machine (the
+ * proxy on a VM or server) is kept, so a sync after an update does not cut
+ * OpenCode off; else the local proxy on `port`.
+ */
+function providerBaseURL(current, wanted) {
+  if (wanted) return wanted
+  try {
+    const { hostname } = new URL(current)
+    if (!['127.0.0.1', 'localhost', '[::1]', '::1'].includes(hostname)) {
+      log(`keeping baseURL ${current} (pass --base-url to change it)`)
+      return current
+    }
+  } catch {
+    /* no or broken base URL: write the default */
+  }
+  return `http://127.0.0.1:${port}/v1`
+}
 
 const config = existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : {}
 
@@ -34,10 +51,11 @@ if (args.includes('--remove')) {
 } else {
   config.$schema ??= 'https://opencode.ai/config.json'
   config.provider ??= {}
+  const baseURL = providerBaseURL(config.provider[providerID]?.options?.baseURL, flag('base-url'))
   config.provider[providerID] = {
     name: 'Venice Web (unlimited)',
     npm: '@ai-sdk/openai-compatible',
-    options: { baseURL: `http://127.0.0.1:${port}/v1`, apiKey: providerID },
+    options: { baseURL, apiKey: providerID },
     models: Object.fromEntries(
       Object.entries(MODELS).map(([id, model]) => [id, openCodeModel(model, routeFor(id, chatRoute))]),
     ),
