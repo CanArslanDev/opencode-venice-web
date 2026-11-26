@@ -215,14 +215,77 @@ Measured on the classic route:
 
 | models | prompt read on the classic route |
 | --- | --- |
-| `deepseek-v4-1-flash`, `zai-org-glm-5.2`, `z-ai-glm-5-3-flash` | all of it (355k tokens; 470k on GLM 5.2) |
+| `zai-org-glm-5.2` | all of it (470k tokens) |
+| `deepseek-v4-1-flash`, `z-ai-glm-5-3-flash` | ~550k / ~580k, far below the catalogue's 1M (see below) |
 | `qwen-3-8-27b` | ~150k (118k found, 177k not) |
 | 18 others (`qwen3-5-35b-a3b`: 38k found, 47k not) | ~40k |
 | `e2ee-qwen3-6-35b-a3b`, `e2ee-qwen-2-5-7b-p` | ~20k |
 | `e2ee-qwen3-vl-30b-a3b-p` | ~12k; above that HTTP 413 `userPromptTooLong` instead of truncation |
-| `deepseek-v4-1-flash-uncensored` | ~40k (the agent route reads 121k of the same prompt correctly) |
+| `deepseek-v4-1-flash-uncensored` | ~36k (36k read, 38k not; the agent route reads ~300k, see below) |
 
 The system prompt survives the truncation (a `systemPrompt` saying "reply ZEBRA" was obeyed under a 400k-character prompt). The cut is silent, so these numbers are the models' `window` in `src/lib/models.mjs` and what the sync gives OpenCode as the context limit (with the output limit capped at a fifth of it, since OpenCode compacts at context minus output); OpenCode compacts before Venice drops anything. `nvidia-nemotron-3-nano-30b-a3b` once answered the marker question by reciting a "CONTENT MODERATION RULES" system prompt, so some models get a Venice prompt even with `includeVeniceSystemPrompt: false`.
+
+**Limits of the three agent-route models, on both routes.** Measured 2026-11-25 with the same prompt shape (a code word at the very start, a marker line every ~5k tokens, and a question asking for the code word, the first and last marker seen, and one record about 3% in copied word for word, which no summary keeps), at increasing sizes up to and past the catalogue context. Token sizes are this English filler's tokens (4.29 characters each, from the agent route's `context_metadata.total_tokens`); `servingModelId` / `model_id` was the model asked for in every run.
+
+The agent route never truncates and never answers an HTTP error, even past the catalogue context. Instead it **compacts**: the stream starts with
+
+```
+veniceai:context_compaction.in_progress   { "message_count": 1 }
+response.output_item.done  { "item": { "type": "veniceai:compaction", "summary": "## Summary …", "original_token_count": 469383, "message_count": 1 } }
+veniceai:context_compaction.done          { "messages_compacted": 1, "media_count": 0 }
+```
+
+`original_token_count` is the prompt's characters / 3.2 (1502024 characters gave 469383), not the model's tokenizer. Compaction starts once that estimate passes about 77% of `max_context_length`. Just past that the "summary" is still the whole prompt (1.29M characters long on DeepSeek Uncensored at 300k tokens) and the model reads everything; a little further it is a ~5k-character summary, `total_tokens` drops to ~4.3k, the code word survives sometimes and the details never do.
+
+Agent route (`/api/inference/chat/agents/ad-hoc`):
+
+| model (catalogue context) | read whole, no compaction | compaction, prompt still whole | summary only (start and details lost) |
+| --- | --- | --- | --- |
+| `deepseek-v4-1-flash-uncensored` (524288) | up to 290k tokens, 1.24M characters (estimate 389k) | 300k (estimate 402k) | from 350k (estimate 469k); at 420k the code word was gone too; 530k (past the catalogue) the same, HTTP 200 |
+| `deepseek-v4-1-flash` (1000000) | up to 550k, 2.36M characters (estimate 737k) | 600k-650k (estimate 805k-872k) | from 700k (estimate 939k); 1010k the same, HTTP 200 |
+| `z-ai-glm-5-3-flash` (1048576) | up to 600k, 2.57M characters (estimate 805k) | 650k-700k (estimate 872k-939k) | from 750k (estimate 1006k); 1060k the same, HTTP 200 |
+
+Classic route (`/api/inference/chat`, `enableLargeContextChat: true`); the route reports no token counts, so sizes are the same prompts' sizes:
+
+| model | read whole | longer prompts |
+| --- | --- | --- |
+| `deepseek-v4-1-flash-uncensored` | up to 36k | the start dropped silently, the last ~30-36k tokens kept (first marker seen at 518k: 98) |
+| `deepseek-v4-1-flash` | up to 540k | the last ~550k kept (first marker seen: 41 at 750k, 81 at 950k, 89 at 990k) |
+| `z-ai-glm-5-3-flash` | up to 570k | the last ~580k kept (34 at 750k, 75 at 950k, 91 at 1030k) |
+
+No HTTP error on either route at any size (up to 4.4M characters). The record copied word for word was sometimes wrong even when everything was read (DeepSeek 1017 at 550k on the agent route, both models at 540k-570k on the classic route): that is recall at that length, not a limit. So every limit here was **reached**: on the classic route by truncation, on the agent route by compaction; none of the three reads its catalogue context on either route.
+
+`window` in `src/lib/models.mjs` is the agent-route limit in the proxy's own token count (characters / 4, `countTokens()`, what OpenCode compacts on), rounded down: 300000, 580000 and 640000. The compaction trigger counts characters, as the proxy does, so this holds for code as well as prose. `classicWindow` (35000, 540000, 570000) applies when `VENICE_WEB_CHAT_ROUTE=classic`. `collectStream()` records a `veniceai:compaction` item in `state.compacted` and the proxy logs `Venice compacted the prompt of …`.
+
+Output length, asked for a numbered list of 30000 lines (or 60000 bare numbers, with a system prompt saying long output is supported, for models that refused the first one); token counts from the agent route's `total_tokens`, with the output sent back as a prompt:
+
+| model | agent route | classic route |
+| --- | --- | --- |
+| `deepseek-v4-1-flash-uncensored` | ~291k tokens, all 30000 lines, `response.completed`: no 131072 cap | 131072 exactly, with `maxResponseTokens: 131072` and without it (cut mid-line); 200001 with `maxResponseTokens: 200000` |
+| `deepseek-v4-1-flash` | refused the list ("exceeds the maximum output length"); the bare numbers stopped at 131076 tokens mid-number, `response.completed` | 131072 exactly (`maxResponseTokens: 131072`) |
+| `z-ai-glm-5-3-flash` | refused the list; the bare numbers stopped at ~131.1k tokens (`total_tokens` 133989), `response.completed`; one earlier run ended at 47k with `response.failed` `workflow_failed` "LLM stream failed > Request error" | refused the list; bare numbers 131060 tokens (`maxResponseTokens: 131072`); with `maxResponseTokens: 200000` 193836 tokens, then the stream ended with `{"kind":"error","code":"stream_over_activity_timeout","error":"Streaming request exceeded the 900 second wall-clock limit."}` |
+
+No finish reason marks the cut on either route (the agent route says `completed`, the classic stream just ends). `maxResponseTokens` up to 1000000 is accepted (no 400) and honoured past the catalogue's 131072, but **the classic route stops every stream after 900 seconds** with the error line above (`classicReader()` turns it into an error, so the turn fails visibly); GLM writes ~215 tokens/s there, DeepSeek ~570. The agent route ran 476 s for DeepSeek Uncensored's 291k tokens without such a limit.
+
+Other differences on the same model (direct, then through the proxy):
+
+| check | agent route | classic route |
+| --- | --- | --- |
+| emulated tool calls through the proxy (one call, two parallel calls, answer after a tool result; 3 runs each) | 27/27 on the three models | 27/27 |
+| PDF (code word) | 3/3, Venice parses it (`veniceai:document_parsing`) | 3/3 through the proxy (text extracted by one agent-route call) |
+| image (red circle, "4719") | 3/3, `model_id` unchanged | 3/3, `servingModelId` unchanged |
+| reasoning | a `reasoning` item on all three | `reasoning_content` on all three |
+| `temperature: 0` (same prompt 4x) | ignored: 4 different sentences (DeepSeek Uncensored, GLM) | honoured: 4/4 identical on GLM, 3/4 on DeepSeek Uncensored |
+| `temperature: 2` | ignored (coherent text) | token soup on DeepSeek Uncensored (289k characters); DeepSeek 1017 and GLM stayed readable |
+| max tokens 20 | ignored (`max_output_tokens`, `maxOutputTokens`, `maxResponseTokens` in the body; ~1.5k characters) | honoured (75-106 characters) |
+| median time to first token, "Reply with exactly: PONG", 5 runs | 1.18 s / 1.34 s / 0.87 s | 0.72 s / 0.84 s / 0.60 s |
+| hidden prompt (`total_tokens` for a one-word prompt) | 2989 / 2989 / 2835 tokens | not reported (`includeVeniceSystemPrompt: false`) |
+| lock-picking how-to | answered by all three | refused by `deepseek-v4-1-flash` ("I can't provide instructions for picking locks"), answered by the other two |
+| profane pirate rant | written by all three | written by all three |
+
+(Times and token counts: DeepSeek Uncensored / DeepSeek 1017 / GLM 5.3 Flash.) Every response named the model asked for; none mentioned credits.
+
+The three models stay on the agent route: its usable context is as large as or larger than the classic route's (much larger on DeepSeek Uncensored), PDFs need no extra call, and it keeps the tool-emulation measurements of §4. The classic route answers faster and honours sampling settings; `VENICE_WEB_CHAT_ROUTE=classic` switches to it, with `classicWindow` as the limit.
 
 **What the proxy does.** Each model has a `route` (`routeFor()` in `src/lib/models.mjs`): `agent` for the three models the agent route runs (on DeepSeek Uncensored it reads more context than the classic route, and it keeps the measured behaviour of §4), `classic` for the rest. `VENICE_WEB_CHAT_ROUTE=classic|agent` forces one route for every model. The request is still built in the agent shape by `toVeniceRequest()` (tool emulation is text, so it is the same on both routes), and `toClassicRequest()` in `src/lib/classic.mjs` converts it at send time, retries included: text parts joined, consecutive messages of one role joined into one (`mergeRuns()`; the request and the format reminder, or a tool result and the reminder, would otherwise lose everything but the reminder), `input_image` parts as data URLs in `imagePath`, `systemPrompt` as a string, `reasoning` from `reasoningMode`, `enableLargeContextChat: true`, and the OpenAI `temperature` / `top_p` / `max_tokens` (clamped to 0-2, 0-1 and the model's output limit). `classicReader()` turns the lines into the agent route's event names, so `collectStream()` reads both. The proxy logs `asked for X, Venice answered with Y` whenever `servingModelId` or `model_id` differs from the model asked for. There is no Venice agent loop on the classic route, so the tool-loop guard (§4.7) never triggers there.
 

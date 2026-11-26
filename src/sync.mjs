@@ -11,8 +11,8 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { port, providerID } from './lib/config.mjs'
-import { DEFAULT_MODEL, DEFAULT_SMALL_MODEL, MODEL_ALIASES, MODELS, openCodeModel } from './lib/models.mjs'
+import { chatRoute, port, providerID } from './lib/config.mjs'
+import { DEFAULT_MODEL, DEFAULT_SMALL_MODEL, MODEL_ALIASES, MODELS, openCodeModel, routeFor } from './lib/models.mjs'
 import { log, warn } from './lib/log.mjs'
 
 const args = process.argv.slice(2)
@@ -39,7 +39,7 @@ if (args.includes('--remove')) {
     npm: '@ai-sdk/openai-compatible',
     options: { baseURL: `http://127.0.0.1:${port}/v1`, apiKey: providerID },
     models: Object.fromEntries(
-      Object.entries(MODELS).map(([id, model]) => [id, openCodeModel(model)]),
+      Object.entries(MODELS).map(([id, model]) => [id, openCodeModel(model, routeFor(id, chatRoute))]),
     ),
   }
   // move `model` / `small_model` off ids Venice renamed

@@ -39,17 +39,34 @@
  * Models without `window` read their whole catalogue context (checked up to
  * ~355k tokens; 473k on GLM 5.2).
  *
+ * On the three agent-route models `window` is the agent route's limit, which
+ * is not truncation but **compaction** (measured 2026-11-25 with the same
+ * markers plus a record quoted word for word, up to and past the catalogue
+ * context): once Venice's own estimate of the prompt (characters / 3.2) passes
+ * about 77% of `context`, the stream starts with a `veniceai:compaction` item,
+ * and a little further the model sees only that item's ~5k-character summary
+ * (the prompt's details are gone; `context_metadata.total_tokens` drops to
+ * ~4.3k). No HTTP error comes back even past the catalogue context. The
+ * largest prompts read whole without compaction were 1.24M characters on
+ * DeepSeek Uncensored, 2.36M on DeepSeek 1017 and 2.57M on GLM 5.3 Flash; the
+ * windows are those divided by 4, the proxy's own token count (`countTokens()`,
+ * what OpenCode compacts on), rounded down. The trigger counts characters, so
+ * the window holds for prose and code alike. `classicWindow` is the same
+ * model's limit on the classic route (`VENICE_WEB_CHAT_ROUTE=classic`), which
+ * keeps only the end of a longer prompt: the last ~36k tokens on DeepSeek
+ * Uncensored, ~550k on DeepSeek 1017, ~580k on GLM 5.3 Flash.
+ *
  * Ids are the catalogue's own `id`s. Ids the catalogue renamed live on in
  * `MODEL_ALIASES` so existing OpenCode configs keep working until the next sync.
  */
 export const MODELS = {
-  'deepseek-v4-1-flash-uncensored': { name: 'DeepSeek V4.1 Flash Uncensored (web)', route: 'agent', context: 524288, output: 131072, reasoning: true, vision: true },
-  'deepseek-v4-1-flash': { name: 'DeepSeek V4.1 Flash 1017 (web)', route: 'agent', context: 1000000, output: 131072, reasoning: true, vision: true },
+  'deepseek-v4-1-flash-uncensored': { name: 'DeepSeek V4.1 Flash Uncensored (web)', route: 'agent', context: 524288, window: 300000, classicWindow: 35000, output: 131072, reasoning: true, vision: true },
+  'deepseek-v4-1-flash': { name: 'DeepSeek V4.1 Flash 1017 (web)', route: 'agent', context: 1000000, window: 580000, classicWindow: 540000, output: 131072, reasoning: true, vision: true },
   'qwen-3-8-27b': { name: 'Qwen 3.8 27B (web)', context: 262144, window: 150000, output: 65536, reasoning: true, vision: true },
   'qwen3-6-27b': { name: 'Qwen 3.6 27B (web)', context: 256000, window: 40000, output: 65536, reasoning: true, vision: true },
   'qwen3-5-35b-a3b': { name: 'Qwen 3.5 35B A3B (web)', context: 256000, window: 40000, output: 16384, reasoning: true, vision: true },
   'zai-org-glm-5.2': { name: 'GLM 5.2 (web)', context: 1000000, output: 131072, reasoning: true, vision: false },
-  'z-ai-glm-5-3-flash': { name: 'GLM 5.3 Flash (web)', route: 'agent', context: 1048576, output: 131072, reasoning: true, vision: true },
+  'z-ai-glm-5-3-flash': { name: 'GLM 5.3 Flash (web)', route: 'agent', context: 1048576, window: 640000, classicWindow: 570000, output: 131072, reasoning: true, vision: true },
   'zai-org-glm-4.7-app': { name: 'GLM 4.7 (web)', context: 198000, window: 40000, output: 16384, reasoning: false, vision: false },
   'olafangensan-glm-4.7-flash-heretic': { name: 'GLM 4.7 Flash Heretic (web)', context: 200000, window: 40000, output: 24000, reasoning: true, vision: false },
   'qwen3-coder-480b-a35b-instruct-turbo': { name: 'Qwen 3 Coder 480B Turbo (web)', context: 256000, window: 40000, output: 65536, reasoning: false, vision: false },
@@ -105,17 +122,31 @@ export const DEFAULT_SMALL_MODEL = 'qwen3-5-35b-a3b'
 export const modelIds = Object.keys(MODELS)
 
 /**
+ * The prompt the model really reads on `route` (`agent` or `classic`, default
+ * its own route): `classicWindow` on the classic route when the model has one,
+ * else `window`; undefined when the model reads its whole catalogue context.
+ */
+export function windowFor(model, route = model.route === 'agent' ? 'agent' : 'classic') {
+  return (route === 'classic' ? model.classicWindow : undefined) ?? model.window
+}
+
+/**
  * The OpenCode config entry for a text model. Every model here reads documents
  * (measured 2026-11-25: a PDF with a code word, all 27 answered it; .txt and .md
  * too on the ones tried), so `pdf` input is advertised unless a model says
  * `documents: false`. Without it OpenCode does not send an attached PDF.
+ *
+ * `route` is the route the proxy will use for this model (`routeFor()` with
+ * `VENICE_WEB_CHAT_ROUTE`): an agent-route model forced onto the classic route
+ * gets its `classicWindow`.
  */
-export function openCodeModel(model) {
+export function openCodeModel(model, route) {
   const input = ['text', ...(model.vision ? ['image'] : []), ...(model.documents === false ? [] : ['pdf'])]
-  const context = model.window ?? model.context
+  const window = windowFor(model, route)
+  const context = window ?? model.context
   // OpenCode compacts at `context - output`; with a small window the full
   // output limit would leave almost no room for the conversation
-  const output = model.window ? Math.min(model.output, Math.floor(model.window / 5)) : model.output
+  const output = window ? Math.min(model.output, Math.floor(window / 5)) : model.output
   return {
     name: model.name,
     tool_call: true,

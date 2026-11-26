@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **Measured limits for the three agent-route models.** The agent route never
+  truncates a long prompt and never answers 413: past about 77% of the
+  catalogue context (by its own count, characters / 3.2) it first runs a
+  `veniceai:compaction` step, and a little further the model sees only a
+  ~5k-character summary of the prompt. Largest prompts read whole:
+  `deepseek-v4-1-flash-uncensored` 1.24M characters (~300k tokens, catalogue
+  524k), `deepseek-v4-1-flash` 2.36M (~550k, catalogue 1M),
+  `z-ai-glm-5-3-flash` 2.57M (~600k, catalogue 1M). The sync now gives OpenCode
+  those as the context limit (300k / 580k / 640k in the proxy's own token
+  count) instead of the catalogue's, and the proxy warns when Venice compacts.
+  On the classic route the same models keep the last ~36k / ~550k / ~580k
+  tokens; that is `classicWindow`, used when `VENICE_WEB_CHAT_ROUTE=classic`.
+  Output: 131072 tokens on both routes (classic: `maxResponseTokens`, honoured
+  above it too; DeepSeek Uncensored wrote ~291k on the agent route). The
+  classic route ends every stream after 900 seconds with
+  `stream_over_activity_timeout`, which the proxy reports as an error.
+  PROTOCOL §2d.
+
 - **Every model now really is the model you picked.** The agent route the proxy
   used for all chat runs only `deepseek-v4-1-flash-uncensored`,
   `deepseek-v4-1-flash` and `z-ai-glm-5-3-flash`; for the other 24 models it

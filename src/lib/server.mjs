@@ -126,7 +126,7 @@ function modelList() {
  * The returned generator resolves to the collected state. With `stopServerLoop`
  * it stops early when Venice's own agent loop runs past `SERVER_LOOP_STEPS` and
  * sets `serverLoop` (see the comment in `apply`).
- * @returns {AsyncGenerator<object, {text: string, answer: string, reasoning: string, terminal: boolean, chunks: object[], steps: Set<string>, nativeTools: Set<string>, serverLoop: boolean}>}
+ * @returns {AsyncGenerator<object, {text: string, answer: string, reasoning: string, terminal: boolean, chunks: object[], steps: Set<string>, nativeTools: Set<string>, serverLoop: boolean, compacted: ?{originalTokens: ?number, summaryChars: number}}>}
  */
 export async function* collectStream(upstreamBody, mapping, chunk, { stopServerLoop = false } = {}) {
   const reader = upstreamBody.getReader()
@@ -144,6 +144,7 @@ export async function* collectStream(upstreamBody, mapping, chunk, { stopServerL
     serverLoop: false,
     events: {},
     servedModel: null,
+    compacted: null,
   }
   const itemTypes = new Map()
 
@@ -159,6 +160,14 @@ export async function* collectStream(upstreamBody, mapping, chunk, { stopServerL
     }
     if (event.type === 'response.output_item.added' && event.item?.type) {
       itemTypes.set(event.output_index, event.item.type)
+    }
+    // The agent route compacts a prompt that is too long for it: once Venice's
+    // own estimate (characters / 3.2) passes about 77% of the model's context it
+    // runs a `veniceai:compaction` item first, and past a little more the model
+    // sees only that item's ~5k-character summary instead of the prompt (§2d).
+    // Nothing else in the stream says so, so it is reported here.
+    if (event.type === 'response.output_item.done' && event.item?.type === 'veniceai:compaction') {
+      state.compacted = { originalTokens: event.item.original_token_count ?? null, summaryChars: String(event.item.summary ?? '').length }
     }
     // Venice runs its own agent loop inside one response. When the model calls a
     // tool natively instead of through the envelope, Venice tries to run it
@@ -421,6 +430,9 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
 
   if (!state.terminal) throw new Error('the Venice stream ended before response.completed')
   if (state.servedModel && state.servedModel !== body.model) warn(`   ~ asked for ${body.model}, Venice answered with ${state.servedModel}`)
+  if (state.compacted) {
+    warn(`   ~ Venice compacted the prompt of ${body.model} (${state.compacted.originalTokens ?? '?'} estimated tokens, summary of ${state.compacted.summaryChars} characters)`)
+  }
   for (const buffered of state.chunks) yield buffered
 
   let finish = 'stop'

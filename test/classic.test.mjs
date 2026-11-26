@@ -14,7 +14,7 @@ import {
   toClassicRequest,
 } from '../src/lib/classic.mjs'
 import { toVeniceRequest, withRetryReminder } from '../src/lib/emulate.mjs'
-import { MODELS, routeFor } from '../src/lib/models.mjs'
+import { MODELS, routeFor, windowFor } from '../src/lib/models.mjs'
 import { collectStream } from '../src/lib/server.mjs'
 
 const enc = new TextEncoder()
@@ -294,14 +294,80 @@ test('collectStream reports the model the agent route really used', async () => 
   assert.equal(state.servedModel, 'deepseek-v4-1-flash-uncensored')
 })
 
+test('collectStream notices an agent-route compaction and keeps its summary out of the answer', async () => {
+  // shape of a real stream (deepseek-v4-1-flash-uncensored, a 1.5M-character
+  // prompt, 2026-11-25), summary shortened
+  const sse = [
+    'event: veniceai:context_compaction.in_progress',
+    'data: {"item_id":"compact_1","message_count":1,"output_index":0}',
+    '',
+    'event: response.output_item.added',
+    'data: {"output_index":0,"item":{"type":"veniceai:compaction","id":"compact_1","status":"completed","summary":"## Summary\\nUser provided content.","original_token_count":469383,"message_count":1}}',
+    '',
+    'event: response.output_item.done',
+    'data: {"output_index":0,"item":{"type":"veniceai:compaction","id":"compact_1","status":"completed","summary":"## Summary\\nUser provided content.","original_token_count":469383,"message_count":1}}',
+    '',
+    'event: veniceai:context_compaction.done',
+    'data: {"item_id":"compact_1","messages_compacted":1,"media_count":0,"output_index":0}',
+    '',
+    'event: response.output_item.added',
+    'data: {"output_index":2,"item":{"type":"message","id":"agent-node:llm:0"}}',
+    '',
+    'event: response.output_text.delta',
+    'data: {"output_index":2,"delta":"CODE=UNKNOWN"}',
+    '',
+    'event: response.output_item.done',
+    'data: {"output_index":2,"item":{"type":"message","id":"agent-node:llm:0","status":"completed","model_id":"deepseek-v4-1-flash-uncensored"}}',
+    '',
+    'event: response.completed',
+    'data: {"response":{"status":"completed"}}',
+    '',
+    '',
+  ].join('\n')
+  const { state } = await drain(collectStream(streamOf(sse), { emulatedTools: false, request: {} }, (delta) => delta))
+  assert.equal(state.answer, 'CODE=UNKNOWN')
+  assert.deepEqual(state.compacted, { originalTokens: 469383, summaryChars: 33 })
+})
+
+test('agent-route models: the window stops before Venice compacts, the classic window applies when forced', () => {
+  for (const id of ['deepseek-v4-1-flash-uncensored', 'deepseek-v4-1-flash', 'z-ai-glm-5-3-flash']) {
+    const model = MODELS[id]
+    assert.ok(model.window < model.context, id)
+    // the compaction trigger counts characters: ~77% of the context at 3.2 characters a token,
+    // and the proxy counts 4 characters a token
+    assert.ok(model.window <= (model.context * 0.77 * 3.2) / 4, id)
+    assert.equal(windowFor(model), model.window)
+    assert.equal(windowFor(model, 'classic'), model.classicWindow)
+  }
+  assert.equal(windowFor(MODELS['qwen3-5-35b-a3b'], 'classic'), 40000)
+  assert.equal(windowFor(MODELS['zai-org-glm-5.2']), undefined)
+})
+
 test('openCodeModel: the classic window is the context limit, with room left for the conversation', async () => {
   const { openCodeModel } = await import('../src/lib/models.mjs')
   const small = openCodeModel(MODELS['qwen3-coder-480b-a35b-instruct-turbo'])
   assert.deepEqual(small.limit, { context: 40000, output: 8000 })
   const full = openCodeModel(MODELS['zai-org-glm-5.2'])
   assert.deepEqual(full.limit, { context: 1000000, output: 131072 })
+  assert.deepEqual(openCodeModel(MODELS['deepseek-v4-1-flash-uncensored'], 'agent').limit, { context: 300000, output: 60000 })
+  assert.deepEqual(openCodeModel(MODELS['deepseek-v4-1-flash-uncensored'], 'classic').limit, { context: 35000, output: 7000 })
   for (const model of Object.values(MODELS)) {
-    const { limit } = openCodeModel(model)
-    assert.ok(limit.context - limit.output >= limit.context * 0.75, model.name)
+    for (const route of ['agent', 'classic']) {
+      const { limit } = openCodeModel(model, route)
+      assert.ok(limit.context - limit.output >= limit.context * 0.75, model.name)
+    }
   }
+})
+
+test('classicReader: the 900-second wall-clock cut is an error, not a finished answer', () => {
+  // the last lines of a real classic stream (z-ai-glm-5-3-flash, maxResponseTokens 200000, 2026-11-25)
+  const text = [
+    '{"content":"46996\n","kind":"content"}',
+    '{"kind":"error","code":"stream_over_activity_timeout","error":"Streaming request exceeded the 900 second wall-clock limit."}',
+    '',
+  ].join('\n')
+  const events = feedAll(classicReader(), text)
+  assert.equal(events.at(-1).type, 'error')
+  assert.match(events.at(-1).message, /900 second/)
+  assert.ok(!events.some((event) => event.type === 'response.completed'))
 })
