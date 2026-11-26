@@ -15,6 +15,7 @@ import {
   applyFallback,
   buildJudgeRequest,
   countTokens,
+  promptTokens,
   inspectCalls,
   judgeDecision,
   parseJudgeVerdict,
@@ -455,7 +456,7 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
     }
   }
 
-  const prompt = countTokens(JSON.stringify(body.messages ?? []))
+  const prompt = promptTokens(body.messages, { texts: documentTexts(mapping.documents) })
   const completion = countTokens(contentForUsage) + countTokens(state.reasoning)
   yield chunk({}, finish, {
     usage: { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion },
@@ -651,6 +652,13 @@ async function handleImageEdits(req, res) {
   return answerImages(res, 'image edit', instructions, images, model, format)
 }
 
+/** mediaId -> extracted text of the documents the classic route already read, for the token estimate. */
+function documentTexts(documents) {
+  const texts = new Map()
+  for (const [mediaId, document] of documents ?? []) if (typeof document?.text === 'string') texts.set(mediaId, document.text)
+  return texts
+}
+
 /** Warned once per reason, so a stale OpenCode config does not flood the log. */
 const staleWarned = new Set()
 
@@ -660,7 +668,7 @@ async function handleChat(req, res) {
   body.model = resolveModelId(body.model)
   const mapping = toVeniceRequest(body)
   mapping.route = routeFor(body.model, chatRoute)
-  const stale = staleConfigHint(requested, countTokens(JSON.stringify(body.messages ?? [])), mapping.route)
+  const stale = staleConfigHint(requested, promptTokens(body.messages), mapping.route)
   const staleKey = stale && (MODELS[requested] ? `window:${requested}` : `alias:${requested}`)
   if (stale && !staleWarned.has(staleKey)) {
     staleWarned.add(staleKey)

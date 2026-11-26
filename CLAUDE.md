@@ -39,6 +39,7 @@ test/classic.test.mjs         classic route: routes per model, request conversio
 test/files.test.mjs           document input: file parts -> input_file, accepted types, 400s, OpenCode pdf modality
 test/server-loop.test.mjs     Venice tool-loop detection in collectStream (fake SSE)
 test/sync.test.mjs            OpenCode config drift, stale-config hints, sync output and base URL
+test/tokens.test.mjs          prompt token estimate: images by pixels not bytes, documents, long text, tool calls
 test/smoke.mjs                end-to-end check against a running proxy
 scripts/stress/               multilingual OpenCode stress tasks with their own verification (not in npm test)
 docs/PROTOCOL.md              upstream protocol + why tools are emulated + measurements
@@ -82,6 +83,7 @@ VENICE_WEB_DUMP=/tmp/req.json node src/proxy.mjs
 * Broken envelopes are repaired by structure (`readLenient()`), never by guessing at the text; calls are checked against the tool's JSON schema (`inspectCalls()`) and sent back to the model when they cannot run. Add every new broken shape to `test/fixtures/real-replies.mjs`.
 * The model sometimes answers `{"content":"","tool_calls":[]}`. That becomes an assistant turn with **no parts**, `finish: stop`, no error: the client shows nothing and the session looks frozen. `isEmptyAnswer()` / `shouldRetry()` / `preferAnswer()` / `applyFallback()` in `src/lib/emulate.mjs` exist for exactly this; never forward empty content.
 * NUL bytes in the payload make Venice answer `400 String must not contain null bytes` (only when they land in `systemPrompt`, but that is enough to kill a session). `src/lib/sanitize.mjs` scrubs them; do not remove that step, and keep the body-repair before `JSON.parse` (JSON forbids raw control characters in strings).
+* Never estimate tokens from `JSON.stringify(messages)`: attachments are base64. `promptTokens()` (emulate.mjs) counts text, images by pixel size (`imageTokens()`), documents by their text, older attachments as placeholders; it feeds `usage.prompt_tokens` and the window check.
 * Clerk rotates `__client` on use - always read `set-cookie` and persist.
 * `/agents/ad-hoc` runs **Venice's own agent loop** inside one response. A native tool call (instead of the envelope) makes Venice answer "Tool not found" and re-run the model, up to 10 times, invisibly; the model then claims its tools are broken and stops without a result. `collectStream()` counts `veniceai:tool_call_generation` steps and stops past `SERVER_LOOP_STEPS`, then retries with `NATIVE_CALL_REMINDER`. Keep the last retry unstopped so a turn always ends with an answer. `docs/PROTOCOL.md` §4.7.
 * Images travel as **bytes in the request**, multipart (`request` + `media.<id>`), with an `input_image` part naming the id; nothing is uploaded and no id has to exist upstream. The image parts must sit in the **last** user message (`withImagesLast()`): earlier, the model calls Venice's `view_media` into the envelope and never sees the picture (0/5 vs 5/5). Only the latest user message's images are sent. `docs/PROTOCOL.md` §2b.

@@ -1197,6 +1197,117 @@ export function countTokens(text) {
 }
 
 /**
+ * Width and height read from a PNG, JPEG, GIF or WebP header, or null. Some
+ * image models upscale on their own (`chroma`, `lustify-v8`: 1024x1024 asked,
+ * 1536x1536 returned, 2026-11-25), so sizes reported back come from here.
+ */
+export function imageDimensions(data) {
+  if (!data?.length) return null
+  if (data.length >= 24 && data.toString('latin1', 1, 4) === 'PNG') return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) }
+  if (data.length >= 10 && data.toString('latin1', 0, 4) === 'GIF8') return { width: data.readUInt16LE(6), height: data.readUInt16LE(8) }
+  if (data.length >= 30 && data.toString('latin1', 0, 4) === 'RIFF' && data.toString('latin1', 8, 12) === 'WEBP') {
+    const chunk = data.toString('latin1', 12, 16)
+    if (chunk === 'VP8X') return { width: 1 + data.readUIntLE(24, 3), height: 1 + data.readUIntLE(27, 3) }
+    if (chunk === 'VP8 ') return { width: data.readUInt16LE(26) & 0x3fff, height: data.readUInt16LE(28) & 0x3fff }
+    if (chunk === 'VP8L') {
+      const bits = data.readUInt32LE(21)
+      return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 }
+    }
+  }
+  if (data[0] === 0xff && data[1] === 0xd8) {
+    // walk the JPEG segments to the first start-of-frame marker
+    let offset = 2
+    while (offset + 9 < data.length && data[offset] === 0xff) {
+      const marker = data[offset + 1]
+      const length = data.readUInt16BE(offset + 2)
+      if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) {
+        return { width: data.readUInt16BE(offset + 7), height: data.readUInt16BE(offset + 5) }
+      }
+      offset += 2 + length
+    }
+  }
+  return null
+}
+
+/** Estimate for an image whose size cannot be read: a 1024x1024 picture. */
+export const UNKNOWN_IMAGE_TOKENS = 765
+
+/**
+ * Tokens for one image the model sees, from its pixel size and never from its
+ * bytes: metadata or compression change the bytes, not what the model reads.
+ * Venice reports no image tokens, so this follows the common tile estimate
+ * (fit in 2048x2048, short side to 768, 170 tokens per 512-pixel tile plus 85).
+ */
+export function imageTokens(data) {
+  const size = imageDimensions(data)
+  if (!size?.width || !size?.height) return UNKNOWN_IMAGE_TOKENS
+  let { width, height } = size
+  const fit = Math.min(1, 2048 / width, 2048 / height)
+  width *= fit
+  height *= fit
+  const short = Math.min(1, 768 / Math.min(width, height))
+  width *= short
+  height *= short
+  return 85 + 170 * Math.ceil(width / 512) * Math.ceil(height / 512)
+}
+
+/** Bytes of a binary document (PDF, office) per estimated token of the text Venice extracts from it. */
+export const DOCUMENT_BYTES_PER_TOKEN = 16
+
+/**
+ * Tokens for one document: text types by their text, binary ones by the text
+ * already extracted (`texts`, mediaId -> text, on the classic route) or else a
+ * rough share of their bytes. The base64 is never counted as text.
+ */
+function documentTokens(file, texts) {
+  const known = texts?.get?.(file.mediaId)
+  if (typeof known === 'string') return countTokens(known)
+  if (/^text\/|json|xml/.test(file.mimeType)) return countTokens(file.data.toString('utf8'))
+  return Math.ceil(file.data.length / DOCUMENT_BYTES_PER_TOKEN)
+}
+
+/**
+ * Estimated prompt tokens of an OpenAI `messages` array, as the proxy sends it
+ * on: text and tool calls by their text; images and files of the latest user
+ * message (the only ones sent as bytes, `splitImages()`) by what the model
+ * reads; older images and files by their `[image]` / `[file: …]` placeholder.
+ * Base64 never counts as text. Used for `usage.prompt_tokens` and the context
+ * window check. `texts` optionally maps a document's mediaId to its extracted text.
+ */
+export function promptTokens(messages, { texts } = {}) {
+  if (!Array.isArray(messages)) return 0
+  let latestUser = -1
+  messages.forEach((message, index) => {
+    if (message?.role === 'user') latestUser = index
+  })
+  let total = 0
+  messages.forEach((message, index) => {
+    if (!message) return
+    total += 4 // role and message framing
+    const content = message.content
+    if (index === latestUser && Array.isArray(content)) {
+      let split
+      try {
+        split = splitImages(content)
+      } catch {
+        split = null // an attachment the request will refuse anyway: count its placeholder
+      }
+      if (split) {
+        total += countTokens(split.text)
+        for (const image of split.images) total += imageTokens(image.data)
+        for (const file of split.files) total += countTokens(file.filename) + documentTokens(file, texts)
+      } else total += countTokens(textOf(content))
+    } else {
+      total += countTokens(textOf(content))
+    }
+    if (Array.isArray(message.tool_calls)) {
+      for (const call of message.tool_calls) total += countTokens(call?.function?.name) + countTokens(call?.function?.arguments)
+    }
+  })
+  return total
+}
+
+/**
  * Incremental SSE frame reader for the Venice stream: `event:`/`data:` lines,
  * `:` comments as keepalives, `[DONE]` terminator.
  */

@@ -227,21 +227,5 @@ export function studioImageMeta(headers) {
   }
 }
 
-/**
- * Width and height read from PNG or WebP bytes, or null. Some models upscale on
- * their own (`chroma`, `lustify-v8`: 1024x1024 asked, 1536x1536 returned,
- * 2026-11-25), so the size reported back is the picture's, not the request's.
- */
-export function imageSize(data) {
-  if (data.length >= 24 && data.toString('latin1', 1, 4) === 'PNG') return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) }
-  if (data.length >= 30 && data.toString('latin1', 0, 4) === 'RIFF' && data.toString('latin1', 8, 12) === 'WEBP') {
-    const chunk = data.toString('latin1', 12, 16)
-    if (chunk === 'VP8X') return { width: 1 + data.readUIntLE(24, 3), height: 1 + data.readUIntLE(27, 3) }
-    if (chunk === 'VP8 ') return { width: data.readUInt16LE(26) & 0x3fff, height: data.readUInt16LE(28) & 0x3fff }
-    if (chunk === 'VP8L') {
-      const bits = data.readUInt32LE(21)
-      return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 }
-    }
-  }
-  return null
-}
+/** Width and height from an image's header (`imageDimensions()` in emulate.mjs). */
+export { imageDimensions as imageSize } from './emulate.mjs'

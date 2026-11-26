@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Token estimate no longer counts base64 as text.** `usage.prompt_tokens`
+  and the context-window warning used `countTokens(JSON.stringify(messages))`,
+  so one screenshot (a few MB of base64) counted as hundreds of thousands of
+  tokens and set off the "prompt past the window" warning. `promptTokens()`
+  now counts text and tool calls by their text, images of the latest user
+  message by their pixel size (tile estimate, never their bytes), documents by
+  their text (or the classic route's extracted text, or a share of a binary
+  file's bytes), and older attachments by their `[image]` / `[file: …]`
+  placeholder, which is what the proxy sends.
+
 - **`GET /v1/images/models`.** Clients can discover the image models of the
   instance: generation and edit apart, each with id, name, `default`, `nsfw`
   and the controls it really takes on the active route (type, default, limits,
