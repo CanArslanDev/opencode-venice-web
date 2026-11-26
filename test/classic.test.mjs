@@ -371,3 +371,21 @@ test('classicReader: the 900-second wall-clock cut is an error, not a finished a
   assert.match(events.at(-1).message, /900 second/)
   assert.ok(!events.some((event) => event.type === 'response.completed'))
 })
+
+test('route variants: the -classic ids send the base model on the classic route', async () => {
+  const { upstreamId } = await import('../src/lib/models.mjs')
+  for (const [variant, base] of [['deepseek-v4-1-flash-classic', 'deepseek-v4-1-flash'], ['z-ai-glm-5-3-flash-classic', 'z-ai-glm-5-3-flash']]) {
+    assert.equal(upstreamId(variant), base)
+    assert.equal(upstreamId(base), base)
+    assert.equal(routeFor(variant), 'classic')
+    assert.equal(routeFor(variant, 'agent'), 'classic', 'the override does not move a variant')
+    assert.equal(routeFor(base), 'agent')
+    assert.equal(windowFor(MODELS[variant]), MODELS[base].classicWindow)
+    const { request } = toVeniceRequest({ model: variant, messages: [{ role: 'user', content: 'hi' }] })
+    assert.equal(request.modelId, base)
+    assert.equal(toClassicRequest(request).modelId, base)
+  }
+  assert.equal(MODELS['deepseek-v4-1-flash-uncensored-classic'], undefined)
+  // every upstream id is a real catalogue model, never another variant
+  for (const model of Object.values(MODELS)) if (model.upstream) assert.ok(MODELS[model.upstream] && !MODELS[model.upstream].upstream)
+})

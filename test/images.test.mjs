@@ -143,6 +143,7 @@ test('vision is advertised only where the model itself read the picture', () => 
   const vision = Object.entries(MODELS).filter(([, model]) => model.vision).map(([id]) => id)
   assert.deepEqual(vision.sort(), [
     'deepseek-v4-1-flash',
+    'deepseek-v4-1-flash-classic',
     'deepseek-v4-1-flash-uncensored',
     'e2ee-qwen3-vl-30b-a3b-p',
     'gemma4-uncensored',
@@ -154,6 +155,7 @@ test('vision is advertised only where the model itself read the picture', () => 
     'qwen3-vl-235b-a22b',
     'venice-uncensored-1-2',
     'z-ai-glm-5-3-flash',
+    'z-ai-glm-5-3-flash-classic',
   ])
   for (const model of Object.values(MODELS)) assert.equal(typeof model.vision, 'boolean')
 })

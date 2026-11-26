@@ -67,6 +67,12 @@ export const MODELS = {
   'qwen3-5-35b-a3b': { name: 'Qwen 3.5 35B A3B (web)', context: 256000, window: 40000, output: 16384, reasoning: true, vision: true },
   'zai-org-glm-5.2': { name: 'GLM 5.2 (web)', context: 1000000, output: 131072, reasoning: true, vision: false },
   'z-ai-glm-5-3-flash': { name: 'GLM 5.3 Flash (web)', route: 'agent', context: 1048576, window: 640000, classicWindow: 570000, output: 131072, reasoning: true, vision: true },
+  // the same two models on the classic route (§2d): a little less context, but
+  // temperature / top_p / max_tokens work, no hidden Venice prompt, faster
+  // first token. `upstream` is the id sent to Venice. DeepSeek Uncensored has
+  // no such variant: the classic route reads only ~36k tokens of it.
+  'deepseek-v4-1-flash-classic': { name: 'DeepSeek V4.1 Flash 1017 Classic (web)', upstream: 'deepseek-v4-1-flash', route: 'classic', context: 1000000, window: 540000, output: 131072, reasoning: true, vision: true },
+  'z-ai-glm-5-3-flash-classic': { name: 'GLM 5.3 Flash Classic (web)', upstream: 'z-ai-glm-5-3-flash', route: 'classic', context: 1048576, window: 570000, output: 131072, reasoning: true, vision: true },
   'zai-org-glm-4.7-app': { name: 'GLM 4.7 (web)', context: 198000, window: 40000, output: 16384, reasoning: false, vision: false },
   'olafangensan-glm-4.7-flash-heretic': { name: 'GLM 4.7 Flash Heretic (web)', context: 200000, window: 40000, output: 24000, reasoning: true, vision: false },
   'qwen3-coder-480b-a35b-instruct-turbo': { name: 'Qwen 3 Coder 480B Turbo (web)', context: 256000, window: 40000, output: 65536, reasoning: false, vision: false },
@@ -94,9 +100,14 @@ export const MODELS = {
  * the model's own). docs/PROTOCOL.md §2d.
  */
 export function routeFor(id, override = 'auto') {
+  // a route variant exists to pick its route; the override does not move it
+  if (MODELS[id]?.upstream) return MODELS[id].route
   if (override === 'agent' || override === 'classic') return override
   return MODELS[id]?.route === 'agent' ? 'agent' : 'classic'
 }
+
+/** The model id Venice gets for `id`: a route variant's `upstream`, else `id`. */
+export const upstreamId = (id) => MODELS[id]?.upstream ?? id
 
 /** Default model, used by the installer and `sync --default`. */
 export const DEFAULT_MODEL = 'deepseek-v4-1-flash-uncensored'

@@ -30,7 +30,7 @@ import {
   toVeniceRequest,
   withRetryReminder,
 } from './emulate.mjs'
-import { DEFAULT_MODEL, IMAGE_MODELS, MODELS, resolveModelId, routeFor, staleConfigHint } from './models.mjs'
+import { DEFAULT_MODEL, IMAGE_MODELS, MODELS, resolveModelId, routeFor, staleConfigHint, upstreamId } from './models.mjs'
 import {
   CLASSIC_PATH,
   answerStarted,
@@ -429,7 +429,7 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
   }
 
   if (!state.terminal) throw new Error('the Venice stream ended before response.completed')
-  if (state.servedModel && state.servedModel !== body.model) warn(`   ~ asked for ${body.model}, Venice answered with ${state.servedModel}`)
+  if (state.servedModel && state.servedModel !== upstreamId(body.model)) warn(`   ~ asked for ${upstreamId(body.model)}, Venice answered with ${state.servedModel}`)
   if (state.compacted) {
     warn(`   ~ Venice compacted the prompt of ${body.model} (${state.compacted.originalTokens ?? '?'} estimated tokens, summary of ${state.compacted.summaryChars} characters)`)
   }

@@ -13,7 +13,7 @@
  *     convert deltas into OpenAI streaming chunks.
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { MODELS } from './models.mjs'
+import { MODELS, upstreamId } from './models.mjs'
 import { readLenient } from './lenient-json.mjs'
 import { repairJsonControlChars } from './sanitize.mjs'
 
@@ -261,7 +261,7 @@ export function buildJudgeRequest(body, message, model) {
     `AGENT REPLY (declared status: ${message.status ?? 'none'}):\n${tail((message.content ?? '').trim(), 3000) || '(empty)'}`,
   ].join('\n\n')
   return {
-    modelId: model,
+    modelId: upstreamId(model),
     systemPrompt: { instructions: JUDGE_PROMPT },
     messages: [
       {
@@ -646,7 +646,7 @@ export function toVeniceRequest(body) {
 
   return {
     request: {
-      modelId: body.model,
+      modelId: upstreamId(body.model),
       systemPrompt: { instructions: instructions.filter(Boolean).join('\n\n') },
       messages: withImagesLast(messages),
       tools: [],

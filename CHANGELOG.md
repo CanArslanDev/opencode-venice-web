@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Classic-route variants of DeepSeek 1017 and GLM 5.3 Flash.**
+  `deepseek-v4-1-flash-classic` and `z-ai-glm-5-3-flash-classic` send the same
+  model through the classic route (`upstream` in models.mjs; the override
+  `VENICE_WEB_CHAT_ROUTE` does not move them): ~540k / ~570k tokens of context
+  instead of ~580k / ~640k on the agent route, but `temperature`, `top_p` and
+  `max_tokens` work, there is no hidden agent prompt and the first token comes
+  sooner. The existing ids keep the agent route. No variant for DeepSeek
+  Uncensored (~36k tokens on the classic route). Rerun the sync.
+
 - **Upgrading: rerun the sync.** This version changes the model list, ids,
   context limits and input types that OpenCode reads from its own
   `opencode.json`. Run `./install.sh` again, or `venice-web-sync` (`node

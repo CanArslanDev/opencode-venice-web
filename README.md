@@ -104,9 +104,9 @@ Only models the web catalogue marks as free (`usesCredits: false`) are exposed -
 
 | Family | Model ids |
 | --- | --- |
-| DeepSeek | `deepseek-v4-1-flash-uncensored`, `deepseek-v4-1-flash` (1017), `deepseek-ai-DeepSeek-V3.2` |
+| DeepSeek | `deepseek-v4-1-flash-uncensored`, `deepseek-v4-1-flash` (1017), `deepseek-v4-1-flash-classic`, `deepseek-ai-DeepSeek-V3.2` |
 | Qwen | `qwen-3-8-27b`, `qwen3-6-27b`, `qwen3-5-35b-a3b`, `qwen3-coder-480b-a35b-instruct-turbo`, `qwen3-vl-235b-a22b` |
-| GLM | `z-ai-glm-5-3-flash`, `zai-org-glm-5.2`, `zai-org-glm-4.7-app`, `olafangensan-glm-4.7-flash-heretic` |
+| GLM | `z-ai-glm-5-3-flash`, `z-ai-glm-5-3-flash-classic`, `zai-org-glm-5.2`, `zai-org-glm-4.7-app`, `olafangensan-glm-4.7-flash-heretic` |
 | NVIDIA | `nvidia-nemotron-3-ultra-550b-a55b`, `nvidia-nemotron-3-nano-30b-a3b` |
 | Gemma | `google-gemma-4-31b-it`, `google-gemma-4-26b-a4b-it`, `gemma4-uncensored` |
 | Venice | `venice-uncensored-1-2`, `venice-uncensored-role-play` |
@@ -123,12 +123,15 @@ Picked by what was measured through this proxy (2026-11-25/26): the context each
 | Long sessions, the largest context | `z-ai-glm-5-3-flash` (GLM 5.3 Flash) | ~640k | 131k | yes | yes | agent |
 | Default, fewest refusals | `deepseek-v4-1-flash-uncensored` | ~300k | 131k | yes | yes | agent |
 | Large context with `temperature` / `max_tokens` | `zai-org-glm-5.2` (GLM 5.2) | ~470k | 131k | yes | no | classic |
+| DeepSeek 1017 / GLM 5.3 Flash with `temperature` / `max_tokens`, faster first token | `deepseek-v4-1-flash-classic`, `z-ai-glm-5-3-flash-classic` | ~540k / ~570k | 131k | yes | yes | classic |
 | Medium sessions with images | `qwen-3-8-27b` (Qwen 3.8 27B) | ~150k | 65k | yes | yes | classic |
 | Short coding tasks | `qwen3-coder-480b-a35b-instruct-turbo` (Qwen 3 Coder 480B) | ~40k | 65k | no | no | classic |
 | Reading screenshots and pictures | `qwen3-vl-235b-a22b` (Qwen3 VL 235B) | ~40k | 16k | no | yes | classic |
 | Titles and summaries (`small_model`) | `qwen3-5-35b-a3b` (Qwen 3.5 35B) | ~40k | 16k | yes | yes | classic |
 
-All 26 models take tool calls and documents (PDF, .md, office files). The three agent-route models passed 27/27 tool-call checks; the classic-route models passed the basic checks, but the stress suite has not been run on them yet. Less suited for OpenCode: the Aion models (they sometimes answer with nothing, the proxy retries), the small-context TEE models (`e2ee-qwen3-6-35b-a3b` and `e2ee-qwen-2-5-7b-p` ~20k, `e2ee-qwen3-vl-30b-a3b-p` ~12k) and `venice-uncensored-role-play` (4k output). Every other model reads about 40k tokens; the table in [docs/PROTOCOL.md §2d](docs/PROTOCOL.md) lists them all.
+All 28 model ids take tool calls and documents (PDF, .md, office files). The three agent-route models passed 27/27 tool-call checks; the classic-route models passed the basic checks, but the stress suite has not been run on them yet. Less suited for OpenCode: the Aion models (they sometimes answer with nothing, the proxy retries), the small-context TEE models (`e2ee-qwen3-6-35b-a3b` and `e2ee-qwen-2-5-7b-p` ~20k, `e2ee-qwen3-vl-30b-a3b-p` ~12k) and `venice-uncensored-role-play` (4k output). Every other model reads about 40k tokens; the table in [docs/PROTOCOL.md §2d](docs/PROTOCOL.md) lists them all.
+
+**Both routes for DeepSeek 1017 and GLM 5.3 Flash.** `deepseek-v4-1-flash` and `z-ai-glm-5-3-flash` use the agent route; `deepseek-v4-1-flash-classic` and `z-ai-glm-5-3-flash-classic` are the same models on the classic route. The classic ones read a little less (~540k / ~570k instead of ~580k / ~640k) and stop a response after 15 minutes, but honour `temperature`, `top_p` and `max_tokens`, skip Venice's ~3k-token hidden agent prompt and answer the first token faster (0.6-0.8 s instead of 0.9-1.3 s). DeepSeek 1017 refused a little more on the classic route in testing. DeepSeek Uncensored has no classic variant: the classic route reads only ~36k tokens of it.
 
 **Which route a model uses.** Venice has two chat routes. The agent route (the web app's agentic chat) really runs only `deepseek-v4-1-flash-uncensored`, `deepseek-v4-1-flash` and `z-ai-glm-5-3-flash`; asked for any other model it quietly answers with DeepSeek V4.1 Flash Uncensored. Every other model therefore goes through the classic route (the web app's ordinary chat), which serves the model you picked. The proxy logs a warning whenever Venice says it answered with a different model. `VENICE_WEB_CHAT_ROUTE=agent` or `classic` forces one route for all models. Measurements: [docs/PROTOCOL.md §2d](docs/PROTOCOL.md).
 

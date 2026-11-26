@@ -95,7 +95,7 @@ VENICE_WEB_DUMP=/tmp/req.json node src/proxy.mjs
 
 ## Changing the model catalogue
 
-`src/lib/models.mjs` is curated to `usesCredits: false` web models only. Credit-billed models are excluded because the agent endpoint may silently serve a different (free) model for them. A new model needs a `route` (agent only if an agent-route run shows its own `model_id`), a measured `window` on the classic route, and `vision` only if `servingModelId` stays the same with an image attached. After editing, rerun `node src/sync.mjs` so the OpenCode config picks up the new list. Users' configs drift the same way after an update; `configDrift()` / `staleConfigHint()` in models.mjs make the proxy and the doctor say so, so a change to `openCodeModel()` output shows up there without further work.
+`src/lib/models.mjs` is curated to `usesCredits: false` web models only. Credit-billed models are excluded because the agent endpoint may silently serve a different (free) model for them. Route variants (`*-classic`) carry `upstream`, the id Venice gets (`upstreamId()`), and a fixed `route`. A new model needs a `route` (agent only if an agent-route run shows its own `model_id`), a measured `window` on the classic route, and `vision` only if `servingModelId` stays the same with an image attached. After editing, rerun `node src/sync.mjs` so the OpenCode config picks up the new list. Users' configs drift the same way after an update; `configDrift()` / `staleConfigHint()` in models.mjs make the proxy and the doctor say so, so a change to `openCodeModel()` output shows up there without further work.
 
 ## Version pins
 
