@@ -17,6 +17,7 @@ import {
   countTokens,
   promptTokens,
   inspectCalls,
+  isToolOutputMessage,
   judgeDecision,
   parseJudgeVerdict,
   parseToolReply,
@@ -186,16 +187,19 @@ export async function* collectStream(upstreamBody, mapping, chunk, { stopServerL
         debugRaw(`${mapping.request.modelId} server item ${event.item.type}`, JSON.stringify(event.item).slice(0, 2000))
       }
     }
-    if (event.type === 'veniceai:tool_call_generation.in_progress') {
+    const stepProgress = event.type === 'veniceai:tool_call_generation.in_progress'
+    if (stepProgress) {
       for (const tool of event.detected_tools ?? []) if (tool?.name) state.nativeTools.add(tool.name)
+      if (event.item_id) state.steps.add(event.item_id)
     }
-    if (event.item?.type === 'veniceai:tool_call_generation' && event.item.id) {
-      state.steps.add(event.item.id)
-      if (stopServerLoop && mapping.emulatedTools && state.steps.size > SERVER_LOOP_STEPS) {
-        state.serverLoop = true
-        state.terminal = true
-        return STOP
-      }
+    if (event.item?.type === 'veniceai:tool_call_generation' && event.item.id) state.steps.add(event.item.id)
+    // checked once the step names its native call (in_progress) or ends, so the
+    // retry reminder can name the call
+    const stepSeen = stepProgress || (event.type === 'response.output_item.done' && event.item?.type === 'veniceai:tool_call_generation')
+    if (stepSeen && stopServerLoop && mapping.emulatedTools && state.steps.size > SERVER_LOOP_STEPS) {
+      state.serverLoop = true
+      state.terminal = true
+      return STOP
     }
     if (event.type === 'response.output_text.delta') {
       const delta = event.delta ?? ''
@@ -242,12 +246,16 @@ export async function* collectStream(upstreamBody, mapping, chunk, { stopServerL
 const STOP = Symbol('stop')
 
 /**
- * Venice agent steps allowed in one response before the proxy stops it. One
- * step is a normal reply; a second or third is the model recovering from one
- * native call; past that it is looping on "Tool not found" (measured: every
- * 10-step response gave up without a result).
+ * Venice agent steps allowed in one response before the proxy stops it. A
+ * normal reply has none; each step is one native call that Venice answers
+ * with "Tool not found". The model rarely recovers from one (2026-11-26,
+ * reasoning on: 0 of 3 responses with 2-3 steps ended in a usable call, 1 of 3
+ * with one step, and a one-step reply "the shell tool is unavailable" survived
+ * two judge retries), while the retry without reasoning came back clean in 17
+ * of 20, so the first step stops it (it was 3, with every 10-step response
+ * giving up, 2026-11-05).
  */
-const SERVER_LOOP_STEPS = 3
+const SERVER_LOOP_STEPS = 0
 
 /**
  * Sends one chat request on the mapping's route. The request is always built in
@@ -374,16 +382,21 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
       )
       if (collected.serverLoop) {
         log(`  ~ venice tool loop stopped after ${collected.steps.size} steps (native calls: ${[...collected.nativeTools].join(', ') || '?'})`)
-        return serverLoopMessage()
+        return serverLoopMessage(collected.nativeTools)
       }
       const parsed = parseToolReply(text)
       for (const rename of inspectCalls(parsed, mapping.toolSchemas)) log(`  ~ tool name ${rename}`)
       return parsed
     }
     message = read(state.text, state)
-    const last = [...(body.messages ?? [])].reverse().find((item) => item.role !== 'system' && item.role !== 'developer')
+    const lastIndex = (body.messages ?? []).findLastIndex((item) => item?.role !== 'system' && item?.role !== 'developer')
+    // a user message that only carries a tool's images (Codex's view_image) ends a tool turn, not a user turn
+    const last = isToolOutputMessage(body.messages, lastIndex) ? { role: 'tool' } : body.messages?.[lastIndex]
     let judged = 0
     let formatRetries = 0
+    // set once Venice looped on native calls: those come with reasoning, so
+    // every later attempt of this turn goes without it (docs/PROTOCOL.md §4.7)
+    let noReasoning = false
 
     // Up to two extra attempts while the reply is unhelpful. Every trigger is
     // structural (see shouldRetry); a reply that ends the turn right after a tool
@@ -391,8 +404,12 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
     // they were shared, two format retries used everything up and the answer the
     // last retry produced reached the user without the judge ever seeing it
     // (a made-up "the tools all returned Tool not found", 2026-11-05).
+    // a retry that Venice's tool loop cut off leaves its own decision here, so
+    // the next attempt answers the loop instead of ending the turn
+    let pending = null
     for (;;) {
-      let decision = shouldRetry({ message, lastRole: last?.role, available })
+      let decision = pending ?? shouldRetry({ message, lastRole: last?.role, available })
+      pending = null
       if (decision.judge) {
         if (!judgeEnabled || judged >= 2) break
         judged++
@@ -406,7 +423,10 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
       log(`  ~ ${decision.reason}, retrying...`)
       try {
         // the retry resends the same image parts, so their bytes go along again
-        const retryResponse = await sendChat(withRetryReminder(mapping.request, decision.reminder), mapping, signal)
+        if (decision.disableReasoning) noReasoning = true
+        const retryRequest = withRetryReminder(mapping.request, decision.reminder)
+        if (noReasoning) retryRequest.reasoningMode = 'disabled'
+        const retryResponse = await sendChat(retryRequest, mapping, signal)
         if (!retryResponse.ok) break
         // the last allowed retry runs to the end, so the turn always gets an answer
         const retryState = yield* collectStream(retryResponse.body, mapping, chunk, {
@@ -419,7 +439,10 @@ async function* openaiChunks(body, mapping, upstreamBody, signal) {
           log('  ~ retry improved the reply')
         } else {
           log('  ~ retry did not improve the reply, keeping the first')
-          if (decision.reason.startsWith('judge:')) break
+          // a judge retry cut off by native calls is retried for the loop (a
+          // "my shell tool is unavailable" answer stayed otherwise, 2026-11-26)
+          if (retryMessage.serverLoop) pending = shouldRetry({ message: retryMessage, lastRole: last?.role, available })
+          else if (decision.reason.startsWith('judge:')) break
         }
       } catch (error) {
         warn('  ~ retry failed:', error.message)

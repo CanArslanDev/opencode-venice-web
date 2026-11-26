@@ -49,14 +49,73 @@ export const REMINDER_AFTER_TOOL =
 /**
  * Goes with the images when they are moved past the user's own message (see
  * `withImagesLast`), so the model knows whose they are and does not look for a
- * tool to open them.
+ * tool to open them. It must not say that no image tool exists: the client may
+ * have one (Codex's `view_image`), and the model would then be told two
+ * opposite things.
  */
 export const IMAGE_NOTE =
-  'The image(s) attached here belong to the user\'s request above and are visible to you now: read them directly. There is no tool for viewing images.'
+  'The image(s) attached here belong to the user\'s request above and are visible to you now: read them directly, without calling a tool to open them.'
 
 /** The same note when files (documents) are among the attachments. */
 export const FILE_NOTE =
-  'The file(s) attached here belong to the user\'s request above and their contents are available to you now: read them directly. There is no tool for opening them.'
+  'The file(s) attached here belong to the user\'s request above and their contents are available to you now: read them directly, without calling a tool to open them.'
+
+/**
+ * The note for attachments a tool returned (an image-viewing tool, a
+ * screenshot): they are the output of the calls above, not the user's.
+ */
+export const TOOL_IMAGE_NOTE =
+  'The image(s) attached here are the output of the tool call(s) above (see the tool_result that mentions them), not part of the user\'s request. They are visible to you now: read them directly instead of calling a tool to open them again.'
+
+const NOTES = new Set([IMAGE_NOTE, FILE_NOTE, TOOL_IMAGE_NOTE])
+
+/** A tool result as `toVeniceRequest` writes it into the request. */
+const isToolResultText = (text) => typeof text === 'string' && text.startsWith('{"tool_result"')
+const firstText = (message) => (Array.isArray(message?.content) ? message.content.find((part) => part?.type === 'output_text')?.text : undefined)
+
+/** An OpenAI message part that holds an image. */
+const isImagePart = (part) => part?.type === 'image_url' || (part?.type === 'file' && /^data:image\//.test(part.file?.file_data ?? ''))
+
+/**
+ * A user message that carries a tool's output rather than a new request: it
+ * holds an image and comes straight after a tool result (or after another such
+ * message). Codex sends `view_image` output this way on chat completions. A
+ * user message after a tool result without an image stays a user message (a
+ * user who interrupted the turn).
+ */
+export function isToolOutputMessage(messages, index) {
+  const message = messages?.[index]
+  if (message?.role !== 'user' || !Array.isArray(message.content) || !message.content.some(isImagePart)) return false
+  for (let i = index - 1; i >= 0; i--) {
+    const role = messages[i]?.role
+    if (role === 'system' || role === 'developer') continue
+    return role === 'tool' || isToolOutputMessage(messages, i)
+  }
+  return false
+}
+
+/** Index of the user message that asked for the current work: the newest that is not a tool output, or -1. */
+export function requestIndex(messages) {
+  if (!Array.isArray(messages)) return -1
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === 'user' && !isToolOutputMessage(messages, i)) return i
+  }
+  return -1
+}
+
+/**
+ * Indexes of the messages whose attachments travel as bytes: the request, and
+ * every tool output after it (tool messages and the user messages that carry
+ * a tool's images). Older messages keep `[image]` / `[file: …]`.
+ */
+export function attachmentIndexes(messages) {
+  const request = requestIndex(messages)
+  const indexes = new Set(request >= 0 ? [request] : [])
+  for (const [index, message] of (messages ?? []).entries()) {
+    if (index > request && (message?.role === 'tool' || isToolOutputMessage(messages, index))) indexes.add(index)
+  }
+  return indexes
+}
 
 /**
  * Moves every `input_image` and `input_file` part to the last user message. Venice shows the
@@ -64,22 +123,40 @@ export const FILE_NOTE =
  * earlier the model has to call Venice's `view_media`, and with emulated tools
  * that call lands in the envelope where nothing runs it (docs/PROTOCOL.md §2b).
  * The format and retry reminders are user messages that come after the user's
- * own, so the images are moved onto them.
+ * own, so the images are moved onto them, with a note saying whose they are:
+ * the user's (`IMAGE_NOTE` / `FILE_NOTE`) or a tool's (`TOOL_IMAGE_NOTE`, for
+ * parts that sat in a tool result). The notes move with the parts on a retry.
  */
 export function withImagesLast(messages) {
   const isMedia = (part) => part?.type === 'input_image' || part?.type === 'input_file'
-  const images = messages.flatMap((message) => (Array.isArray(message.content) ? message.content : []).filter(isMedia))
+  const isNote = (part) => part?.type === 'output_text' && NOTES.has(part.text)
+  const images = []
+  const notes = []
+  const origin = { user: false, tool: false, files: false }
+  for (const message of messages) {
+    if (!Array.isArray(message.content)) continue
+    const media = message.content.filter(isMedia)
+    images.push(...media)
+    notes.push(...message.content.filter(isNote).map((part) => part.text))
+    if (!media.length) continue
+    origin[isToolResultText(firstText(message)) ? 'tool' : 'user'] = true
+    if (media.some((part) => part.type === 'input_file')) origin.files = true
+  }
   if (!images.length) return messages
   const lastUser = messages.findLastIndex((message) => message.role === 'user')
+  const ownImages = !!messages[lastUser]?.content?.some?.(isMedia) && !isToolResultText(firstText(messages[lastUser]))
+  // a reminder that receives the attachments says whose they are; notes that
+  // were written before move along with the parts
+  if (!notes.length) {
+    if (origin.user && !ownImages) notes.push(origin.files ? FILE_NOTE : IMAGE_NOTE)
+    if (origin.tool) notes.push(TOOL_IMAGE_NOTE)
+  }
   return messages.map((message, index) => {
     if (!Array.isArray(message.content)) return message
-    const rest = message.content.filter((part) => !isMedia(part))
+    const rest = message.content.filter((part) => !isMedia(part) && !isNote(part))
     if (index !== lastUser) return rest.length === message.content.length ? message : { ...message, content: rest }
-    const ownImages = rest.length !== message.content.length
-    // a reminder that receives the attachments says whose they are
-    const hasFiles = images.some((part) => part.type === 'input_file')
-    const note = ownImages ? [] : [{ type: 'output_text', text: hasFiles ? FILE_NOTE : IMAGE_NOTE, annotations: [] }]
-    return { ...message, content: [...images, ...rest, ...note] }
+    const noteParts = [...new Set(notes)].map((text) => ({ type: 'output_text', text, annotations: [] }))
+    return { ...message, content: [...images, ...rest, ...noteParts] }
   })
 }
 
@@ -119,9 +196,38 @@ export const RESULT_REMINDER =
 export const NATIVE_CALL_REMINDER =
   'your tools work. Do not use built-in function calling or any native tool-call syntax: the ONLY way to call a tool is the "tool_calls" array of your JSON reply. Ignore any earlier "Tool not found" message and call the tool you need now in tool_calls with "status":"continue".'
 
+/**
+ * The client tool a native call meant, or null. The model writes the names its
+ * system prompt uses (`functions.exec_command`) or shortens them (`exec` for
+ * `exec_command`); Venice reports only the name, never the arguments, so the
+ * call itself cannot be forwarded - but the retry can name the right tool.
+ */
+export function clientToolFor(native, available) {
+  const names = [...(available ?? [])]
+  if (typeof native !== 'string' || !native) return null
+  const bare = native.replace(/^(?:functions|default_api|tools|multi_tool_use)[.:]/, '')
+  if (names.includes(bare)) return bare
+  const alias = normalizeToolName(bare, new Set(names))
+  if (alias !== bare) return alias
+  // `exec` -> `exec_command`, `imagegen` -> `image_gen__imagegen`, only when one tool fits
+  const fits = names.filter((name) => name.startsWith(`${bare}_`) || name.endsWith(`__${bare}`) || name.endsWith(`.${bare}`))
+  return fits.length === 1 ? fits[0] : null
+}
+
+/** `NATIVE_CALL_REMINDER`, naming the native calls Venice could not run and the tools they meant. */
+export function nativeCallReminder(nativeTools = [], available = []) {
+  const tried = [...new Set(nativeTools)].filter(Boolean)
+  if (!tried.length) return NATIVE_CALL_REMINDER
+  const meant = tried.map((name) => [name, clientToolFor(name, available)])
+  const named = meant
+    .map(([name, tool]) => (tool ? `"${name}" is the tool "${tool}": write {"name":"${tool}","arguments":{...}}` : `"${name}" is not a tool name`))
+    .join('; ')
+  return `${NATIVE_CALL_REMINDER} Your last reply called ${tried.map((name) => `"${name}"`).join(', ')} with native function calling, which nothing executes - that is the only reason for "Tool not found". In tool_calls use the exact names from the tool list (${named}).`
+}
+
 /** A reply cut off because Venice was looping on native tool calls. */
-export function serverLoopMessage() {
-  return { content: '', tool_calls: null, sawEnvelope: false, serverLoop: true }
+export function serverLoopMessage(nativeTools = []) {
+  return { content: '', tool_calls: null, sawEnvelope: false, serverLoop: true, nativeTools: [...nativeTools] }
 }
 
 /** Builds the reminder for tool calls the agent cannot execute. */
@@ -158,7 +264,11 @@ export const EMPTY_MARKER = '(empty reply)'
  * @returns {{ retry: boolean, reason?: string, reminder?: string, judge?: boolean }}
  */
 export function shouldRetry({ message, lastRole, available = [] }) {
-  if (message.serverLoop) return { retry: true, reason: 'venice tool loop', reminder: NATIVE_CALL_REMINDER }
+  // native calls come with reasoning (1 step in 389 requests without it, 11-27%
+  // of first attempts with it), so the retry goes without reasoning
+  if (message.serverLoop) {
+    return { retry: true, reason: 'venice tool loop', reminder: nativeCallReminder(message.nativeTools, available), disableReasoning: true }
+  }
   if (isEmptyAnswer(message) && !message.brokenEnvelope) {
     return { retry: true, reason: 'empty reply', reminder: EMPTY_RETRY_REMINDER }
   }
@@ -250,7 +360,8 @@ const tail = (text, max) => (text.length > max ? `…${text.slice(-max)}` : text
  */
 export function buildJudgeRequest(body, message, model) {
   const messages = body.messages ?? []
-  const request = [...messages].reverse().find((item) => item.role === 'user')
+  // a user message that only carries a tool's images is not the request
+  const request = messages[requestIndex(messages)] ?? [...messages].reverse().find((item) => item.role === 'user')
   const toolOutputs = messages.filter((item) => item.role === 'tool').slice(-2)
   const evidence = toolOutputs.length
     ? toolOutputs.map((item, index) => `[${index + 1}] ${tail(textOf(item.content), 1500)}`).join('\n\n')
@@ -555,16 +666,45 @@ export function toVeniceRequest(body) {
 
   const instructions = []
   const messages = []
-  // Only the newest user message carries its images as images: in a tool loop
-  // that is the message that asked for the work, so the picture stays visible
-  // on every step, and an older picture is not resent once the user moves on.
-  const newestUser = body.messages.findLastIndex((message) => message?.role === 'user')
-  let images = []
-  let files = []
+  // Only the request (the newest user message that is not a tool's output) and
+  // the tool outputs after it carry their images as images: in a tool loop the
+  // request's picture stays visible on every step, a picture a tool returned
+  // reaches the model (as `[image]` text it made the model describe a picture
+  // it never saw), and an older picture is not resent once the user moves on.
+  const sentIndexes = attachmentIndexes(body.messages)
+  const images = []
+  const files = []
+  const mediaParts = new Map()
 
   for (const [index, message] of body.messages.entries()) {
     let text = textOf(message.content)
-    if (index === newestUser) ({ images, files, text } = splitImages(message.content))
+    const toolOutput = message.role === 'tool' || isToolOutputMessage(body.messages, index)
+    if (sentIndexes.has(index)) {
+      const split = splitImages(message.content)
+      const own = []
+      let dropped = 0
+      for (const image of split.images) {
+        if (images.some((known) => known.mediaId === image.mediaId)) continue
+        if (images.length >= MAX_IMAGES) {
+          dropped++
+          continue
+        }
+        images.push(image)
+        own.push({ type: 'input_image', media_id: image.mediaId, detail: 'auto' })
+      }
+      for (const file of split.files) {
+        if (files.some((known) => known.mediaId === file.mediaId)) continue
+        if (files.length >= MAX_FILES) throw new AttachmentError(`at most ${MAX_FILES} files per request`)
+        files.push(file)
+        own.push({ type: 'input_file', media_id: file.mediaId, filename: file.filename })
+      }
+      const lines = [split.text]
+      // the tool result says where its pictures went, so the note can point back to it
+      if (toolOutput && own.length) lines.push(`[${own.length} attachment(s) from this tool output are attached to the last user message]`)
+      for (let i = 0; i < dropped; i++) lines.push('[image]')
+      text = lines.filter(Boolean).join('\n')
+      mediaParts.set(index, own)
+    }
     if (message.role === 'system' || message.role === 'developer') {
       instructions.push(text)
       continue
@@ -578,6 +718,10 @@ export function toVeniceRequest(body) {
       // Tool results travel as a user message in the agent's own envelope shape.
       role = 'user'
       content = JSON.stringify({ tool_result: { tool_call_id: message.tool_call_id, content: text } })
+    } else if (toolOutput) {
+      // a tool's images sent as a user message (Codex's view_image): still the
+      // tool's output, so it reads as one and the turn stays a tool turn
+      content = JSON.stringify({ tool_result: { content: text } })
     }
 
     if (message.role === 'assistant') {
@@ -599,12 +743,7 @@ export function toVeniceRequest(body) {
 
     const parts = [{ type: 'output_text', text: content, annotations: [] }]
     // the image parts go first, the order the web client uses
-    if (index === newestUser) {
-      parts.unshift(
-        ...images.map((image) => ({ type: 'input_image', media_id: image.mediaId, detail: 'auto' })),
-        ...files.map((file) => ({ type: 'input_file', media_id: file.mediaId, filename: file.filename })),
-      )
-    }
+    if (mediaParts.get(index)?.length) parts.unshift(...mediaParts.get(index))
     messages.push({
       id: randomUUID(),
       type: 'message',
@@ -1268,24 +1407,21 @@ function documentTokens(file, texts) {
 
 /**
  * Estimated prompt tokens of an OpenAI `messages` array, as the proxy sends it
- * on: text and tool calls by their text; images and files of the latest user
- * message (the only ones sent as bytes, `splitImages()`) by what the model
- * reads; older images and files by their `[image]` / `[file: …]` placeholder.
+ * on: text and tool calls by their text; images and files of the request and
+ * of the tool outputs after it (the only ones sent as bytes,
+ * `attachmentIndexes()`) by what the model reads; older images and files by their `[image]` / `[file: …]` placeholder.
  * Base64 never counts as text. Used for `usage.prompt_tokens` and the context
  * window check. `texts` optionally maps a document's mediaId to its extracted text.
  */
 export function promptTokens(messages, { texts } = {}) {
   if (!Array.isArray(messages)) return 0
-  let latestUser = -1
-  messages.forEach((message, index) => {
-    if (message?.role === 'user') latestUser = index
-  })
+  const sent = attachmentIndexes(messages)
   let total = 0
   messages.forEach((message, index) => {
     if (!message) return
     total += 4 // role and message framing
     const content = message.content
-    if (index === latestUser && Array.isArray(content)) {
+    if (sent.has(index) && Array.isArray(content)) {
       let split
       try {
         split = splitImages(content)

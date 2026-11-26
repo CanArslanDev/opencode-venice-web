@@ -2,6 +2,35 @@
 
 ## Unreleased
 
+- **Images returned by a tool reach the model.** An image inside a
+  `role: "tool"` message (`image_url` parts) used to become `[image]` text, and
+  the model, asked for its colour, described a picture it had never seen (1 of
+  15 right). It is now sent like the user's own images, on the last user
+  message, with `TOOL_IMAGE_NOTE` saying it is the tool's output; the tool
+  result says how many were attached. A user message holding an image right
+  after a tool result (Codex's `view_image` on chat completions) counts as that
+  tool's output: it is written as a `tool_result`, the after-tool reminder is
+  used, a reply without a tool call goes to the judge instead of two
+  "envelope without tool calls" retries (30 of 30 replies before), and the
+  judge reads the real request. After: 45 of 45 colours right, no wasted
+  retries, 59 of 60 `exec_command` calls where one was asked (the 60th timed
+  out upstream). `IMAGE_NOTE` / `FILE_NOTE` no longer claim there is no tool
+  for viewing images.
+- **Venice tool loop: native calls come with reasoning.** With
+  `reasoning_effort` set (Codex sends one), the model sometimes calls tools
+  natively (`exec_command`, `functions.exec_command`, `exec`), Venice answers
+  "Tool not found" and the model may end the turn with "my shell tool is
+  unavailable"; without reasoning there was 1 native step in 389 requests, with it 11-27% of first attempts had one. The stream
+  now stops at the first native step (was the fourth), the retry names the
+  call and the client tool it meant (`functions.exec_command` / `exec` →
+  `exec_command`, only when one tool fits), every later attempt of that turn
+  goes without reasoning, and a judge retry cut off by a loop is retried for
+  the loop instead of ending the turn.
+  Measured on Codex-style requests (90 per arm, `high` and `medium`): 87 →
+  89 expected calls, giving-up replies 1 → 0, a turn with native calls 11.6 s
+  → 5.2 s on average. The `low` → `enabled` mapping of `reasoningMode()` is
+  unchanged.
+
 - **Token estimate no longer counts base64 as text.** `usage.prompt_tokens`
   and the context-window warning used `countTokens(JSON.stringify(messages))`,
   so one screenshot (a few MB of base64) counted as hundreds of thousands of

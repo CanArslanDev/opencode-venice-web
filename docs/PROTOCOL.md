@@ -109,7 +109,18 @@ Every model in `src/lib/models.mjs` answered "4719" and "red", including the one
 
 **The image has to be in the last user message.** Venice shows the model an image directly only when it sits in the last user message; anywhere earlier the model calls Venice's own `view_media` to look at it (2/2, both answered after that server call). With emulated tools that call is written into the envelope, where nothing runs it: 5 of 5 image questions ended in an invalid `view_media` call and then an unrelated `bash`. The format and retry reminders are user messages that come after the user's own, so `withImagesLast()` moves the image parts onto the last user message with a line saying whose they are. After that: 5/5 answered with tools on, 0 `view_media` calls, and in a tool loop the model still sees the picture (`write code.txt "4719"` after a tool result), on macOS and Linux, through the proxy and through real `opencode run -f`.
 
-Only the latest user message's images are sent. In a tool loop that is the message that started the work, so the picture stays visible on every step; after the user's next message it is history and stays `[image]`.
+Only the request's images (the latest user message that is not a tool output, below) and those of the tool outputs after it are sent. In a tool loop the request is the message that started the work, so the picture stays visible on every step; after the user's next message it is history and stays `[image]`.
+
+**Images from tool results.** Measured 2026-11-26 (Windows, through the proxy, `stream: false`, tools `exec_command` + `view_image`, a solid red 64x64 PNG, 5 runs per model on `deepseek-v4-1-flash-uncensored`, `deepseek-v4-1-flash` and `z-ai-glm-5-3-flash`). A tool that returns a picture (Codex's `view_image`, screenshot tools) reaches the proxy in one of two shapes: inside the `role: "tool"` message as `image_url` parts, or as a user message holding the image right after the tool result (Codex on chat completions). Before, the first became `[image]` text inside the tool result, and the model, asked for the colour, described a picture it had never seen ("dark blue boats", "deep navy"): 1 of 15 said red. The second was treated as a new user request: the model's answer without a tool call was retried twice as "envelope without tool calls" (30 of 30 replies, 2 wasted retries each) and the format reminder told it "call those tools now - do not answer yet".
+
+Now `attachmentIndexes()` sends the images of the request and of every tool output after it; `isToolOutputMessage()` marks a user message with an image that comes straight after a tool result (or after another such message) as tool output, so it is written as a `tool_result`, the after-tool reminder is picked, the judge path is used and the judge reads the real request. A user message after a tool result *without* an image stays a user turn. The tool result says `[N attachment(s) from this tool output are attached to the last user message]`, and the parts get `TOOL_IMAGE_NOTE` ("the output of the tool call(s) above, not part of the user's request") instead of `IMAGE_NOTE`. Notes now move with the parts on a retry. `IMAGE_NOTE` / `FILE_NOTE` no longer say "there is no tool for viewing images": the client may have one.
+
+| shape (15 runs each, 3 models) | before | after |
+| --- | --- | --- |
+| image in the tool message, "dominant colour?" | 1/15 red (the rest invented a picture) | 15/15 red |
+| image in a user message after the tool result, "dominant colour?" | 15/15 red, 30 wasted retries | 15/15 red, no wasted retry |
+| two images that way, "colour of each?" | 15/15 red+blue, 30 wasted retries | 15/15 red+blue, no wasted retry |
+| same three shapes, "say the colour and run `echo hi`" | 45/45 `exec_command` | 44/45 (the 45th: no answer from upstream within 300 s) |
 
 ## 2c. Documents
 
@@ -406,9 +417,36 @@ What the stream shows (debug mode logs it): one `veniceai:tool_call_generation` 
 | 2-3 | a few | the model recovered and sent a proper envelope |
 | 10 (Venice's cap) | 12 of 86 replies | gave up without the result, every time |
 
-Fix: `collectStream()` stops reading once a response starts a 4th step (`SERVER_LOOP_STEPS = 3`), and the request is sent again with `NATIVE_CALL_REMINDER` ("your tools work; the only way to call a tool is `tool_calls`"). It counts as a format retry; the last allowed retry runs to the end so the turn always gets an answer. Format retries and judge checks now have separate budgets (2 each): with a shared budget, two format retries used it up and the last reply reached the user without the judge seeing it. The judge also treats "my tools are unavailable" as `stopped_early` when the tool results it sees worked.
+Fix: `collectStream()` stops reading once a response starts a 4th step (`SERVER_LOOP_STEPS = 3`, now 0: see "Native calls come with reasoning" below), and the request is sent again with `NATIVE_CALL_REMINDER` ("your tools work; the only way to call a tool is `tool_calls`"). It counts as a format retry; the last allowed retry runs to the end so the turn always gets an answer. Format retries and judge checks now have separate budgets (2 each): with a shared budget, two format retries used it up and the last reply reached the user without the judge seeing it. The judge also treats "my tools are unavailable" as `stopped_early` when the tool results it sees worked.
 
 Measured on the two tasks that triggered it (OpenCode, 6 runs each): before, 2 of 8 and 2 of 12 runs ended with a "tools are broken" answer and the result only came after "Sonucu söyle."; after, 12 of 12 delivered the result in the final message, with 10 loops stopped and retried along the way.
+
+**Native calls come with reasoning** (2026-11-26, Codex-style requests). A Codex desktop session (`deepseek-v4-1-flash-uncensored`) logged 43 "venice tool loop stopped after 4 steps" in an hour, almost all `native calls: exec`, some `functions.exec`, `exec_command`, `image_gen__imagegen`. Scripted requests through the proxy with Codex-style tools (`exec_command`, `write_stdin`, `view_image`, `apply_patch`, `update_plan`, `image_gen__imagegen`) and a system prompt that names them `functions.<name>`: **without `reasoning_effort`, 1 native step in 389 requests** (one unnamed step on GLM; short and 30-step histories, with and without images, even when the user asked for "the exec tool" or "built-in function calling"). With `reasoning_effort` `high` or `medium` (Codex sends one; it becomes `reasoningMode` `enabled` / `adaptive`), 18 of 120 requests had native steps (`exec_command`, `functions.exec_command`, `view_image`, `update_plan`), and the `NATIVE_CALL_REMINDER` retry looped again in 5 of 16 stops. The names are the ones the system prompt uses, with or without its `functions.` prefix, or shortened (`exec`); Venice reports only the name, never the arguments.
+
+The bad ends were not the 4-step loops: the last retry runs unstopped and usually recovered. They were responses with 1-3 steps, below the old threshold: 0 of 3 responses with 2-3 steps and 1 of 3 with one step ended in a usable call. One (`deepseek-v4-1-flash`, image in the tool message, before the fix in §2b) answered "the screenshot came back as an unrendered placeholder, and the shell command I tried came back as an unavailable tool" with `status: ask`, and the judge's two retries did not change it - the reported symptom.
+
+Fix: `SERVER_LOOP_STEPS = 0` (the stream stops at the first native step, once its `in_progress` event has named the call; each step costs ~2.5 s), the retry reminder names the native calls and the client tool each meant (`nativeCallReminder()`, `clientToolFor()`: `functions.exec_command` → `exec_command`, `exec` → `exec_command` when it is the only `exec_*` tool, `imagegen` → `image_gen__imagegen`; no guess when two tools fit), and once a turn has looped every later attempt of it goes with `reasoningMode: "disabled"` (`disableReasoning` from `shouldRetry()`), and a judge retry that a loop cut off is followed by the loop's own retry instead of ending the turn with the first answer (the "shell tool unavailable" reply above survived two judge retries that way in a run with the stop at the second step).
+
+Share of first attempts with a native step, Codex-style shapes (a first turn, after a command's output, after `view_image` with the image in the tool message, and in a user message after it), all runs before and after the fix (the first attempt is the same request either way):
+
+| model | `reasoningMode` disabled (no effort) | adaptive (`medium`) | enabled (`high`) |
+| --- | --- | --- | --- |
+| `deepseek-v4-1-flash-uncensored` | 0/20 | 11/45 (24%) | 16/60 (27%) |
+| `deepseek-v4-1-flash` | 0/20 | not measured | 14/59 (24%) |
+| `z-ai-glm-5-3-flash` | 1/20 (unnamed step) | 5/45 (11%) | 16/60 (27%) |
+
+The rate drifted between runs (enabled: 8/59 in the first hour, 20/60 and 18/60 later), so it is the outcome per native run that compares:
+
+| 90 runs each (`high` 60 + `medium` 30) | before | stop at the 2nd step, named reminder, no reasoning on retry | final (stop at the 1st step, loop after a judge retry retried) |
+| --- | --- | --- | --- |
+| expected `exec_command` call | 87 | 88 | 89 |
+| reply giving up ("tool unavailable", no call) | 1 | 1 | 0 |
+| no answer within 300 s (upstream) | 2 | 1 | 1 |
+| runs with native steps | 11 | 25 | 26 |
+| average time of those (answered) | 11.6 s | 5.3 s | 5.2 s |
+| "Tool not found" in the reply | 0 | 0 | 0 |
+
+The 300 s cases are upstream: one was a model repeating the same `exec_command` call hundreds of times until its output limit, the others a retry that took two minutes to answer.
 
 #### "Done" without the result
 

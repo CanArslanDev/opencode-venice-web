@@ -2,7 +2,6 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { createServer as createHttpServer } from 'node:http'
-import { fileURLToPath } from 'node:url'
 import { imageModelCatalog } from '../src/lib/image-catalog.mjs'
 import { ImageRequestError, checkPromptLimit, parseCount, parseResponseFormat, parseSize } from '../src/lib/imagegen.mjs'
 import { DEFAULT_EDIT_MODEL, DEFAULT_IMAGE_MODEL, EDIT_MODELS, IMAGE_MODELS, MODELS } from '../src/lib/models.mjs'
@@ -149,7 +148,7 @@ test('GET /v1/images/models answers the catalogue; /v1/models keeps its contract
 test('VENICE_WEB_IMAGE_ROUTE=agent: the endpoint lists the agent catalogue', () => {
   const script = `
     import { createServer as http } from 'node:http'
-    import { createServer } from ${JSON.stringify(fileURLToPath(new URL('../src/lib/server.mjs', import.meta.url)))}
+    import { createServer } from ${JSON.stringify(new URL('../src/lib/server.mjs', import.meta.url).href)}
     const server = http(createServer()).listen(0, '127.0.0.1', async () => {
       const body = await (await fetch('http://127.0.0.1:' + server.address().port + '/v1/images/models')).json()
       console.log(JSON.stringify({ route: body.route, ids: body.generation.data.map((m) => m.id) }))
