@@ -8,6 +8,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   IMAGE_NOTE,
+  IMAGE_ORDER_PREFIX,
   MAX_IMAGES,
   REMINDER_AFTER_TOOL,
   TOOL_IMAGE_NOTE,
@@ -47,7 +48,7 @@ test('an image inside a tool message is sent as an image, with the tool note, no
   const payload = JSON.parse(result.content.find((part) => part.type === 'output_text').text)
   assert.equal(payload.tool_result.tool_call_id, 'v1')
   assert.doesNotMatch(payload.tool_result.content, /\[image\]/)
-  assert.match(payload.tool_result.content, /^attached \.\/photo\.png\n\[1 attachment\(s\) from this tool output are attached to the last user message\]$/)
+  assert.match(payload.tool_result.content, /^attached \.\/photo\.png\n\[attached to the last user message as image #1 of 1\]$/)
   // the picture rides on the format reminder, which is still the after-tool one
   assert.equal(reminder.content[0].type, 'input_image')
   assert.equal(reminder.content[0].media_id, mapping.images[0].mediaId)
@@ -72,7 +73,7 @@ test('a user message holding the image right after the tool result is the tool o
   assert.equal(request.content[0].text, 'Look at ./photo.png, then run echo hi.')
   assert.match(result.content[0].text, /^\{"tool_result"/)
   // the carrier reads as tool output, so the after-tool reminder is picked
-  assert.match(carrier.content[0].text, /^\{"tool_result":\{"content":"Image from view_image:\\n\[1 attachment/)
+  assert.match(carrier.content[0].text, /^\{"tool_result":\{"content":"Image from view_image:\\n\[attached to the last user message as image #1 of 1\]/)
   assert.ok(reminder.content.some((part) => part.text === `(format reminder) ${REMINDER_AFTER_TOOL}`))
   assert.equal(reminder.content.at(-1).text, TOOL_IMAGE_NOTE)
   assert.equal(mediaOf(mapping.request).length, 1)
@@ -97,12 +98,15 @@ test('the request keeps its own image and tool images come after it; each gets i
   assert.equal(mapping.images.length, 2)
   const last = users(mapping.request).at(-1).content
   assert.deepEqual(last.slice(0, 2).map((part) => part.media_id), mapping.images.map((item) => item.mediaId))
-  assert.deepEqual(last.slice(-2).map((part) => part.text), [IMAGE_NOTE, TOOL_IMAGE_NOTE])
+  const order = `${IMAGE_ORDER_PREFIX} #1 from the user's request; #2 output of tool call v1 (photo.png) - the newest.`
+  assert.deepEqual(last.slice(-3).map((part) => part.text), [IMAGE_NOTE, TOOL_IMAGE_NOTE, order])
   // a retry moves the images and their notes once, onto the act reminder
   const retried = withRetryReminder(mapping.request).messages
   assert.equal(mediaOf({ messages: retried }).length, 2)
-  assert.equal(retried.flatMap((message) => message.content).filter((part) => part.text === TOOL_IMAGE_NOTE).length, 1)
-  assert.equal(retried.at(-1).content.at(-1).text, TOOL_IMAGE_NOTE)
+  for (const note of [TOOL_IMAGE_NOTE, order]) {
+    assert.equal(retried.flatMap((message) => message.content).filter((part) => part.text === note).length, 1)
+  }
+  assert.deepEqual(retried.at(-1).content.slice(-2).map((part) => part.text), [TOOL_IMAGE_NOTE, order])
 })
 
 test('tool images from an earlier turn stay [image] text once the user moves on', () => {
@@ -134,8 +138,8 @@ test('the same image from two tool results is sent once, and images past MAX_IMA
   assert.equal(mapping.images.length, MAX_IMAGES)
   assert.equal(new Set(mapping.images.map((item) => item.mediaId)).size, MAX_IMAGES)
   const second = JSON.parse(users(mapping.request)[2].content.find((part) => part.type === 'output_text').text)
-  // 9 new ones fit after the first result's image; the rest are placeholders
-  assert.equal(second.tool_result.content, '[image]\n[image]\n[9 attachment(s) from this tool output are attached to the last user message]')
+  // splitImages keeps 10 of the second result's 12 (two placeholders); its copy of the first image keeps #1
+  assert.equal(second.tool_result.content, '[image]\n[image]\n[attached to the last user message as images #1, #2, #3, #4, #5, #6, #7, #8, #9, #10 of 10]')
 })
 
 test('after a tool-output user message a reply without tools goes to the judge, not to a user-turn retry', () => {
@@ -156,4 +160,66 @@ test('prompt tokens count tool images by pixels, older ones by placeholder', () 
   assert.ok(promptTokens(withImage) > promptTokens(asText))
   assert.ok(promptTokens(withImage) < 2000)
   assert.equal(promptTokens([...withImage, { role: 'assistant', content: 'red' }, { role: 'user', content: 'next' }]), promptTokens([...asText, { role: 'assistant', content: 'red' }, { role: 'user', content: 'next' }]))
+})
+
+const distinct = (index) => {
+  const bytes = Buffer.from(PNG_A, 'base64')
+  return image(Buffer.concat([bytes, Buffer.from([index])]).toString('base64'))
+}
+
+/** A Codex-style edit loop: generate vN, then view_image it as a user message after the (empty) tool result. */
+function editLoop(steps, { withRequestImage = false } = {}) {
+  const messages = [{ role: 'user', content: withRequestImage ? [text('add a red cushion and compare'), image(PNG_B)] : 'add a red cushion and compare' }]
+  for (let step = 1; step <= steps; step++) {
+    messages.push({ role: 'assistant', content: '', tool_calls: [call(`g${step}`, 'exec_command', JSON.stringify({ cmd: `edit --output out/cushion-v${step}.png` }))] })
+    messages.push({ role: 'tool', tool_call_id: `g${step}`, content: `out/cushion-v${step}.png` })
+    messages.push({ role: 'assistant', content: '', tool_calls: [call(`v${step}`, 'view_image', JSON.stringify({ path: `out/cushion-v${step}.png` }))] })
+    messages.push({ role: 'tool', tool_call_id: `v${step}`, content: '' })
+    messages.push({ role: 'user', content: [text('image output from the preceding tool result(s):'), distinct(step)] })
+  }
+  return messages
+}
+
+test('a series of tool images is numbered, and the order note names each result and the newest', () => {
+  const messages = editLoop(3, { withRequestImage: true })
+  const mapping = toVeniceRequest({ model: DEFAULT_MODEL, tools: TOOLS, messages })
+  assert.equal(mapping.images.length, 4)
+  const carriers = users(mapping.request).filter((message) => /image output from the preceding/.test(message.content.find((part) => part.type === 'output_text')?.text ?? ''))
+  assert.deepEqual(
+    carriers.map((message) => JSON.parse(message.content.find((part) => part.type === 'output_text').text).tool_result.content.split('\n').at(-1)),
+    ['[attached to the last user message as image #2 of 4]', '[attached to the last user message as image #3 of 4]', '[attached to the last user message as image #4 of 4]'],
+  )
+  const last = users(mapping.request).at(-1).content
+  // the parts sit in the same order as the numbers
+  assert.deepEqual(last.filter((part) => part.type === 'input_image').map((part) => part.media_id), mapping.images.map((item) => item.mediaId))
+  assert.equal(
+    last.at(-1).text,
+    `${IMAGE_ORDER_PREFIX} #1 from the user's request; #2 output of tool call v1 (cushion-v1.png); #3 output of tool call v2 (cushion-v2.png); #4 output of tool call v3 (cushion-v3.png) - the newest.`,
+  )
+})
+
+test('past MAX_IMAGES the newest tool images are kept, the oldest become [image]', () => {
+  const steps = MAX_IMAGES + 2
+  const messages = editLoop(steps, { withRequestImage: true })
+  const mapping = toVeniceRequest({ model: DEFAULT_MODEL, tools: TOOLS, messages })
+  assert.equal(mapping.images.length, MAX_IMAGES)
+  const sent = new Set(mapping.images.map((item) => item.mediaId))
+  const request = toVeniceRequest({ model: DEFAULT_MODEL, tools: TOOLS, messages: messages.slice(0, 1) })
+  // the request's own image always stays
+  assert.ok(sent.has(request.images[0].mediaId))
+  const newest = toVeniceRequest({ model: DEFAULT_MODEL, tools: TOOLS, messages: [messages[0], ...messages.slice(-5)] })
+  assert.ok(newest.images.every((item) => sent.has(item.mediaId)))
+  // the three oldest results (12 + 1 request > 10) are placeholders
+  const texts = users(mapping.request).map((message) => message.content.find((part) => part.type === 'output_text')?.text ?? '')
+  const carriers = texts.filter((value) => value.includes('image output from the preceding'))
+  assert.equal(carriers.length, steps)
+  assert.deepEqual(carriers.slice(0, 3).map((value) => JSON.parse(value).tool_result.content.split('\n').at(-1)), ['[image]', '[image]', '[image]'])
+  assert.match(carriers.at(-1), /as image #10 of 10\]/)
+  const order = users(mapping.request).at(-1).content.at(-1).text
+  assert.match(order, /#1 from the user's request; #2 output of tool call v4 \(cushion-v4\.png\)/)
+  assert.match(order, /#10 output of tool call v12 \(cushion-v12\.png\) - the newest\.$/)
+  // the token estimate counts what is sent: placeholders for the dropped ones
+  const all = promptTokens(messages)
+  const fewer = promptTokens(editLoop(steps - 3, { withRequestImage: true }))
+  assert.ok(all - fewer < 300, `${all - fewer}`)
 })

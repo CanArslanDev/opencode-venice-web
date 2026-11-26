@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **A series of tool images is numbered, and the newest are kept.** In a
+  Codex edit loop (generate vN, `view_image` it, repeat) every picture lands
+  in the last user message, so the model saw five images with nothing saying
+  which was which; with the Codex dump of a real loop (44 messages, 5 images,
+  `deepseek-v4-1-flash-uncensored`) the tool results only said "1
+  attachment(s) ... attached". Each tool result now says
+  `[attached to the last user message as image #4 of 5]`, and with two or
+  more images a note lists them in order: whose each is, the tool call it
+  answers, the image file the call named, and which is the newest. Past
+  `MAX_IMAGES` (10) the request's images and the **newest** tool images are
+  sent and the oldest become `[image]`; before, the first ten were kept and
+  every later result was dropped, so a long loop showed the model only old
+  pictures. `promptTokens()` counts the same selection (`planImages()`).
+
 - **`reasoning_effort: low` now turns reasoning off**, and
   `VENICE_WEB_REASONING=disabled|adaptive|enabled` forces one mode for every
   chat request. Clients without a `minimal` level (Codex desktop offers

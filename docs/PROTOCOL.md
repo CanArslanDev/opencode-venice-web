@@ -122,6 +122,8 @@ Now `attachmentIndexes()` sends the images of the request and of every tool outp
 | two images that way, "colour of each?" | 15/15 red+blue, 30 wasted retries | 15/15 red+blue, no wasted retry |
 | same three shapes, "say the colour and run `echo hi`" | 45/45 `exec_command` | 44/45 (the 45th: no answer from upstream within 300 s) |
 
+**A series of tool images.** In an edit loop through Codex (2026-11-26: generate `vN`, `view_image` it, compare, repeat) the request reached 5 images, all on the format reminder, while each tool result only said "1 attachment(s) ... attached to the last user message", so nothing told the model which picture answered which call. `planImages()` numbers the images in message order (a copy keeps the first copy's number); each tool result says `[attached to the last user message as image #N of M]`, and with two or more images `imageOrderNote()` adds one line after the notes (`IMAGE_ORDER_PREFIX`): `#1 from the user's request; #2 output of tool call <id> (cushion-v1.png); ... #5 ... - the newest`. The file name is the last image file the call's arguments mention. The line moves with the parts on a retry. Past `MAX_IMAGES` the request's images go first and then the newest tool outputs; the oldest become `[image]` (the first ten used to be kept, which hid every later result). The model in that dump tracked v1 to v8 correctly but did not stop on its own: the task ("add a cushion and keep comparing variations") had no end, so the proxy cannot end it either.
+
 ## 2c. Documents
 
 Measured 2026-11-25 (Windows, through this proxy and through real `opencode run -f`).

@@ -118,6 +118,81 @@ export function attachmentIndexes(messages) {
 }
 
 /**
+ * Which images of the sent messages (`attachmentIndexes()`) travel as bytes,
+ * and their numbers in the last user message. Past `MAX_IMAGES` the request's
+ * own images go first, then the **newest** tool outputs: in a loop that views
+ * one result after another the model must see the latest, and keeping the
+ * oldest instead froze it on the first ten. Numbers follow message order
+ * (1 is the oldest); a copy of an image keeps the first copy's number.
+ *
+ * @returns {{ sent: Set<number>, splits: Map<number, ReturnType<typeof splitImages>>, numbers: Map<string, number> }}
+ */
+export function planImages(messages) {
+  const sent = attachmentIndexes(messages)
+  const request = requestIndex(messages)
+  const splits = new Map([...sent].map((index) => [index, splitImages(messages[index].content)]))
+  const keep = new Set()
+  const take = (index) => {
+    for (const image of splits.get(index)?.images ?? []) if (keep.size < MAX_IMAGES) keep.add(image.mediaId)
+  }
+  if (splits.has(request)) take(request)
+  for (const index of [...sent].filter((index) => index !== request).sort((a, b) => b - a)) take(index)
+  const numbers = new Map()
+  for (const index of [...sent].sort((a, b) => a - b)) {
+    for (const image of splits.get(index).images) {
+      if (keep.has(image.mediaId) && !numbers.has(image.mediaId)) numbers.set(image.mediaId, numbers.size + 1)
+    }
+  }
+  return { sent, splits, numbers }
+}
+
+/** The tool call a tool output answers: its own `tool_call_id`, or the tool result it follows (Codex's view_image user message). */
+function toolCallOf(messages, index) {
+  for (let i = index; i >= 0; i--) {
+    if (messages[i]?.role === 'tool') return messages[i].tool_call_id ?? null
+    if (i !== index && !isToolOutputMessage(messages, i) && messages[i]?.role !== 'system' && messages[i]?.role !== 'developer') break
+  }
+  return null
+}
+
+/** The last image file name a tool call's arguments mention (`…/cushion-v3.png`), to name the picture it returned. */
+function imageNameOf(messages, callId) {
+  if (!callId) return null
+  for (const message of messages) {
+    for (const call of message?.tool_calls ?? []) {
+      if (call?.id !== callId) continue
+      const names = String(call.function?.arguments ?? '').match(/[\w.-]+\.(?:png|jpe?g|webp|gif|bmp)\b/gi)
+      return names?.at(-1) ?? null
+    }
+  }
+  return null
+}
+
+/** Starts the note that lists the attached images in order (`imageOrderNote()`). */
+export const IMAGE_ORDER_PREFIX = 'Order of the images attached here:'
+
+/**
+ * One line naming every attached image when there are two or more: whose it
+ * is, the tool call it came from and the file it shows, newest marked. All of
+ * them sit in the last user message, so without it the model cannot tell the
+ * fifth result of a series from the first (it reported "the first image came
+ * out" on every step of an edit loop, 2026-11-26). Null for fewer than two.
+ */
+export function imageOrderNote(origins, messages) {
+  if (origins.size < 2) return null
+  const numbers = [...origins.keys()].sort((a, b) => a - b)
+  const newest = numbers.filter((number) => !origins.get(number).request).at(-1)
+  const items = numbers.map((number) => {
+    const origin = origins.get(number)
+    if (origin.request) return `#${number} from the user's request`
+    const name = imageNameOf(messages, origin.tool)
+    const source = origin.tool ? `output of tool call ${origin.tool}` : 'tool output'
+    return `#${number} ${source}${name ? ` (${name})` : ''}${number === newest ? ' - the newest' : ''}`
+  })
+  return `${IMAGE_ORDER_PREFIX} ${items.join('; ')}.`
+}
+
+/**
  * Moves every `input_image` and `input_file` part to the last user message. Venice shows the
  * model an image directly only when it sits in the last user message; anywhere
  * earlier the model has to call Venice's `view_media`, and with emulated tools
@@ -129,7 +204,7 @@ export function attachmentIndexes(messages) {
  */
 export function withImagesLast(messages) {
   const isMedia = (part) => part?.type === 'input_image' || part?.type === 'input_file'
-  const isNote = (part) => part?.type === 'output_text' && NOTES.has(part.text)
+  const isNote = (part) => part?.type === 'output_text' && (NOTES.has(part.text) || part.text?.startsWith?.(IMAGE_ORDER_PREFIX))
   const images = []
   const notes = []
   const origin = { user: false, tool: false, files: false }
@@ -684,37 +759,51 @@ export function toVeniceRequest(body, { reasoning } = {}) {
   // request's picture stays visible on every step, a picture a tool returned
   // reaches the model (as `[image]` text it made the model describe a picture
   // it never saw), and an older picture is not resent once the user moves on.
-  const sentIndexes = attachmentIndexes(body.messages)
+  const plan = planImages(body.messages)
   const images = []
   const files = []
   const mediaParts = new Map()
+  // where each numbered image came from, for the order note
+  const origins = new Map()
 
   for (const [index, message] of body.messages.entries()) {
     let text = textOf(message.content)
     const toolOutput = message.role === 'tool' || isToolOutputMessage(body.messages, index)
-    if (sentIndexes.has(index)) {
-      const split = splitImages(message.content)
+    if (plan.sent.has(index)) {
+      const split = plan.splits.get(index)
       const own = []
+      const numbers = []
       let dropped = 0
+      let ownFiles = 0
       for (const image of split.images) {
-        if (images.some((known) => known.mediaId === image.mediaId)) continue
-        if (images.length >= MAX_IMAGES) {
+        const number = plan.numbers.get(image.mediaId)
+        if (!number) {
           dropped++
           continue
         }
+        if (!numbers.includes(number)) numbers.push(number)
+        if (images.some((known) => known.mediaId === image.mediaId)) continue
         images.push(image)
         own.push({ type: 'input_image', media_id: image.mediaId, detail: 'auto' })
+        origins.set(number, toolOutput ? { tool: toolCallOf(body.messages, index) } : { request: true })
       }
       for (const file of split.files) {
         if (files.some((known) => known.mediaId === file.mediaId)) continue
         if (files.length >= MAX_FILES) throw new AttachmentError(`at most ${MAX_FILES} files per request`)
         files.push(file)
         own.push({ type: 'input_file', media_id: file.mediaId, filename: file.filename })
+        ownFiles++
       }
       const lines = [split.text]
-      // the tool result says where its pictures went, so the note can point back to it
-      if (toolOutput && own.length) lines.push(`[${own.length} attachment(s) from this tool output are attached to the last user message]`)
+      // older tool pictures past MAX_IMAGES stay placeholders
       for (let i = 0; i < dropped; i++) lines.push('[image]')
+      // the tool result says which of the attached pictures are its own, so the
+      // model can tell a series of results apart (all of them sit together in
+      // the last user message)
+      if (toolOutput && numbers.length) {
+        lines.push(`[attached to the last user message as ${numbers.length === 1 ? 'image' : 'images'} ${numbers.map((number) => `#${number}`).join(', ')} of ${plan.numbers.size}]`)
+      }
+      if (toolOutput && ownFiles) lines.push(`[${ownFiles} file(s) from this tool output are attached to the last user message]`)
       text = lines.filter(Boolean).join('\n')
       mediaParts.set(index, own)
     }
@@ -796,11 +885,18 @@ export function toVeniceRequest(body, { reasoning } = {}) {
     })
   }
 
+  const placed = withImagesLast(messages)
+  const order = imageOrderNote(origins, body.messages)
+  if (order) {
+    const last = placed.findLastIndex((message) => message.role === 'user')
+    placed[last] = { ...placed[last], content: [...placed[last].content, { type: 'output_text', text: order, annotations: [] }] }
+  }
+
   return {
     request: {
       modelId: upstreamId(body.model),
       systemPrompt: { instructions: instructions.filter(Boolean).join('\n\n') },
-      messages: withImagesLast(messages),
+      messages: placed,
       tools: [],
       clientTools: [],
       ...reasoningMode(body, { force: reasoning }),
@@ -1428,22 +1524,28 @@ function documentTokens(file, texts) {
  */
 export function promptTokens(messages, { texts } = {}) {
   if (!Array.isArray(messages)) return 0
-  const sent = attachmentIndexes(messages)
+  let plan
+  try {
+    plan = planImages(messages)
+  } catch {
+    plan = null // an attachment the request will refuse anyway: count placeholders
+  }
+  const counted = new Set()
   let total = 0
   messages.forEach((message, index) => {
     if (!message) return
     total += 4 // role and message framing
     const content = message.content
-    if (sent.has(index) && Array.isArray(content)) {
-      let split
-      try {
-        split = splitImages(content)
-      } catch {
-        split = null // an attachment the request will refuse anyway: count its placeholder
-      }
+    if (plan?.sent.has(index) && Array.isArray(content)) {
+      const split = plan.splits.get(index)
       if (split) {
         total += countTokens(split.text)
-        for (const image of split.images) total += imageTokens(image.data)
+        for (const image of split.images) {
+          // an image past MAX_IMAGES is sent as `[image]`, a copy only once
+          if (!plan.numbers.has(image.mediaId)) total += countTokens('[image]')
+          else if (!counted.has(image.mediaId)) total += imageTokens(image.data)
+          counted.add(image.mediaId)
+        }
         for (const file of split.files) total += countTokens(file.filename) + documentTokens(file, texts)
       } else total += countTokens(textOf(content))
     } else {
