@@ -627,10 +627,23 @@ export function textOf(content) {
     .join('\n')
 }
 
-/** OpenAI reasoning_effort -> the web endpoint's three-valued switch. */
-export function reasoningMode(body) {
-  const effort = body?.reasoning_effort ?? body?.reasoningEffort ?? body?.reasoning?.effort
-  if (!effort || ['none', 'minimal', 'disabled', 'off'].includes(effort)) return { reasoningMode: 'disabled' }
+/** The values of the web endpoint's reasoning switch. */
+export const REASONING_MODES = new Set(['disabled', 'adaptive', 'enabled'])
+
+/**
+ * OpenAI reasoning_effort -> the web endpoint's three-valued switch: nothing,
+ * `none`, `minimal`, `low` (and `off` / `disabled`) turn it off, `medium` (and
+ * `auto` / `adaptive`) is `adaptive`, `high` and anything above it is
+ * `enabled`. `low` is off because clients without a `minimal` level (Codex
+ * desktop offers low/medium/high/...) have no other way to turn it off, and
+ * reasoning is what brings the native tool calls that Venice answers with "Tool
+ * not found" (docs/PROTOCOL.md §4.7). `force` (VENICE_WEB_REASONING) wins.
+ */
+export function reasoningMode(body, { force } = {}) {
+  if (REASONING_MODES.has(force)) return { reasoningMode: force }
+  const raw = body?.reasoning_effort ?? body?.reasoningEffort ?? body?.reasoning?.effort
+  const effort = typeof raw === 'string' ? raw.trim().toLowerCase() : raw
+  if (!effort || ['none', 'minimal', 'low', 'disabled', 'off'].includes(effort)) return { reasoningMode: 'disabled' }
   if (['adaptive', 'auto', 'medium'].includes(effort)) return { reasoningMode: 'adaptive' }
   return { reasoningMode: 'enabled' }
 }
@@ -648,7 +661,7 @@ function safeJson(value) {
  *
  * @returns {{ request: object, toolNames: Set<string>, toolSchemas: Map<string, object>, emulatedTools: boolean, images: {mediaId: string, mimeType: string, data: Buffer}[], files: {mediaId: string, mimeType: string, data: Buffer, filename: string}[], media: object[] }}
  */
-export function toVeniceRequest(body) {
+export function toVeniceRequest(body, { reasoning } = {}) {
   if (!MODELS[body.model]) {
     throw new Error(`unknown model: ${body.model}. Known: ${Object.keys(MODELS).join(', ')}`)
   }
@@ -790,7 +803,7 @@ export function toVeniceRequest(body) {
       messages: withImagesLast(messages),
       tools: [],
       clientTools: [],
-      ...reasoningMode(body),
+      ...reasoningMode(body, { force: reasoning }),
     },
     toolNames: names,
     toolSchemas: new Map(tools.map((tool) => [tool.function.name, tool.function.parameters ?? {}])),

@@ -88,4 +88,11 @@ export const imageRoute = process.env.VENICE_WEB_IMAGE_ROUTE === 'agent' ? 'agen
  * the agent route would silently answer with another model (docs/PROTOCOL.md
  * §2d). `classic` or `agent` forces one route for every model.
  */
+/**
+ * Forces the reasoning switch of every chat request: `disabled`, `adaptive`
+ * or `enabled`. Unset (or anything else) follows each request's
+ * `reasoning_effort` (emulate.mjs `reasoningMode`).
+ */
+export const reasoningOverride = ['disabled', 'adaptive', 'enabled'].includes(process.env.VENICE_WEB_REASONING) ? process.env.VENICE_WEB_REASONING : undefined
+
 export const chatRoute = ['classic', 'agent'].includes(process.env.VENICE_WEB_CHAT_ROUTE) ? process.env.VENICE_WEB_CHAT_ROUTE : 'auto'

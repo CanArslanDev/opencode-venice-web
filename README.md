@@ -254,6 +254,7 @@ All environment variables are optional; the defaults are what the installer uses
 | `VENICE_WEB_JUDGE` | on | `0` turns off the judge that checks whether a turn may end |
 | `VENICE_WEB_JUDGE_MODEL` | `deepseek-v4-1-flash-uncensored` | model for the judge (empty: the request's own model) |
 | `VENICE_WEB_CHAT_ROUTE` | `auto` | chat route: `auto` (each model's own), `classic`, `agent` |
+| `VENICE_WEB_REASONING` | follow the request | force the reasoning switch of every chat request: `disabled`, `adaptive`, `enabled` |
 | `VENICE_WEB_JUDGE_TIMEOUT` | `45000` | judge timeout (ms); a late judge keeps the reply |
 | `VENICE_WEB_MIDDLEFACE` | `0.1.1128` | `x-venice-middleface-version` header |
 | `VENICE_WEB_CLERK_VERSION` | pinned | Clerk frontend API version query |
@@ -273,6 +274,7 @@ All environment variables are optional; the defaults are what the installer uses
 ## Limitations (read these)
 
 - **Not the official API.** The web endpoints are undocumented and may change. `middleface` version headers are pinned to what the current web client sends.
+- **Reasoning and tool calls.** `reasoning_effort` maps onto Venice's switch: nothing, `none`, `minimal` and `low` turn reasoning off, `medium` is `adaptive`, `high` and anything above it is `enabled`; `VENICE_WEB_REASONING` overrides it for every request. With reasoning on, the agent-route models sometimes call a tool with their own native syntax instead of the JSON envelope; Venice answers that with "Tool not found" inside the response. Measured with Codex-style requests: 11-27% of first attempts with reasoning, 1 step in 389 requests without. The proxy stops such a response at the first native call and asks again without reasoning (89 of 90 expected tool calls came through), but each one costs a few seconds, so for tool-heavy work set the effort to `low` or `VENICE_WEB_REASONING=disabled`. Details: [docs/PROTOCOL.md §4.7](docs/PROTOCOL.md).
 - **Tool calls are emulated.** The web endpoint ignores OpenAI `tools`, so the model answers with a JSON envelope that the proxy turns into `tool_calls`. This is reliable in practice (see [docs/PROTOCOL.md](docs/PROTOCOL.md) for the measured technique) but it is a prompt contract, not a native feature: `tool_choice: required` is advisory, and with tools in the request the answer arrives buffered rather than token-by-token (reasoning still streams live).
 - **Sampling controls only on the classic route.** `temperature`, `top_p` and `max_tokens` are applied for classic-route models and ignored on the agent route (`deepseek-v4-1-flash-uncensored`, `deepseek-v4-1-flash`, `z-ai-glm-5-3-flash`).
 - **Small context on most models.** The classic route reads about 40k tokens on most models and cuts longer prompts from the start silently; the agent route summarises prompts past ~300k (DeepSeek Uncensored) or ~600k tokens (the other two). See [Models](#models).

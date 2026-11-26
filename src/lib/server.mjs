@@ -10,7 +10,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
-import { apiBase, chatRoute, debug, dumpFile, host, imageRoute, judgeEnabled, judgeModel, judgeTimeoutMs, port, providerID } from './config.mjs'
+import { apiBase, chatRoute, debug, dumpFile, host, imageRoute, judgeEnabled, judgeModel, judgeTimeoutMs, port, providerID, reasoningOverride } from './config.mjs'
 import {
   applyFallback,
   buildJudgeRequest,
@@ -689,7 +689,7 @@ async function handleChat(req, res) {
   const body = await readJson(req)
   const requested = body.model
   body.model = resolveModelId(body.model)
-  const mapping = toVeniceRequest(body)
+  const mapping = toVeniceRequest(body, { reasoning: reasoningOverride })
   mapping.route = routeFor(body.model, chatRoute)
   const stale = staleConfigHint(requested, promptTokens(body.messages), mapping.route)
   const staleKey = stale && (MODELS[requested] ? `window:${requested}` : `alias:${requested}`)

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **`reasoning_effort: low` now turns reasoning off**, and
+  `VENICE_WEB_REASONING=disabled|adaptive|enabled` forces one mode for every
+  chat request. Clients without a `minimal` level (Codex desktop offers
+  low / medium / high and up) had no way to turn reasoning off, and with
+  reasoning on the agent-route models call tools natively in 11-27% of first
+  attempts (1 step in 389 requests without). `medium` stays `adaptive`,
+  `high` and every other value `enabled`; effort strings are read
+  case-insensitively.
+
 - **Images returned by a tool reach the model.** An image inside a
   `role: "tool"` message (`image_url` parts) used to become `[image]` text, and
   the model, asked for its colour, described a picture it had never seen (1 of

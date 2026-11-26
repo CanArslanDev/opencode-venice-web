@@ -477,7 +477,7 @@ OpenAI → Venice:
 | `assistant` text | envelope `{"content": …, "tool_calls": []}` |
 | `assistant.tool_calls` | envelope with `tool_calls: [{ id, name, arguments }]` |
 | `tool` message | `user` message with `{"tool_result": {…}}` |
-| `reasoning_effort` | `reasoningMode`: `none|minimal|disabled` → `disabled`, `medium|auto|adaptive` → `adaptive`, else `enabled` |
+| `reasoning_effort` | `reasoningMode`: none given, `none|minimal|low|off|disabled` → `disabled`, `medium|auto|adaptive` → `adaptive`, `high` and any other value → `enabled`; `VENICE_WEB_REASONING` forces one for every request. `low` was `enabled` until 2026-11-26: Codex desktop offers no level below `low`, and reasoning brings native tool calls (§4.7) |
 | `tools` | prompt text (see §4) |
 | `stream` | response framing (upstream is always a stream) |
 
