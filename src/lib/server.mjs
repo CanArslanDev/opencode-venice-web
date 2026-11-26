@@ -30,7 +30,7 @@ import {
   toVeniceRequest,
   withRetryReminder,
 } from './emulate.mjs'
-import { DEFAULT_MODEL, IMAGE_MODELS, MODELS, resolveModelId, routeFor, staleConfigHint, upstreamId } from './models.mjs'
+import { DEFAULT_MODEL, EDIT_MODELS, IMAGE_MODELS, MODELS, resolveModelId, routeFor, staleConfigHint, upstreamId } from './models.mjs'
 import {
   CLASSIC_PATH,
   answerStarted,
@@ -48,6 +48,7 @@ import { AGENT_IMAGE_PATH, INFERENCE_PATH, SignInError, loadSession, resetSessio
 import {
   ImageRequestError,
   agentRequest,
+  checkPromptLimit,
   editInstruction,
   generationInstruction,
   imageCollector,
@@ -59,6 +60,7 @@ import {
   pickImageModel,
   seedsFor,
 } from './imagegen.mjs'
+import { imageModelCatalog } from './image-catalog.mjs'
 import { STUDIO_IMAGE_PATH, parseStudioOptions, imageSize, studioImageMeta, studioImageRequest, studioSeeds } from './studio.mjs'
 
 const json = (res, status, payload) => {
@@ -584,6 +586,7 @@ async function handleImageGenerations(req, res) {
   const n = parseCount(body.n)
   const format = parseResponseFormat(body.response_format)
   if (imageRoute === 'studio') return answerStudioImages(res, body.prompt, model, n, body, format)
+  checkPromptLimit(body.prompt, IMAGE_MODELS[model], model)
   const size = parseSize(body.size)
   log(`-> image ${model} • n=${n}${size ? ` • ${size.width}x${size.height}` : ''} • ${preview(body.prompt, 80)}`)
   const instructions = seedsFor(n).map((seed) => generationInstruction({ prompt: body.prompt, model, size, seed }))
@@ -639,6 +642,7 @@ async function handleImageEdits(req, res) {
   }
   if (typeof fields.prompt !== 'string' || !fields.prompt.trim()) throw new ImageRequestError('prompt is required')
   const model = pickEditModel(fields.model)
+  checkPromptLimit(fields.prompt, EDIT_MODELS[model], model)
   const n = parseCount(fields.n)
   const format = parseResponseFormat(fields.response_format)
   const images = await editImages(values)
@@ -779,6 +783,10 @@ export function createServer() {
 
       if (req.method === 'GET' && (url.pathname === '/v1/models' || url.pathname === '/models')) {
         return json(res, 200, modelList())
+      }
+
+      if (req.method === 'GET' && (url.pathname === '/v1/images/models' || url.pathname === '/images/models')) {
+        return json(res, 200, imageModelCatalog(imageRoute))
       }
 
       if (req.method === 'POST' && url.pathname.endsWith('/images/generations')) {

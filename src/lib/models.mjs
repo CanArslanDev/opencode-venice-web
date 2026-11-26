@@ -247,22 +247,29 @@ const KREA_SIZES = {
   },
 }
 
+/**
+ * `nsfw`: the catalogue serves the model uncensored (`apiUncensored`, and for
+ * generation also `trainedOnAdultContent`; read 2026-11-26). On the Studio
+ * route adult pictures still come back blurred unless the request sets
+ * `safe_mode: false`. z-image-turbo, Venice SD35 and FireRed are not
+ * uncensored models.
+ */
 export const IMAGE_MODELS = {
-  'z-image-turbo': { name: 'Z-Image Turbo', agent: true, promptLimit: 7500, steps: { default: 8, max: 8, fixed: true }, negativePrompt: false, divisor: 8 },
-  chroma: { name: 'Chroma', agent: true, promptLimit: 7500, steps: { default: 10, max: 10, fixed: true }, negativePrompt: false, divisor: 8 },
-  'wai-illu': { name: 'Anime (WAI)', agent: true, promptLimit: 1500, steps: { default: 25, max: 30 }, cfg: { default: 5, min: 0, max: 10 }, negativePrompt: true, divisor: 16 },
-  'krea-2-turbo': { name: 'Krea 2 Turbo', agent: false, promptLimit: 5000, steps: { default: 8, max: 8, fixed: true }, negativePrompt: false, divisor: 8, sizes: KREA_SIZES, defaultResolution: '1K' },
-  'stable-diffusion-3.5-rev2': { name: 'Venice SD35', agent: false, promptLimit: 1500, steps: { default: 25, max: 30 }, cfg: { default: 3.5, min: 0, max: 20 }, negativePrompt: true, divisor: 16 },
-  'lustify-sdxl': { name: 'Lustify SDXL', agent: false, promptLimit: 1500, steps: { default: 20, max: 50 }, cfg: { default: 5, min: 0, max: 10 }, negativePrompt: true, divisor: 8 },
-  'lustify-v8': { name: 'Lustify v8', agent: false, promptLimit: 1500, steps: { default: 30, max: 50 }, cfg: { default: 3.5, min: 1.5, max: 10 }, negativePrompt: true, divisor: 8 },
+  'z-image-turbo': { name: 'Z-Image Turbo', nsfw: false, agent: true, promptLimit: 7500, steps: { default: 8, max: 8, fixed: true }, negativePrompt: false, divisor: 8 },
+  chroma: { name: 'Chroma', nsfw: true, agent: true, promptLimit: 7500, steps: { default: 10, max: 10, fixed: true }, negativePrompt: false, divisor: 8 },
+  'wai-illu': { name: 'Anime (WAI)', nsfw: true, agent: true, promptLimit: 1500, steps: { default: 25, max: 30 }, cfg: { default: 5, min: 0, max: 10 }, negativePrompt: true, divisor: 16 },
+  'krea-2-turbo': { name: 'Krea 2 Turbo', nsfw: true, agent: false, promptLimit: 5000, steps: { default: 8, max: 8, fixed: true }, negativePrompt: false, divisor: 8, sizes: KREA_SIZES, defaultResolution: '1K' },
+  'stable-diffusion-3.5-rev2': { name: 'Venice SD35', nsfw: false, agent: false, promptLimit: 1500, steps: { default: 25, max: 30 }, cfg: { default: 3.5, min: 0, max: 20 }, negativePrompt: true, divisor: 16 },
+  'lustify-sdxl': { name: 'Lustify SDXL', nsfw: true, agent: false, promptLimit: 1500, steps: { default: 20, max: 50 }, cfg: { default: 5, min: 0, max: 10 }, negativePrompt: true, divisor: 8 },
+  'lustify-v8': { name: 'Lustify v8', nsfw: true, agent: false, promptLimit: 1500, steps: { default: 30, max: 50 }, cfg: { default: 3.5, min: 1.5, max: 10 }, negativePrompt: true, divisor: 8 },
 }
 
 export const DEFAULT_IMAGE_MODEL = 'z-image-turbo'
 
 /** Free image *editing* models (the catalogue's `inpaint` section). */
 export const EDIT_MODELS = {
-  'firered-image-edit': { name: 'FireRed' },
-  'qwen-edit-uncensored': { name: 'Qwen Edit Uncensored' },
+  'firered-image-edit': { name: 'FireRed', nsfw: false, promptLimit: 1500 },
+  'qwen-edit-uncensored': { name: 'Qwen Edit Uncensored', nsfw: true, promptLimit: 1500 },
 }
 
 export const DEFAULT_EDIT_MODEL = 'firered-image-edit'

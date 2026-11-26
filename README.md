@@ -186,17 +186,25 @@ Generation goes through the web app's Studio route, which takes the model and it
 
 A setting the model does not take is answered with a 400 instead of being dropped (Venice itself ignores it silently).
 
+**Discovering the models.** `GET /v1/images/models` lists this instance's image models, generation and edit apart, each with its id, name, whether it is the default, `nsfw`, and the controls it really takes on the active route, with defaults, limits and options. It is built from the same tables and constants the validation uses, so whatever it lists is accepted. With `VENICE_WEB_IMAGE_ROUTE=agent` it lists only the agent's models and the agent's controls (`prompt`, `n`, `size`, `response_format`). `/v1/models` stays the chat model list.
+
+```sh
+curl -s 127.0.0.1:3456/v1/images/models | python3 -m json.tool | head -40
+```
+
 What each model takes, measured one setting at a time against the same seed (2026-11-25):
 
-| model | seed | steps | negative_prompt | cfg_scale | style_preset | watermark | webp | prompt limit | notes |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `z-image-turbo` | yes | no | no | no | yes | yes | yes | 7500 | |
-| `chroma` | yes | no | no | no | yes | yes | yes | 7500 | output 1.5x the size asked for |
-| `wai-illu` | yes | yes | yes | yes | yes | yes | yes | 1500 | |
-| `krea-2-turbo` | yes | no | no | no | yes | yes | yes | 5000 | size from `aspect_ratio` + `resolution` |
-| `stable-diffusion-3.5-rev2` | yes | yes | yes | yes | yes | yes | yes | 1500 | |
-| `lustify-sdxl` | yes | yes | yes | yes | yes | yes | yes | 1500 | |
-| `lustify-v8` | yes | yes | yes | yes | yes | yes | yes | 1500 | output 1.5x the size asked for |
+| model | NSFW | seed | steps | negative_prompt | cfg_scale | style_preset | watermark | webp | prompt limit | notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `z-image-turbo` | no | yes | no | no | no | yes | yes | yes | 7500 | |
+| `chroma` | yes | yes | no | no | no | yes | yes | yes | 7500 | output 1.5x the size asked for |
+| `wai-illu` | yes (anime) | yes | yes | yes | yes | yes | yes | yes | 1500 | |
+| `krea-2-turbo` | yes | yes | no | no | no | yes | yes | yes | 5000 | size from `aspect_ratio` + `resolution` |
+| `stable-diffusion-3.5-rev2` | no | yes | yes | yes | yes | yes | yes | yes | 1500 | |
+| `lustify-sdxl` | yes | yes | yes | yes | yes | yes | yes | yes | 1500 | |
+| `lustify-v8` | yes | yes | yes | yes | yes | yes | yes | yes | 1500 | output 1.5x the size asked for |
+
+**NSFW** is what Venice's catalogue says (`apiUncensored`, and for generation `trainedOnAdultContent`, read 2026-11-26). For edits, `qwen-edit-uncensored` is uncensored and `firered-image-edit` is not. On the Studio route adult pictures come back blurred unless the request sends `safe_mode: false`; the other models are not trained for adult content and are the better pick for everything else.
 
 The same seed gives the same picture (byte for byte on most models; `wai-illu` and `lustify-sdxl` vary slightly from run to run). `VENICE_WEB_IMAGE_ROUTE=agent` switches back to Venice's agent route (only `z-image-turbo`, `chroma`, `wai-illu`, and none of the settings above).
 

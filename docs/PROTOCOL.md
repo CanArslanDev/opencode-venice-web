@@ -517,6 +517,8 @@ None of these fields is refused upstream: a model that does not take one ignores
 
 Unlike the agent route this one takes `modelId` directly, so the free models the agent refuses (SD35, Lustify) are offered here. The proxy warns when `x-venice-model-id` differs from the model asked for.
 
+**Catalogue fields per image model** (`GET /api/app/models`, sections `image` and `inpaint`, read 2026-11-26): `apiUncensored` (true on `chroma`, `wai-illu`, `krea-2-turbo`, `lustify-sdxl`, `lustify-v8`, `qwen-edit-uncensored`), `trainedOnAdultContent` (the same generation models; `wai-illu` also `trainedOnHentaiContent`), `supportsSteps` / `supportsNegativePrompts` / `supportsStylePresents` (they agree with the measured table: steps and negative prompts only on `wai-illu`, SD35 and Lustify, style presets everywhere), `settings.promptCharacterLimit` (1500 on both free edit models), `settings.cfgScale.scale`, `settings.steps`, `settings.widthHeightDivisor` and, for `krea-2-turbo`, `settings.customSizeMapping`. `IMAGE_MODELS` / `EDIT_MODELS` carry these as `nsfw`, `promptLimit`, `steps`, `cfg`, `divisor` and `sizes`; `GET /v1/images/models` (`src/lib/image-catalog.mjs`) publishes them with the controls of the active route.
+
 Edits on the Studio page use `POST /api/inference/multi-edit` (multipart: the fields of `{ modelId, prompt, requestId, aspectRatio?, resolution?, thinkingLevel?, … }` each as its own form field, the pictures as `files`, an optional `mask`) and answer bytes the same way. The proxy does not use it yet: edits stay on the agent route (§5b).
 
 ## 6. Free-model catalogue

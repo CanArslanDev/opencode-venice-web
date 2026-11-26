@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **`GET /v1/images/models`.** Clients can discover the image models of the
+  instance: generation and edit apart, each with id, name, `default`, `nsfw`
+  and the controls it really takes on the active route (type, default, limits,
+  options). Built from `IMAGE_MODELS` / `EDIT_MODELS` and the validation
+  constants (`src/lib/image-catalog.mjs`); with `VENICE_WEB_IMAGE_ROUTE=agent`
+  only the agent's models and controls. `/v1/models` is unchanged.
+- **NSFW marked on the image models** (`nsfw` in models.mjs, from the
+  catalogue's `apiUncensored` / `trainedOnAdultContent`): `chroma`,
+  `wai-illu`, `krea-2-turbo`, `lustify-sdxl`, `lustify-v8` and
+  `qwen-edit-uncensored`; not `z-image-turbo`, `stable-diffusion-3.5-rev2` or
+  `firered-image-edit`. Studio pictures stay blurred unless `safe_mode: false`.
+- The prompt limit is now checked on the agent route and on edits too (1500
+  characters for both edit models, the catalogue's `promptCharacterLimit`).
+
 - **Classic-route variants of DeepSeek 1017 and GLM 5.3 Flash.**
   `deepseek-v4-1-flash-classic` and `z-ai-glm-5-3-flash-classic` send the same
   model through the classic route (`upstream` in models.mjs; the override

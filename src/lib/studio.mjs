@@ -10,7 +10,7 @@
  * Pure: reads the client's options and builds the request. No I/O.
  */
 import { randomUUID } from 'node:crypto'
-import { ImageRequestError, parseSize } from './imagegen.mjs'
+import { checkPromptLimit, ImageRequestError, parseSize } from './imagegen.mjs'
 
 /** Path of the Studio generation route on `outerface.venice.ai`. */
 export const STUDIO_IMAGE_PATH = '/api/inference/image'
@@ -19,8 +19,15 @@ export const STUDIO_IMAGE_PATH = '/api/inference/image'
 export const ASPECT_RATIOS = ['1:1', '5:4', '4:3', '3:2', '16:9', '21:9', '4:5', '3:4', '2:3', '9:16', '9:21']
 
 /** The route refuses larger seeds ("Number must be less than or equal to 999999999", 2026-11-25). */
-const MAX_SEED = 999_999_999
-const MAX_NEGATIVE_PROMPT = 1500
+/** Largest seed the route takes (measured: 999999999 passes, 1000000000 is a 400). */
+export const MAX_SEED = 999_999_999
+export const MAX_NEGATIVE_PROMPT = 1500
+
+/** `output_format` values; the route makes no JPEG. */
+export const OUTPUT_FORMATS = ['png', 'webp']
+
+/** Defaults of the Studio switches, as `parseStudioOptions()` applies them. */
+export const STUDIO_DEFAULTS = { output_format: 'png', hide_watermark: true, safe_mode: true, embed_exif: false }
 
 function bool(value, name, fallback) {
   if (value == null || value === '') return fallback
@@ -48,9 +55,9 @@ export function parseSeed(value) {
 
 /** `png` (default) or `webp`; the route makes no JPEG. */
 export function parseOutputFormat(value) {
-  if (value == null || value === '') return 'png'
-  if (value === 'png' || value === 'webp') return value
-  throw new ImageRequestError(`output_format must be png or webp, got ${JSON.stringify(value)}`)
+  if (value == null || value === '') return STUDIO_DEFAULTS.output_format
+  if (OUTPUT_FORMATS.includes(value)) return value
+  throw new ImageRequestError(`output_format must be ${OUTPUT_FORMATS.join(' or ')}, got ${JSON.stringify(value)}`)
 }
 
 const roundTo = (value, divisor) => Math.max(divisor, Math.round(value / divisor) * divisor)
@@ -126,15 +133,13 @@ export function resolveDimensions(info, { size, aspectRatio, resolution }) {
  * otherwise. A setting the model does not take is a 400, not silently dropped.
  */
 export function parseStudioOptions(body, model, info) {
-  if (info.promptLimit && typeof body.prompt === 'string' && body.prompt.length > info.promptLimit) {
-    throw new ImageRequestError(`${model} takes a prompt of at most ${info.promptLimit} characters, got ${body.prompt.length}`)
-  }
+  checkPromptLimit(body.prompt, info, model)
   const options = {
     seed: parseSeed(body.seed),
     format: parseOutputFormat(body.output_format),
-    hideWatermark: bool(body.hide_watermark, 'hide_watermark', true),
-    safeMode: bool(body.safe_mode, 'safe_mode', true),
-    embedExif: bool(body.embed_exif, 'embed_exif', false),
+    hideWatermark: bool(body.hide_watermark, 'hide_watermark', STUDIO_DEFAULTS.hide_watermark),
+    safeMode: bool(body.safe_mode, 'safe_mode', STUDIO_DEFAULTS.safe_mode),
+    embedExif: bool(body.embed_exif, 'embed_exif', STUDIO_DEFAULTS.embed_exif),
     stylePreset: body.style_preset == null || body.style_preset === '' ? null : String(body.style_preset),
     negativePrompt: null,
     steps: info.steps?.default ?? 20,
